@@ -1,9 +1,10 @@
 const express = require('express');
+const cors = require('cors'); // <-- LÍNEA NUEVA
 require('./config/db'); 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware IMPORTANTÍSIMO para leer JSON
+app.use(cors()); // <-- LÍNEA NUEVA (Le da permiso a todos los dominios)
 app.use(express.json());
 
 // Importar rutas del REQ 1
