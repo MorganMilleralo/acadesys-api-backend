@@ -5,7 +5,8 @@ const pool = require('../config/db');
 // 1. LISTAR PERFILES (GET)
 router.get('/perfiles', async (req, res) => {
     try {
-        const [rows] = await pool.query("SELECT * FROM perfil WHERE EstadoRegistro = 'Activo'");
+        // Cambiamos 'Activo' por 1
+        const [rows] = await pool.query("SELECT * FROM perfil WHERE EstadoRegistro = 1");
         res.json(rows);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -17,8 +18,8 @@ router.post('/perfiles', async (req, res) => {
     try {
         const { NombrePerfil, Descripcion } = req.body;
         const [result] = await pool.query(
-            // Aquí cambiamos NombrePerfil por Nombre
-            "INSERT INTO perfil (Nombre, Descripcion, EstadoRegistro) VALUES (?, ?, 'Activo')",
+            // Cambiamos 'Activo' por 1 (y mantenemos la columna Nombre que corregimos antes)
+            "INSERT INTO perfil (Nombre, Descripcion, EstadoRegistro) VALUES (?, ?, 1)",
             [NombrePerfil, Descripcion]
         );
         res.json({ message: 'Perfil creado con éxito', id: result.insertId });
@@ -33,7 +34,6 @@ router.put('/perfiles/:id', async (req, res) => {
         const { id } = req.params;
         const { NombrePerfil, Descripcion } = req.body;
         await pool.query(
-            // Aquí también cambiamos NombrePerfil por Nombre
             "UPDATE perfil SET Nombre = ?, Descripcion = ? WHERE IdPerfil = ?",
             [NombrePerfil, Descripcion, id]
         );
@@ -48,7 +48,8 @@ router.delete('/perfiles/:id', async (req, res) => {
     try {
         const { id } = req.params;
         await pool.query(
-            "UPDATE perfil SET EstadoRegistro = 'Inactivo' WHERE IdPerfil = ?",
+            // Cambiamos 'Inactivo' por 0
+            "UPDATE perfil SET EstadoRegistro = 0 WHERE IdPerfil = ?",
             [id]
         );
         res.json({ message: 'Perfil eliminado lógicamente' });
