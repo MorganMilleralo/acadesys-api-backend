@@ -7,11 +7,14 @@ const port = process.env.PORT || 3000;
 app.use(cors()); // (Le da permiso a todos los dominios)
 app.use(express.json());
 
-// Importar rutas del REQ 1
+// Importar rutas
 const perfilRoutes = require('./routes/perfil.routes');
 const menuRoutes = require('./routes/menu.routes');
+const usuarioRoutes = require('./routes/usuario.routes'); // <-- AQUÍ SE IMPORTA
+
 app.use('/api', perfilRoutes);
 app.use('/api', menuRoutes);
+app.use('/api', usuarioRoutes); // <-- AQUÍ SE USA
 
 app.get('/ping', (req, res) => {
     res.send('¡Hola Mundo! El backend de AcadeSys en Node.js está vivo y listo para el Frontend.');
