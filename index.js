@@ -4,7 +4,7 @@ require('./config/db');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(cors()); (Le da permiso a todos los dominios)
+app.use(cors()); // (Le da permiso a todos los dominios)
 app.use(express.json());
 
 // Importar rutas del REQ 1
