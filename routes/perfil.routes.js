@@ -17,7 +17,8 @@ router.post('/perfiles', async (req, res) => {
     try {
         const { NombrePerfil, Descripcion } = req.body;
         const [result] = await pool.query(
-            "INSERT INTO perfil (NombrePerfil, Descripcion, EstadoRegistro) VALUES (?, ?, 'Activo')",
+            // Aquí cambiamos NombrePerfil por Nombre
+            "INSERT INTO perfil (Nombre, Descripcion, EstadoRegistro) VALUES (?, ?, 'Activo')",
             [NombrePerfil, Descripcion]
         );
         res.json({ message: 'Perfil creado con éxito', id: result.insertId });
@@ -32,7 +33,8 @@ router.put('/perfiles/:id', async (req, res) => {
         const { id } = req.params;
         const { NombrePerfil, Descripcion } = req.body;
         await pool.query(
-            "UPDATE perfil SET NombrePerfil = ?, Descripcion = ? WHERE IdPerfil = ?",
+            // Aquí también cambiamos NombrePerfil por Nombre
+            "UPDATE perfil SET Nombre = ?, Descripcion = ? WHERE IdPerfil = ?",
             [NombrePerfil, Descripcion, id]
         );
         res.json({ message: 'Perfil actualizado con éxito' });
