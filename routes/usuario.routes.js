@@ -53,5 +53,45 @@ router.post('/usuarios', async (req, res) => {
         connection.release();
     }
 });
+router.get('/usuarios', async (req, res) => {
+    try {
+        // Filtrando estrictamente con EstadoRegistro = 1
+        const [rows] = await pool.query("SELECT * FROM Usuario WHERE EstadoRegistro = 1");
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 3. MODIFICAR USUARIO (PUT)
+router.put('/usuarios/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico } = req.body;
+        
+        await pool.query(
+            "UPDATE Usuario SET DNI=?, Nombres=?, ApellidoPaterno=?, ApellidoMaterno=?, Celular=?, CorreoElectronico=? WHERE IdUsuario=?",
+            [DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, id]
+        );
+        res.json({ message: 'Usuario actualizado con éxito' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 4. ELIMINACIÓN LÓGICA (DELETE)
+router.delete('/usuarios/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        // El borrado debe ser un UPDATE EstadoRegistro = 0
+        await pool.query(
+            "UPDATE Usuario SET EstadoRegistro = 0 WHERE IdUsuario = ?",
+            [id]
+        );
+        res.json({ message: 'Usuario eliminado lógicamente' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
 module.exports = router;
