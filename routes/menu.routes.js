@@ -28,16 +28,16 @@ router.get('/menus/:idPadre/submenus', async (req, res) => {
     }
 });
 
-// 3. Crear una nueva Opción de Menú (POST)
 router.post('/menus', async (req, res) => {
     try {
-        // Agregamos EstadoRegistro
         const { Nombre, UrlMenu, Descripcion, IdPadre, EstadoRegistro } = req.body; 
         const padre = IdPadre ? IdPadre : null; 
+        
+        const estadoFinal = EstadoRegistro ?? 1; // PARCHE
+
         const [result] = await pool.query(
-            // Cambiamos el 1 por ?
             "INSERT INTO OpcionesMenu (Nombre, UrlMenu, Descripcion, IdPadre, EstadoRegistro) VALUES (?, ?, ?, ?, ?)",
-            [Nombre, UrlMenu, Descripcion, padre, EstadoRegistro]
+            [Nombre, UrlMenu, Descripcion, padre, estadoFinal]
         );
         res.json({ message: 'Menú creado con éxito', id: result.insertId });
     } catch (error) {
@@ -48,12 +48,13 @@ router.post('/menus', async (req, res) => {
 // 4. Asignar un Menú a un Perfil (POST)
 router.post('/menus/asignar', async (req, res) => {
     try {
-        // Agregamos EstadoRegistro
         const { IdOpcionMenu, IdPerfil, Orden, EstadoRegistro } = req.body;
+        
+        const estadoFinal = EstadoRegistro ?? 1; // PARCHE
+
         const [result] = await pool.query(
-            // Cambiamos el 1 por ?
             "INSERT INTO OpcionesMenu_Perfiles (IdOpcionMenu, IdPerfil, Orden, EstadoRegistro) VALUES (?, ?, ?, ?)",
-            [IdOpcionMenu, IdPerfil, Orden, EstadoRegistro]
+            [IdOpcionMenu, IdPerfil, Orden, estadoFinal]
         );
         res.json({ message: 'Menú asignado al perfil correctamente', id: result.insertId });
     } catch (error) {

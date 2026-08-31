@@ -16,12 +16,14 @@ router.get('/perfiles', async (req, res) => {
 // 2. INSERTAR PERFIL (POST)
 router.post('/perfiles', async (req, res) => {
     try {
-        // Agregamos EstadoRegistro para capturarlo del frontend
-        const { NombrePerfil, Descripcion, EstadoRegistro } = req.body; 
+        const { NombrePerfil, Descripcion, EstadoRegistro } = req.body;
+        
+        // EL PARCHE DE LUIS: Usamos ?? para respetar el 0
+        const estadoFinal = EstadoRegistro ?? 1;
+
         const [result] = await pool.query(
-            // Reemplazamos el 1 por un ? al final
             "INSERT INTO perfil (Nombre, Descripcion, EstadoRegistro) VALUES (?, ?, ?)",
-            [NombrePerfil, Descripcion, EstadoRegistro] // Lo inyectamos aquí
+            [NombrePerfil, Descripcion, estadoFinal]
         );
         res.json({ message: 'Perfil creado con éxito', id: result.insertId });
     } catch (error) {

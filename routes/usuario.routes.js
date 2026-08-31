@@ -9,12 +9,15 @@ router.post('/usuarios', async (req, res) => {
     const fechaActual = new Date();
     const fechaCreacion = fechaActual.toISOString().slice(0, 19).replace('T', ' '); 
 
-    // 2. Extraemos todos los datos dinámicos del frontend (Luis/Dante)
+    // 2. Extraemos todos los datos dinámicos del frontend
     const { 
         DNI, Nombres, ApellidoPaterno, ApellidoMaterno, 
         Celular, CorreoElectronico, Clave, 
         UsuarioCreacion, EstadoRegistro, IdPerfil 
     } = req.body;
+
+    // EL PARCHE DE LUIS: Usamos ?? para respetar el 0 (Inactivo)
+    const estadoFinal = EstadoRegistro ?? 1;
 
     // 3. Pedimos una conexión exclusiva al pool para nuestra transacción
     const connection = await pool.getConnection();
@@ -24,20 +27,20 @@ router.post('/usuarios', async (req, res) => {
         await connection.beginTransaction();
 
         // 4. Insertar en tabla Usuario 
-        // (Agregamos FechaCreacion y parametrizamos EstadoRegistro con '?')
+        // (Usamos estadoFinal al final del array)
         const [resultUsuario] = await connection.query(
             "INSERT INTO Usuario (DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, UsuarioCreacion, FechaCreacion, EstadoRegistro) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, UsuarioCreacion, fechaCreacion, EstadoRegistro]
+            [DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, UsuarioCreacion, fechaCreacion, estadoFinal]
         );
 
         // Capturamos el ID autogenerado
         const idGenerado = resultUsuario.insertId;
 
         // 5. Insertar en la tabla intermedia Usuario_Perfiles
-        // (Usamos el idGenerado y también parametrizamos el EstadoRegistro)
+        // (Usamos estadoFinal al final del array)
         await connection.query(
             "INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, ?)",
-            [idGenerado, IdPerfil, EstadoRegistro]
+            [idGenerado, IdPerfil, estadoFinal]
         );
 
         // CONFIRMAR CAMBIOS (COMMIT)
@@ -53,6 +56,8 @@ router.post('/usuarios', async (req, res) => {
         connection.release();
     }
 });
+
+// 2. LISTAR USUARIOS ACTIVOS (GET)
 router.get('/usuarios', async (req, res) => {
     try {
         // Filtrando estrictamente con EstadoRegistro = 1
