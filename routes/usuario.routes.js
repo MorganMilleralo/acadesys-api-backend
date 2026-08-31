@@ -57,11 +57,11 @@ router.post('/usuarios', async (req, res) => {
     }
 });
 
-// 2. LISTAR USUARIOS ACTIVOS (GET)
+// 2. LISTAR USUARIOS (GET) - ¡EL PARCHE!
 router.get('/usuarios', async (req, res) => {
     try {
-        // Filtrando estrictamente con EstadoRegistro = 1
-        const [rows] = await pool.query("SELECT * FROM Usuario WHERE EstadoRegistro = 1");
+        // ¡ELIMINAMOS EL WHERE! Ahora trae activos (1) e inactivos (0)
+        const [rows] = await pool.query("SELECT * FROM Usuario");
         res.json(rows);
     } catch (error) {
         res.status(500).json({ error: error.message });

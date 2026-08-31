@@ -5,14 +5,13 @@ const pool = require('../config/db');
 // 1. LISTAR PERFILES (GET)
 router.get('/perfiles', async (req, res) => {
     try {
-        // Cambiamos 'Activo' por 1
-        const [rows] = await pool.query("SELECT * FROM perfil WHERE EstadoRegistro = 1");
+        // ¡ELIMINAMOS EL WHERE! Ahora trae activos (1) e inactivos (0)
+        const [rows] = await pool.query("SELECT * FROM perfil");
         res.json(rows);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
-
 // 2. INSERTAR PERFIL (POST)
 router.post('/perfiles', async (req, res) => {
     try {
