@@ -5,19 +5,19 @@ const pool = require('../config/db');
 // 1. LISTAR PERFILES (GET)
 router.get('/perfiles', async (req, res) => {
     try {
-        // ¡ELIMINAMOS EL WHERE! Ahora trae activos (1) e inactivos (0)
-        const [rows] = await pool.query("SELECT * FROM perfil");
+        // Traemos los Activos (1) e Inactivos (0), pero ocultamos los Eliminados (-1)
+        const [rows] = await pool.query("SELECT * FROM perfil WHERE EstadoRegistro IN (0, 1)");
         res.json(rows);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
+
 // 2. INSERTAR PERFIL (POST)
 router.post('/perfiles', async (req, res) => {
     try {
         const { NombrePerfil, Descripcion, EstadoRegistro } = req.body;
         
-        // EL PARCHE DE LUIS: Usamos ?? para respetar el 0
         const estadoFinal = EstadoRegistro ?? 1;
 
         const [result] = await pool.query(
@@ -49,12 +49,12 @@ router.put('/perfiles/:id', async (req, res) => {
 router.delete('/perfiles/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        // El borrado lógico real pasa el estado a -1 (Eliminado)
         await pool.query(
-            // Cambiamos 'Inactivo' por 0
-            "UPDATE perfil SET EstadoRegistro = 0 WHERE IdPerfil = ?",
+            "UPDATE perfil SET EstadoRegistro = -1 WHERE IdPerfil = ?",
             [id]
         );
-        res.json({ message: 'Perfil eliminado lógicamente' });
+        res.json({ message: 'Perfil eliminado lógicamente con estado -1' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }

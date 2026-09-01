@@ -57,11 +57,11 @@ router.post('/usuarios', async (req, res) => {
     }
 });
 
-// 2. LISTAR USUARIOS (GET) - ¡EL PARCHE!
+// 2. LISTAR USUARIOS (GET) - ¡ACTUALIZADO!
 router.get('/usuarios', async (req, res) => {
     try {
-        // ¡ELIMINAMOS EL WHERE! Ahora trae activos (1) e inactivos (0)
-        const [rows] = await pool.query("SELECT * FROM Usuario");
+        // Traemos los Activos (1) e Inactivos (0), pero ocultamos los Eliminados (-1)
+        const [rows] = await pool.query("SELECT * FROM Usuario WHERE EstadoRegistro IN (0, 1)");
         res.json(rows);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -84,16 +84,16 @@ router.put('/usuarios/:id', async (req, res) => {
     }
 });
 
-// 4. ELIMINACIÓN LÓGICA (DELETE)
+// 4. ELIMINACIÓN LÓGICA (DELETE) - ¡ACTUALIZADO A -1!
 router.delete('/usuarios/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        // El borrado debe ser un UPDATE EstadoRegistro = 0
+        // El borrado lógico real pasa el estado a -1 (Eliminado)
         await pool.query(
-            "UPDATE Usuario SET EstadoRegistro = 0 WHERE IdUsuario = ?",
+            "UPDATE Usuario SET EstadoRegistro = -1 WHERE IdUsuario = ?",
             [id]
         );
-        res.json({ message: 'Usuario eliminado lógicamente' });
+        res.json({ message: 'Usuario eliminado lógicamente con estado -1' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
