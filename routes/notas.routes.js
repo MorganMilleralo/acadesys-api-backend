@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../config/db');
 const verificarToken = require('../middlewares/auth.middleware');
 const verificarDocente = require('../middlewares/docente.middleware'); // <-- Tu nuevo filtro
+const verificarPeriodoAbierto = require('../middlewares/cierre.middleware'); // <-- Valida que el periodo esté abierto
 
 // 1. Middleware global: Todo aquel que entre a /api/notas debe tener un token válido
 router.use(verificarToken);
@@ -71,10 +72,10 @@ router.get('/alumno/:id', async (req, res) => {
 });
 
 // ============================================================
-// POST: Registrar un arreglo de notas (SOLO DOCENTES)
-// Fíjate que inyectamos verificarDocente justo antes de la función
+// POST: Registrar un arreglo de notas (SOLO DOCENTES + PERIODO ABIERTO)
+// Inyectamos verificarDocente y verificarPeriodoAbierto antes de la función
 // ============================================================
-router.post('/', verificarDocente, async (req, res) => {
+router.post('/', verificarDocente, verificarPeriodoAbierto, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
@@ -102,9 +103,9 @@ router.post('/', verificarDocente, async (req, res) => {
 });
 
 // ============================================================
-// PUT: Modificar una nota específica (SOLO DOCENTES)
+// PUT: Modificar una nota específica (SOLO DOCENTES + PERIODO ABIERTO)
 // ============================================================
-router.put('/:id', verificarDocente, async (req, res) => {
+router.put('/:id', verificarDocente, verificarPeriodoAbierto, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
