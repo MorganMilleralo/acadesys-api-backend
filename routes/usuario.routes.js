@@ -68,22 +68,47 @@ router.get('/usuarios', async (req, res) => {
     }
 });
 
-// 3. MODIFICAR USUARIO (PUT)
 router.put('/usuarios/:id', async (req, res) => {
+    const connection = await pool.getConnection();
     try {
+        await connection.beginTransaction();
         const { id } = req.params;
-        const { DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico } = req.body;
+        const { DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, EstadoRegistro, IdPerfil } = req.body;
         
-        await pool.query(
-            "UPDATE Usuario SET DNI=?, Nombres=?, ApellidoPaterno=?, ApellidoMaterno=?, Celular=?, CorreoElectronico=? WHERE IdUsuario=?",
-            [DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, id]
-        );
-        res.json({ message: 'Usuario actualizado con éxito' });
+        // 1. Construir actualización dinámica para la tabla Usuario
+        let queryUsuario = "UPDATE Usuario SET DNI=?, Nombres=?, ApellidoPaterno=?, ApellidoMaterno=?, Celular=?, CorreoElectronico=?";
+        let paramsUsuario = [DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico];
+
+        if (Clave) {
+            queryUsuario += ", Clave=?";
+            paramsUsuario.push(Clave);
+        }
+        if (EstadoRegistro !== undefined) {
+            queryUsuario += ", EstadoRegistro=?";
+            paramsUsuario.push(EstadoRegistro);
+        }
+        queryUsuario += " WHERE IdUsuario=?";
+        paramsUsuario.push(id);
+
+        await connection.query(queryUsuario, paramsUsuario);
+
+        // 2. Si envían un IdPerfil, actualizamos la tabla intermedia
+        if (IdPerfil) {
+            await connection.query(
+                "UPDATE Usuario_Perfiles SET IdPerfil=? WHERE IdUsuario=?",
+                [IdPerfil, id]
+            );
+        }
+
+        await connection.commit();
+        res.json({ message: 'Usuario actualizado con éxito en todas las tablas' });
     } catch (error) {
+        await connection.rollback();
         res.status(500).json({ error: error.message });
+    } finally {
+        connection.release();
     }
 });
-
 // 4. ELIMINACIÓN LÓGICA (DELETE) - ¡ACTUALIZADO A -1!
 router.delete('/usuarios/:id', async (req, res) => {
     try {
