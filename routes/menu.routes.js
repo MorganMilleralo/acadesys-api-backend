@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
-
+const verificarToken = require('../middlewares/auth.middleware');
+router.use(verificarToken);
 // 1. Listar los menús principales activos (GET)
 router.get('/menus', async (req, res) => {
     try {

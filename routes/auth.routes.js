@@ -2,13 +2,12 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt'); // <-- Agregado para validar hash
 
-// POST: Autenticación de usuarios
 router.post('/auth/login', async (req, res) => {
     try {
         const { usuario, password } = req.body;
 
-        // Buscar al usuario por correo o DNI cruzando tablas para obtener su Rol
         const [rows] = await pool.query(`
             SELECT u.IdUsuario, CONCAT(u.Nombres, ' ', u.ApellidoPaterno) AS nombreCompleto, 
                    u.CorreoElectronico, u.Clave, u.EstadoRegistro, 
@@ -25,22 +24,23 @@ router.post('/auth/login', async (req, res) => {
 
         const user = rows[0];
 
-        // Validar Estado Activo y Contraseña
         if (user.EstadoRegistro !== 1) {
             return res.status(403).json({ error: 'La cuenta se encuentra inactiva' });
         }
-        if (user.Clave !== password) {
+
+        // Validación real con bcrypt
+        const claveValida = await bcrypt.compare(password, user.Clave);
+        if (!claveValida) {
             return res.status(401).json({ error: 'Contraseña incorrecta' });
         }
 
-        // Generar Token
+        // Token firmado ÚNICAMENTE con tu variable de entorno
         const token = jwt.sign(
             { id: user.IdUsuario, rol: user.rol }, 
-            process.env.JWT_SECRET || 'acadesys_secreto', 
+            process.env.JWT_SECRET, 
             { expiresIn: '8h' }
         );
 
-        // Respuesta exacta solicitada por el frontend
         res.status(200).json({
             idUsuario: user.IdUsuario,
             usuario: user.nombreCompleto,
