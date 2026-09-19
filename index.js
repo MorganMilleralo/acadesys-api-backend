@@ -10,11 +10,14 @@ app.use(express.json());
 // Importar rutas
 const perfilRoutes = require('./routes/perfil.routes');
 const menuRoutes = require('./routes/menu.routes');
-const usuarioRoutes = require('./routes/usuario.routes'); // <-- AQUÍ SE IMPORTA
+const usuarioRoutes = require('./routes/usuario.routes');
+const tutorRoutes = require('./routes/tutor.routes'); // <-- NUEVO: Importar rutas del Tutor IA
 
+// Usar rutas
 app.use('/api', perfilRoutes);
 app.use('/api', menuRoutes);
-app.use('/api', usuarioRoutes); // <-- AQUÍ SE USA
+app.use('/api', usuarioRoutes);
+app.use('/api', tutorRoutes); // <-- NUEVO: Habilita el endpoint /api/tutor-ia
 
 app.get('/ping', (req, res) => {
     res.send('¡Hola Mundo! El backend de AcadeSys en Node.js está vivo y listo para el Frontend.');
