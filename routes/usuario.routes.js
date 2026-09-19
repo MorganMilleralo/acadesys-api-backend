@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
+const bcrypt = require('bcrypt');
 
 // ==================================================
 // 1. AUTENTICACIÓN (LOGIN) - POST /api/auth/login
@@ -16,7 +17,6 @@ router.post('/auth/login', async (req, res) => {
         const inputUsuario = String(usuario).trim().toLowerCase();
         const inputPass = String(password).trim();
 
-        // Buscar por Correo o DNI coincidente (estado activo: 1)
         const [rows] = await pool.query(
             `SELECT u.IdUsuario, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno, 
                     u.CorreoElectronico, u.DNI, u.Clave, u.EstadoRegistro,
@@ -36,8 +36,11 @@ router.post('/auth/login', async (req, res) => {
 
         const user = rows[0];
 
-        // Comparación de contraseña
-        if (user.Clave !== inputPass) {
+        // Las contraseñas ahora se guardan encriptadas (bcrypt), por eso se comparan con bcrypt.compare
+        // en vez de "===". OJO: usuarios creados ANTES de este cambio tienen la clave en texto plano
+        // y bcrypt.compare() les va a dar "incorrecta" aunque escriban bien su contraseña — ver nota abajo.
+        const passwordValida = await bcrypt.compare(inputPass, user.Clave);
+        if (!passwordValida) {
             return res.status(401).json({ error: 'Contraseña incorrecta' });
         }
 
@@ -64,15 +67,19 @@ router.post('/auth/login', async (req, res) => {
 // ==================================================
 router.post('/usuarios', async (req, res) => {
     const fechaActual = new Date();
-    const fechaCreacion = fechaActual.toISOString().slice(0, 19).replace('T', ' '); 
+    const fechaCreacion = fechaActual.toISOString().slice(0, 19).replace('T', ' ');
 
-    const { 
-        DNI, Nombres, ApellidoPaterno, ApellidoMaterno, 
-        Celular, CorreoElectronico, Clave, 
-        UsuarioCreacion, EstadoRegistro, IdPerfil 
+    const {
+        DNI, Nombres, ApellidoPaterno, ApellidoMaterno,
+        Celular, CorreoElectronico, Clave,
+        UsuarioCreacion, EstadoRegistro, IdPerfil
     } = req.body;
 
     const estadoFinal = EstadoRegistro ?? 1;
+
+    // Encriptamos la clave ANTES de guardarla
+    const claveHasheada = await bcrypt.hash(Clave, 10);
+
     const connection = await pool.getConnection();
 
     try {
@@ -84,22 +91,22 @@ router.post('/usuarios', async (req, res) => {
              (DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, UsuarioCreacion, FechaCreacion, EstadoRegistro) 
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-                DNI, 
-                Nombres, 
-                ApellidoPaterno, 
-                ApellidoMaterno || '', 
-                Celular || '', 
-                CorreoElectronico, 
-                Clave, 
-                UsuarioCreacion || 'sistema', 
-                fechaCreacion, 
+                DNI,
+                Nombres,
+                ApellidoPaterno,
+                ApellidoMaterno || '',
+                Celular || '',
+                CorreoElectronico,
+                claveHasheada,
+                UsuarioCreacion || 'sistema',
+                fechaCreacion,
                 estadoFinal
             ]
         );
 
         const idGenerado = resultUsuario.insertId;
 
-        // 2. Insertar en Usuario_Perfiles si se especificó IdPerfil
+        // 2. Insertar en Usuario_Perfiles
         const perfilAsignar = IdPerfil || 1;
         await connection.query(
             "INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, ?)",
@@ -122,7 +129,6 @@ router.post('/usuarios', async (req, res) => {
 // ==================================================
 router.get('/usuarios', async (req, res) => {
     try {
-        // Obtenemos los datos del usuario junto con su perfil asociado
         const [rows] = await pool.query(`
             SELECT 
                 u.IdUsuario,
@@ -158,28 +164,28 @@ router.put('/usuarios/:id', async (req, res) => {
     const connection = await pool.getConnection();
 
     try {
+        await connection.beginTransaction();
         const { id } = req.params;
-        const { 
-            DNI, 
-            Nombres, 
-            ApellidoPaterno, 
-            ApellidoMaterno, 
-            Celular, 
-            CorreoElectronico, 
+        const {
+            DNI,
+            Nombres,
+            ApellidoPaterno,
+            ApellidoMaterno,
+            Celular,
+            CorreoElectronico,
             Clave,
             EstadoRegistro,
-            IdPerfil 
+            IdPerfil
         } = req.body;
 
-        await connection.beginTransaction();
-
-        // 1. Construir query dinámica para actualizar datos personales y opcionalmente Clave / EstadoRegistro
+        // 1. Construir query dinámica para actualizar datos personales y, opcionalmente, Clave / EstadoRegistro
         let queryUpdate = "UPDATE Usuario SET DNI=?, Nombres=?, ApellidoPaterno=?, ApellidoMaterno=?, Celular=?, CorreoElectronico=?";
         const paramsUpdate = [DNI, Nombres, ApellidoPaterno, ApellidoMaterno || '', Celular || '', CorreoElectronico];
 
         if (Clave && String(Clave).trim() !== '') {
+            const claveHasheada = await bcrypt.hash(String(Clave).trim(), 10);
             queryUpdate += ", Clave=?";
-            paramsUpdate.push(String(Clave).trim());
+            paramsUpdate.push(claveHasheada);
         }
 
         if (EstadoRegistro !== undefined && EstadoRegistro !== null) {
@@ -192,9 +198,8 @@ router.put('/usuarios/:id', async (req, res) => {
 
         await connection.query(queryUpdate, paramsUpdate);
 
-        // 2. Si se envía IdPerfil, actualizar el perfil en Usuario_Perfiles
+        // 2. Si se envía IdPerfil, actualizar (o crear) el registro en Usuario_Perfiles
         if (IdPerfil) {
-            // Verificar si ya existe registro en la tabla intermedia
             const [existePerfil] = await connection.query(
                 "SELECT * FROM Usuario_Perfiles WHERE IdUsuario = ?",
                 [id]
@@ -234,13 +239,11 @@ router.delete('/usuarios/:id', async (req, res) => {
         const { id } = req.params;
         await connection.beginTransaction();
 
-        // Desactivar usuario
         await connection.query(
             "UPDATE Usuario SET EstadoRegistro = -1 WHERE IdUsuario = ?",
             [id]
         );
 
-        // Desactivar su asignación en perfiles
         await connection.query(
             "UPDATE Usuario_Perfiles SET EstadoRegistro = -1 WHERE IdUsuario = ?",
             [id]

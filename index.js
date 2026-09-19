@@ -11,13 +11,21 @@ app.use(express.json());
 const perfilRoutes = require('./routes/perfil.routes');
 const menuRoutes = require('./routes/menu.routes');
 const usuarioRoutes = require('./routes/usuario.routes');
-const tutorRoutes = require('./routes/tutor.routes'); // <-- NUEVO: Importar rutas del Tutor IA
+const tutorRoutes = require('./routes/tutor.routes');       // Tutor IA (versión de Yan)
+const authRoutes = require('./routes/auth.routes');         // <-- NUEVO: Rutas de Login
+const iaRoutes = require('./routes/ia.routes');              // <-- NUEVO: Rutas del Tutor IA (versión del compañero)
+const apoderadosRoutes = require('./routes/apoderados.routes'); // <-- NUEVO: Rutas de Apoderados
+const actasRoutes = require('./routes/actas.routes');           // <-- NUEVO: Rutas de Actas
 
 // Usar rutas
 app.use('/api', perfilRoutes);
 app.use('/api', menuRoutes);
 app.use('/api', usuarioRoutes);
-app.use('/api', tutorRoutes); // <-- NUEVO: Habilita el endpoint /api/tutor-ia
+app.use('/api', tutorRoutes);      // Habilita /api/tutor-ia (la que ya probamos y funciona)
+app.use('/api', authRoutes);       // <-- NUEVO: Activa el endpoint de Login
+app.use('/api', iaRoutes);         // <-- NUEVO: Activa el endpoint de Gemini del compañero (revisar duplicado, ver nota abajo)
+app.use('/api', apoderadosRoutes); // <-- NUEVO: Activa el endpoint de Apoderados
+app.use('/api', actasRoutes);      // <-- NUEVO: Activa el endpoint de Actas
 
 app.get('/ping', (req, res) => {
     res.send('¡Hola Mundo! El backend de AcadeSys en Node.js está vivo y listo para el Frontend.');
