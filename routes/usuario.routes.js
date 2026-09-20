@@ -1,69 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcrypt'); 
 
 // ==================================================
-// 1. AUTENTICACIÓN (LOGIN) - POST /api/auth/login
-// ==================================================
-router.post('/auth/login', async (req, res) => {
-    try {
-        const { usuario, password } = req.body;
-
-        if (!usuario || !password) {
-            return res.status(400).json({ error: 'Usuario/correo y contraseña son obligatorios' });
-        }
-
-        const inputUsuario = String(usuario).trim().toLowerCase();
-        const inputPass = String(password).trim();
-
-        const [rows] = await pool.query(
-            `SELECT u.IdUsuario, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno, 
-                    u.CorreoElectronico, u.DNI, u.Clave, u.EstadoRegistro,
-                    p.IdPerfil, p.NombrePerfil
-             FROM Usuario u
-             LEFT JOIN Usuario_Perfiles up ON u.IdUsuario = up.IdUsuario AND up.EstadoRegistro = 1
-             LEFT JOIN Perfil p ON up.IdPerfil = p.IdPerfil
-             WHERE (LOWER(u.CorreoElectronico) = ? OR u.DNI = ?)
-               AND u.EstadoRegistro = 1
-             LIMIT 1`,
-            [inputUsuario, inputUsuario]
-        );
-
-        if (rows.length === 0) {
-            return res.status(401).json({ error: 'Credenciales inválidas o usuario inactivo' });
-        }
-
-        const user = rows[0];
-
-        // Las contraseñas ahora se guardan encriptadas (bcrypt), por eso se comparan con bcrypt.compare
-        // en vez de "===". OJO: usuarios creados ANTES de este cambio tienen la clave en texto plano
-        // y bcrypt.compare() les va a dar "incorrecta" aunque escriban bien su contraseña — ver nota abajo.
-        const passwordValida = await bcrypt.compare(inputPass, user.Clave);
-        if (!passwordValida) {
-            return res.status(401).json({ error: 'Contraseña incorrecta' });
-        }
-
-        const nombreCompleto = `${user.Nombres} ${user.ApellidoPaterno || ''}`.trim();
-
-        res.json({
-            message: 'Autenticación exitosa',
-            idUsuario: user.IdUsuario,
-            usuario: nombreCompleto,
-            correo: user.CorreoElectronico,
-            rol: user.NombrePerfil || 'Administrador',
-            idPerfil: user.IdPerfil || 1,
-            token: `jwt-simulated-${user.IdUsuario}-${Date.now()}`
-        });
-
-    } catch (error) {
-        console.error('Error en /auth/login:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ==================================================
-// 2. CREAR USUARIO CON PERFIL (POST /api/usuarios)
+// 1. CREAR USUARIO CON PERFIL (POST /api/usuarios)
 // ==================================================
 router.post('/usuarios', async (req, res) => {
     const fechaActual = new Date();
@@ -85,28 +26,20 @@ router.post('/usuarios', async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // 1. Insertar en tabla Usuario
+        // Insertar en tabla Usuario
         const [resultUsuario] = await connection.query(
             `INSERT INTO Usuario 
              (DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, UsuarioCreacion, FechaCreacion, EstadoRegistro) 
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-                DNI,
-                Nombres,
-                ApellidoPaterno,
-                ApellidoMaterno || '',
-                Celular || '',
-                CorreoElectronico,
-                claveHasheada,
-                UsuarioCreacion || 'sistema',
-                fechaCreacion,
-                estadoFinal
+                DNI, Nombres, ApellidoPaterno, ApellidoMaterno || '', Celular || '', 
+                CorreoElectronico, claveHasheada, UsuarioCreacion || 'sistema', fechaCreacion, estadoFinal
             ]
         );
 
         const idGenerado = resultUsuario.insertId;
 
-        // 2. Insertar en Usuario_Perfiles
+        // Insertar en Usuario_Perfiles
         const perfilAsignar = IdPerfil || 1;
         await connection.query(
             "INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, ?)",
@@ -125,26 +58,16 @@ router.post('/usuarios', async (req, res) => {
 });
 
 // ==================================================
-// 3. LISTAR USUARIOS CON PERFILES (GET /api/usuarios)
+// 2. LISTAR USUARIOS CON PERFILES (GET /api/usuarios)
 // ==================================================
 router.get('/usuarios', async (req, res) => {
     try {
         const [rows] = await pool.query(`
             SELECT 
-                u.IdUsuario,
-                u.DNI,
-                u.Nombres,
-                u.ApellidoPaterno,
-                u.ApellidoMaterno,
+                u.IdUsuario, u.DNI, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno,
                 CONCAT(u.Nombres, ' ', COALESCE(u.ApellidoPaterno, ''), ' ', COALESCE(u.ApellidoMaterno, '')) AS NombreCompleto,
-                u.CorreoElectronico,
-                u.CorreoElectronico AS Correo,
-                u.Celular,
-                u.Clave,
-                u.EstadoRegistro,
-                up.IdPerfil,
-                p.NombrePerfil,
-                p.NombrePerfil AS Perfil
+                u.CorreoElectronico, u.CorreoElectronico AS Correo, u.Celular, u.Clave, u.EstadoRegistro,
+                up.IdPerfil, p.NombrePerfil, p.NombrePerfil AS Perfil
             FROM Usuario u
             LEFT JOIN Usuario_Perfiles up ON u.IdUsuario = up.IdUsuario AND up.EstadoRegistro = 1
             LEFT JOIN Perfil p ON up.IdPerfil = p.IdPerfil
@@ -158,7 +81,7 @@ router.get('/usuarios', async (req, res) => {
 });
 
 // ==================================================
-// 4. MODIFICAR USUARIO (PUT /api/usuarios/:id)
+// 3. MODIFICAR USUARIO (PUT /api/usuarios/:id)
 // ==================================================
 router.put('/usuarios/:id', async (req, res) => {
     const connection = await pool.getConnection();
@@ -167,18 +90,10 @@ router.put('/usuarios/:id', async (req, res) => {
         await connection.beginTransaction();
         const { id } = req.params;
         const {
-            DNI,
-            Nombres,
-            ApellidoPaterno,
-            ApellidoMaterno,
-            Celular,
-            CorreoElectronico,
-            Clave,
-            EstadoRegistro,
-            IdPerfil
+            DNI, Nombres, ApellidoPaterno, ApellidoMaterno,
+            Celular, CorreoElectronico, Clave, EstadoRegistro, IdPerfil
         } = req.body;
 
-        // 1. Construir query dinámica para actualizar datos personales y, opcionalmente, Clave / EstadoRegistro
         let queryUpdate = "UPDATE Usuario SET DNI=?, Nombres=?, ApellidoPaterno=?, ApellidoMaterno=?, Celular=?, CorreoElectronico=?";
         const paramsUpdate = [DNI, Nombres, ApellidoPaterno, ApellidoMaterno || '', Celular || '', CorreoElectronico];
 
@@ -198,23 +113,13 @@ router.put('/usuarios/:id', async (req, res) => {
 
         await connection.query(queryUpdate, paramsUpdate);
 
-        // 2. Si se envía IdPerfil, actualizar (o crear) el registro en Usuario_Perfiles
         if (IdPerfil) {
-            const [existePerfil] = await connection.query(
-                "SELECT * FROM Usuario_Perfiles WHERE IdUsuario = ?",
-                [id]
-            );
+            const [existePerfil] = await connection.query("SELECT * FROM Usuario_Perfiles WHERE IdUsuario = ?", [id]);
 
             if (existePerfil.length > 0) {
-                await connection.query(
-                    "UPDATE Usuario_Perfiles SET IdPerfil = ?, EstadoRegistro = 1 WHERE IdUsuario = ?",
-                    [Number(IdPerfil), id]
-                );
+                await connection.query("UPDATE Usuario_Perfiles SET IdPerfil = ?, EstadoRegistro = 1 WHERE IdUsuario = ?", [Number(IdPerfil), id]);
             } else {
-                await connection.query(
-                    "INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)",
-                    [id, Number(IdPerfil)]
-                );
+                await connection.query("INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)", [id, Number(IdPerfil)]);
             }
         }
 
@@ -230,7 +135,7 @@ router.put('/usuarios/:id', async (req, res) => {
 });
 
 // ==================================================
-// 5. ELIMINACIÓN LÓGICA (DELETE /api/usuarios/:id)
+// 4. ELIMINACIÓN LÓGICA (DELETE /api/usuarios/:id)
 // ==================================================
 router.delete('/usuarios/:id', async (req, res) => {
     const connection = await pool.getConnection();
@@ -239,15 +144,8 @@ router.delete('/usuarios/:id', async (req, res) => {
         const { id } = req.params;
         await connection.beginTransaction();
 
-        await connection.query(
-            "UPDATE Usuario SET EstadoRegistro = -1 WHERE IdUsuario = ?",
-            [id]
-        );
-
-        await connection.query(
-            "UPDATE Usuario_Perfiles SET EstadoRegistro = -1 WHERE IdUsuario = ?",
-            [id]
-        );
+        await connection.query("UPDATE Usuario SET EstadoRegistro = -1 WHERE IdUsuario = ?", [id]);
+        await connection.query("UPDATE Usuario_Perfiles SET EstadoRegistro = -1 WHERE IdUsuario = ?", [id]);
 
         await connection.commit();
         res.json({ message: 'Usuario eliminado lógicamente con éxito (-1)' });
