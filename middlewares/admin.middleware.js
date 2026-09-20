@@ -1,13 +1,10 @@
-// middlewares/admin.middleware.js
-const verificarAdmin = (req, res, next) => {
-    const { rol, idPerfil } = req.usuario; // Datos desencriptados del token[cite: 7]
-
-    // Solo dejamos pasar si su IdPerfil es 1 (Administrador)
-    if (rol === 'Administrador' || idPerfil === 1) {
+const esAdmin = (req, res, next) => {
+    // Verificamos que el token ya haya sido decodificado y el IdPerfil sea 1 (Administrador)
+    if (req.usuario && req.usuario.idPerfil === 1) {
         next();
     } else {
-        return res.status(403).json({ error: 'Acceso denegado: Solo el Administrador puede realizar el cierre de actas.' });
+        return res.status(403).json({ error: 'Acceso bloqueado: Se requieren permisos de Administrador institucional' });
     }
 };
 
-module.exports = verificarAdmin;
+module.exports = esAdmin;

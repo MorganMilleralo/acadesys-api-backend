@@ -8,7 +8,6 @@ router.post('/auth/login', async (req, res) => {
     try {
         const { usuario, password } = req.body;
 
-        // Añadimos CodigoUsuario e IdAcademia al SELECT, y buscamos por CodigoUsuario en el WHERE
         const [rows] = await pool.query(`
             SELECT u.IdUsuario, CONCAT(u.Nombres, ' ', u.ApellidoPaterno) AS nombreCompleto, 
                    u.CorreoElectronico, u.Clave, u.EstadoRegistro, u.CodigoUsuario, u.IdAcademia, 
@@ -34,7 +33,7 @@ router.post('/auth/login', async (req, res) => {
             return res.status(401).json({ error: 'Contraseña incorrecta' });
         }
 
-        // Inyectamos el IdAcademia (Multi-tenant) y el idPerfil (Middleware) en el Payload
+        // Firma del JWT inyectando IdAcademia
         const token = jwt.sign(
             { 
                 id: user.IdUsuario, 
@@ -42,7 +41,7 @@ router.post('/auth/login', async (req, res) => {
                 idPerfil: user.IdPerfil,
                 idAcademia: user.IdAcademia 
             }, 
-            process.env.JWT_SECRET, 
+            process.env.JWT_SECRET || 'secreto_temporal', 
             { expiresIn: '8h' }
         );
 
