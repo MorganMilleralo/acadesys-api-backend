@@ -1,37 +1,54 @@
-const express = require('express');
-const cors = require('cors'); 
-require('./config/db'); 
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+require("./config/db");
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(cors()); // Permiso a todos los dominios
+// Validación de arranque
+const variablesRequeridas = [
+  "DB_HOST",
+  "DB_PORT",
+  "DB_USER",
+  "DB_PASSWORD",
+  "DB_NAME",
+  "JWT_SECRET",
+];
+const faltantes = variablesRequeridas.filter((v) => !process.env[v]);
+if (faltantes.length > 0) {
+  console.error(
+    `❌ Faltan variables de entorno obligatorias: ${faltantes.join(", ")}`,
+  );
+  process.exit(1);
+}
+
+app.use(cors());
 app.use(express.json());
 
-// Importar rutas (Limpias y sin duplicados)
-const perfilRoutes = require('./routes/perfil.routes');
-const menuRoutes = require('./routes/menu.routes');
-const usuarioRoutes = require('./routes/usuario.routes');
-const authRoutes = require('./routes/auth.routes'); 
-const iaRoutes = require('./routes/ia.routes'); // <-- Única ruta de IA (Tu versión)
-const apoderadosRoutes = require('./routes/apoderados.routes'); 
-const actasRoutes = require('./routes/actas.routes');            
-const matriculasRoutes = require('./routes/matriculas.routes'); 
+const verificarToken = require("./middlewares/auth.middleware");
 
-// Usar rutas
-app.use('/api', perfilRoutes);
-app.use('/api', menuRoutes);
-app.use('/api', usuarioRoutes);
-app.use('/api', authRoutes); 
-app.use('/api', iaRoutes); // <-- Enlace único a Gemini
-app.use('/api', apoderadosRoutes); 
-app.use('/api', actasRoutes);      
-app.use('/api', matriculasRoutes); 
+// Rutas Públicas
+const authRoutes = require("./routes/auth.routes");
+app.use("/api", authRoutes);
 
-app.get('/ping', (req, res) => {
-    res.send('¡Hola Mundo! El backend SaaS de AcadeSys está vivo y listo.');
+app.get("/ping", (req, res) => {
+  res.send("AcadeSys API SaaS en línea.");
 });
 
+// Candado Global JWT
+app.use("/api", verificarToken);
+
+// Rutas Privadas
+app.use("/api", require("./routes/matriculas.routes"));
+app.use("/api", require("./routes/perfil.routes"));
+app.use("/api", require("./routes/menu.routes"));
+app.use("/api", require("./routes/usuario.routes"));
+app.use("/api/notas", require("./routes/notas.routes"));
+app.use("/api", require("./routes/actas.routes"));
+app.use("/api", require("./routes/pagos.routes"));
+app.use("/api", require("./routes/ia.routes"));
+
 app.listen(port, () => {
-    console.log(`Servidor corriendo en el puerto ${port}`);
+  console.log(`🚀 AcadeSys SaaS corriendo en el puerto ${port}`);
 });

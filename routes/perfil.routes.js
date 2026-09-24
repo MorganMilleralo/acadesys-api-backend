@@ -1,63 +1,65 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const pool = require('../config/db');
+const pool = require("../config/db");
 
 // 1. LISTAR PERFILES (GET)
-router.get('/perfiles', async (req, res) => {
-    try {
-        // Traemos los Activos (1) e Inactivos (0), pero ocultamos los Eliminados (-1)
-        const [rows] = await pool.query("SELECT * FROM perfil WHERE EstadoRegistro IN (0, 1)");
-        res.json(rows);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+router.get("/perfiles", async (req, res) => {
+  try {
+    // Traemos los Activos (1) e Inactivos (0), pero ocultamos los Eliminados (-1)
+    const [rows] = await pool.query(
+      "SELECT * FROM perfil WHERE EstadoRegistro IN (0, 1)",
+    );
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // 2. INSERTAR PERFIL (POST)
-router.post('/perfiles', async (req, res) => {
-    try {
-        const { NombrePerfil, Descripcion, EstadoRegistro } = req.body;
-        
-        const estadoFinal = EstadoRegistro ?? 1;
+router.post("/perfiles", async (req, res) => {
+  try {
+    const { NombrePerfil, Descripcion, EstadoRegistro } = req.body;
 
-        const [result] = await pool.query(
-            "INSERT INTO perfil (Nombre, Descripcion, EstadoRegistro) VALUES (?, ?, ?)",
-            [NombrePerfil, Descripcion, estadoFinal]
-        );
-        res.json({ message: 'Perfil creado con éxito', id: result.insertId });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    const estadoFinal = EstadoRegistro ?? 1;
+
+    const [result] = await pool.query(
+      "INSERT INTO perfil (Nombre, Descripcion, EstadoRegistro) VALUES (?, ?, ?)",
+      [NombrePerfil, Descripcion, estadoFinal],
+    );
+    res.json({ message: "Perfil creado con éxito", id: result.insertId });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // 3. MODIFICAR PERFIL (PUT)
-router.put('/perfiles/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { NombrePerfil, Descripcion } = req.body;
-        await pool.query(
-            "UPDATE perfil SET Nombre = ?, Descripcion = ? WHERE IdPerfil = ?",
-            [NombrePerfil, Descripcion, id]
-        );
-        res.json({ message: 'Perfil actualizado con éxito' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+router.put("/perfiles/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { NombrePerfil, Descripcion } = req.body;
+    await pool.query(
+      "UPDATE perfil SET Nombre = ?, Descripcion = ? WHERE IdPerfil = ?",
+      [NombrePerfil, Descripcion, id],
+    );
+    res.json({ message: "Perfil actualizado con éxito" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // 4. ELIMINACIÓN LÓGICA (DELETE)
-router.delete('/perfiles/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        // El borrado lógico real pasa el estado a -1 (Eliminado)
-        await pool.query(
-            "UPDATE perfil SET EstadoRegistro = -1 WHERE IdPerfil = ?",
-            [id]
-        );
-        res.json({ message: 'Perfil eliminado lógicamente con estado -1' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+router.delete("/perfiles/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    // El borrado lógico real pasa el estado a -1 (Eliminado)
+    await pool.query(
+      "UPDATE perfil SET EstadoRegistro = -1 WHERE IdPerfil = ?",
+      [id],
+    );
+    res.json({ message: "Perfil eliminado lógicamente con estado -1" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 module.exports = router;

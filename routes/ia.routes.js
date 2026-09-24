@@ -1,14 +1,14 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-router.post('/tutor-ia/diagnostico', async (req, res) => {
-    try {
-        const { alumno, historialNotas } = req.body;
-        
-        const prompt = `
+router.post("/tutor-ia/diagnostico", async (req, res) => {
+  try {
+    const { alumno, historialNotas } = req.body;
+
+    const prompt = `
             Eres un tutor académico experto. Analiza el siguiente perfil y su historial de notas.
             Alumno: ${alumno.nombre}, Aula: ${alumno.aula}, Promedio General: ${alumno.promedio}.
             Notas: ${JSON.stringify(historialNotas)}.
@@ -22,17 +22,24 @@ router.post('/tutor-ia/diagnostico', async (req, res) => {
             }
         `;
 
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const result = await model.generateContent(prompt);
-        let responseText = result.response.text();
-        
-        // Limpiar las etiquetas Markdown (```json) que suele devolver Gemini
-        responseText = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const result = await model.generateContent(prompt);
+    let responseText = result.response.text();
 
-        res.json(JSON.parse(responseText));
-    } catch (error) {
-        res.status(500).json({ error: 'Error procesando el diagnóstico con IA: ' + error.message });
-    }
+    // Limpiar las etiquetas Markdown (```json) que suele devolver Gemini
+    responseText = responseText
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+
+    res.json(JSON.parse(responseText));
+  } catch (error) {
+    res
+      .status(500)
+      .json({
+        error: "Error procesando el diagnóstico con IA: " + error.message,
+      });
+  }
 });
 
 module.exports = router;
