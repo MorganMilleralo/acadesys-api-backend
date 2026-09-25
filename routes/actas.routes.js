@@ -1,41 +1,44 @@
-// routes/actas.routes.js
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const pool = require('../config/db');
-const verificarToken = require('../middlewares/auth.middleware');
-const verificarAdmin = require('../middlewares/admin.middleware');
+const pool = require("../config/db");
+const requiereRol = require("../middlewares/roles.middleware");
 
-router.use(verificarToken);
+// PUT /api/actas/cierre - Cierre oficial de actas por academia
+router.put("/actas/cierre", requiereRol("Administrador"), async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const idAdmin = req.usuario.id;
+    const idAcademia = req.usuario.idAcademia;
 
-// PUT: Cierre masivo de actas (Protegido estrictamente para Admin)
-router.put('/actas/cierre', verificarAdmin, async (req, res) => {
-    const connection = await pool.getConnection();
-    try {
-        await connection.beginTransaction();
-        const idAdmin = req.usuario.id;
+    // 1. Sella únicamente las evaluaciones de los alumnos de su propia academia
+    const [result] = await connection.query(
+      `UPDATE Evaluacion e
+             INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
+             INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
+             SET e.EstadoRegistro = 2
+             WHERE e.EstadoRegistro = 1 AND u.IdAcademia = ?`,
+      [idAcademia],
+    );
 
-        // 1. Bloqueo Masivo: Pasamos todas las notas de 1 (Activo) a 2 (Bloqueado)
-        const [result] = await connection.query(
-            "UPDATE Evaluacion SET EstadoRegistro = 2 WHERE EstadoRegistro = 1"
-        );
+    // 2. Registro de auditoría
+    await connection.query(
+      "INSERT INTO Auditoria_Cierres (IdAdministrador, FechaCierre, RegistrosAfectados) VALUES (?, NOW(), ?)",
+      [idAdmin, result.affectedRows],
+    );
 
-        // 2. Insertamos la evidencia en la tabla de Auditoria
-        await connection.query(
-            "INSERT INTO Auditoria_Cierres (IdAdministrador, FechaCierre, RegistrosAfectados) VALUES (?, NOW(), ?)",
-            [idAdmin, result.affectedRows]
-        );
-
-        await connection.commit();
-        res.json({ 
-            message: 'Actas cerradas oficial y legalmente.', 
-            notasBloqueadas: result.affectedRows 
-        });
-    } catch (error) {
-        await connection.rollback();
-        res.status(500).json({ error: error.message });
-    } finally {
-        connection.release();
-    }
+    await connection.commit();
+    res.json({
+      message: "Actas cerradas oficial y legalmente para tu academia.",
+      notasBloqueadas: result.affectedRows,
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error en PUT /actas/cierre:", error.message);
+    res.status(500).json({ error: error.message });
+  } finally {
+    connection.release();
+  }
 });
 
 module.exports = router;

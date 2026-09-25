@@ -1,132 +1,173 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const pool = require('../config/db');
-const verificarToken = require('../middlewares/auth.middleware');
-const verificarDocente = require('../middlewares/docente.middleware'); // <-- Tu nuevo filtro
-const verificarPeriodoAbierto = require('../middlewares/cierre.middleware'); // <-- Valida que el periodo esté abierto
+const pool = require("../config/db");
+const requiereRol = require("../middlewares/roles.middleware");
+const verificarPeriodoAbierto = require("../middlewares/cierre.middleware");
 
-// 1. Middleware global: Todo aquel que entre a /api/notas debe tener un token válido
-router.use(verificarToken);
-
-// ============================================================
-// GET: Obtener notas (Preparatorio, puedes ajustarlo cuando Toris pase el SQL)
-// ============================================================
-router.get('/', async (req, res) => {
-    try {
-        const [rows] = await pool.query("SELECT * FROM Evaluacion WHERE EstadoRegistro = 1");
-        res.json(rows);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+// GET /api/notas - Listado de evaluaciones de la academia
+router.get("/", async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT e.IdEvaluacion, e.IdMatricula, e.TipoEvaluacion, e.Calificacion, e.FechaCreacion,
+                    u.CodigoUsuario, CONCAT(u.Nombres, ' ', u.ApellidoPaterno) AS Alumno,
+                    COALESCE(c.Nombre, 'Simulacro General') AS Curso
+             FROM Evaluacion e
+             INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
+             INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
+             LEFT JOIN Curso c ON m.IdCurso = c.IdCurso
+             WHERE e.EstadoRegistro = 1 AND u.IdAcademia = ?`,
+      [req.usuario.idAcademia],
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error("Error en GET /notas:", error.message);
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// ============================================================
-// GET: Panel de rendimiento de un alumno específico (HU-02)
-// NOTA: No le ponemos el verificarDocente porque el Alumno (o el Padre)
-// debe poder entrar a esta ruta
-// ============================================================
-router.get('/alumno/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
+// GET /api/notas/alumno/:id - Historial y promedio académico individual
+router.get("/alumno/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
 
-        // 1. Consulta SQL con INNER JOIN y filtro EstadoRegistro = 1
-        const query = `
-            SELECT 
-                c.Nombre AS Curso, 
-                e.TipoEvaluacion, 
-                e.Calificacion, 
-                e.FechaCreacion
-            FROM Evaluacion e
-            INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
-            INNER JOIN Curso c ON m.IdCurso = c.IdCurso
-            INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
-            WHERE u.IdUsuario = ? AND e.EstadoRegistro = 1
-        `;
+    const [notas] = await pool.query(
+      `SELECT COALESCE(c.Nombre, 'Simulacro General') AS Curso,
+                    e.TipoEvaluacion, e.Calificacion, e.FechaCreacion
+             FROM Evaluacion e
+             INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
+             LEFT JOIN Curso c ON m.IdCurso = c.IdCurso
+             INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
+             WHERE u.IdUsuario = ? AND u.IdAcademia = ? AND e.EstadoRegistro = 1`,
+      [id, req.usuario.idAcademia],
+    );
 
-        const [notas] = await pool.query(query, [id]); // Ejecutamos el query de lectura
+    let promedio = 0;
+    if (notas.length > 0) {
+      const suma = notas.reduce((acc, n) => acc + Number(n.Calificacion), 0);
+      promedio = suma / notas.length;
+    }
 
-        // 2. Lógica matemática en Node.js para calcular el promedio
-        let promedio = 0;
+    res.json({
+      idAlumno: id,
+      promedioGeneral: parseFloat(promedio.toFixed(2)),
+      totalCursosEvaluados: notas.length,
+      historialNotas: notas,
+    });
+  } catch (error) {
+    console.error("Error en GET /notas/alumno/:id:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
 
-        if (notas.length > 0) {
-            // Usamos .reduce() para sumar todas las calificaciones del arreglo
-            const sumaCalificaciones = notas.reduce((acumulador, nota) => {
-                return acumulador + Number(nota.Calificacion);
-            }, 0);
+// POST /api/notas - Registro de notas masivo con validación transaccional
+router.post(
+  "/",
+  requiereRol("Docente", "Tutor de Aula", "Administrador"),
+  verificarPeriodoAbierto,
+  async (req, res) => {
+    const { notas } = req.body;
+    const idUsuario = req.usuario.id;
 
-            // Calculamos el promedio exacto
-            promedio = sumaCalificaciones / notas.length;
-        }
-
-        // 3. Devolvemos el JSON estructurado al Frontend
-        res.json({
-            idAlumno: id,
-            promedioGeneral: parseFloat(promedio.toFixed(2)), // Redondeado a 2 decimales
-            totalCursosEvaluados: notas.length,
-            historialNotas: notas
+    if (!Array.isArray(notas) || notas.length === 0) {
+      return res
+        .status(400)
+        .json({
+          error: 'Debes enviar un arreglo "notas" con al menos un registro.',
         });
-
-    } catch (error) {
-        res.status(500).json({ error: error.message });
     }
-});
 
-// ============================================================
-// POST: Registrar un arreglo de notas (SOLO DOCENTES + PERIODO ABIERTO)
-// Inyectamos verificarDocente y verificarPeriodoAbierto antes de la función
-// ============================================================
-router.post('/', verificarDocente, verificarPeriodoAbierto, async (req, res) => {
+    for (const nota of notas) {
+      const calif = Number(nota.Calificacion);
+      if (
+        !nota.IdMatricula ||
+        !nota.TipoEvaluacion ||
+        Number.isNaN(calif) ||
+        calif < 0 ||
+        calif > 20
+      ) {
+        return res.status(400).json({
+          error:
+            "Nota inválida: La calificación debe ser un valor numérico entre 0 y 20.",
+        });
+      }
+    }
+
     const connection = await pool.getConnection();
     try {
-        await connection.beginTransaction();
+      await connection.beginTransaction();
 
-        const { notas } = req.body; // El frontend (Luis/Dante) te enviará un array de objetos
-        const idUsuario = req.usuario.id; // Capturamos quién es el docente logueado
-
-        // Iteramos el arreglo e insertamos nota por nota dentro de la misma transacción
-        for (const nota of notas) {
-            const { IdMatricula, Calificacion, TipoEvaluacion } = nota;
-            await connection.query(
-                "INSERT INTO Evaluacion (IdMatricula, Calificacion, TipoEvaluacion, UsuarioCreacion, FechaCreacion, EstadoRegistro) VALUES (?, ?, ?, ?, NOW(), 1)",
-                [IdMatricula, Calificacion, TipoEvaluacion, idUsuario]
-            );
-        }
-
-        await connection.commit();
-        res.status(201).json({ message: 'Calificaciones registradas con éxito en bloque' });
-    } catch (error) {
-        await connection.rollback();
-        res.status(500).json({ error: error.message });
-    } finally {
-        connection.release();
-    }
-});
-
-// ============================================================
-// PUT: Modificar una nota específica (SOLO DOCENTES + PERIODO ABIERTO)
-// ============================================================
-router.put('/:id', verificarDocente, verificarPeriodoAbierto, async (req, res) => {
-    const connection = await pool.getConnection();
-    try {
-        await connection.beginTransaction();
-        const { id } = req.params;
-        const { Calificacion } = req.body;
-        const idUsuario = req.usuario.id;
-
-        // Actualizamos la nota y usamos la función NOW() de MySQL para la auditoría
+      for (const nota of notas) {
         await connection.query(
-            "UPDATE Evaluacion SET Calificacion = ?, UsuarioModificacion = ?, FechaModificacion = NOW() WHERE IdEvaluacion = ?",
-            [Calificacion, idUsuario, id]
+          `INSERT INTO Evaluacion
+                    (IdMatricula, Calificacion, TipoEvaluacion, UsuarioCreacion, FechaCreacion, EstadoRegistro)
+                 VALUES (?, ?, ?, ?, NOW(), 1)`,
+          [nota.IdMatricula, nota.Calificacion, nota.TipoEvaluacion, idUsuario],
         );
+      }
 
-        await connection.commit();
-        res.json({ message: 'Calificación actualizada con éxito' });
+      await connection.commit();
+      res
+        .status(201)
+        .json({ message: "Calificaciones registradas con éxito en bloque" });
     } catch (error) {
-        await connection.rollback();
-        res.status(500).json({ error: error.message });
+      await connection.rollback();
+      console.error("Error en POST /notas:", error.message);
+      res.status(500).json({ error: error.message });
     } finally {
-        connection.release();
+      connection.release();
     }
-});
+  },
+);
+
+// PUT /api/notas/:id - Modificación puntual asegurando aislamiento por academia
+router.put(
+  "/:id",
+  requiereRol("Docente", "Tutor de Aula", "Administrador"),
+  verificarPeriodoAbierto,
+  async (req, res) => {
+    const { id } = req.params;
+    const calif = Number(req.body.Calificacion);
+    const idUsuario = req.usuario.id;
+    const idAcademia = req.usuario.idAcademia;
+
+    if (Number.isNaN(calif) || calif < 0 || calif > 20) {
+      return res
+        .status(400)
+        .json({ error: "La calificación debe ser un número entre 0 y 20." });
+    }
+
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+
+      const [result] = await connection.query(
+        `UPDATE Evaluacion e
+             INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
+             INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
+             SET e.Calificacion = ?, e.UsuarioModificacion = ?, e.FechaModificacion = NOW()
+             WHERE e.IdEvaluacion = ? AND u.IdAcademia = ?`,
+        [calif, idUsuario, id, idAcademia],
+      );
+
+      if (result.affectedRows === 0) {
+        await connection.rollback();
+        return res
+          .status(404)
+          .json({
+            error: "Evaluación no encontrada o no pertenece a tu academia.",
+          });
+      }
+
+      await connection.commit();
+      res.json({ message: "Calificación actualizada con éxito" });
+    } catch (error) {
+      await connection.rollback();
+      console.error("Error en PUT /notas/:id:", error.message);
+      res.status(500).json({ error: error.message });
+    } finally {
+      connection.release();
+    }
+  },
+);
 
 module.exports = router;
