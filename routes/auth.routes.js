@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 
 // ==========================================
-// 1. REGISTRO PÚBLICO (Sin pedir Token)
+// 1. REGISTRO PÚBLICO (Sin exigir Token JWT)
 // ==========================================
 const registerHandler = async (req, res) => {
   const connection = await pool.getConnection();
@@ -33,10 +33,10 @@ const registerHandler = async (req, res) => {
     const perfilFinal = Number(IdPerfil || (Array.isArray(perfiles) ? perfiles[0] : 1)) || 1;
     const academiaFinal = Number(IdAcademia || idAcademia || 1);
 
-    // Asignamos el apodo (ej. FrancoEsca) como CodigoUsuario para permitir login directo
-    const codigoGenerado = apodoUsuario || `USR-${Math.floor(1000 + Math.random() * 9000)}`;
+    // Si viene apodo lo usa; si no, une Nombre+Apellido (ej. JohanZamora) o genera un USR
+    const codigoGenerado = apodoUsuario || `${nom.replace(/\s+/g, '')}${apeP.replace(/\s+/g, '')}` || `USR-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    // Validar duplicados básicos
+    // Comprobación de duplicados (Email o DNI)
     const [existentes] = await connection.query(
       `SELECT IdUsuario FROM Usuario WHERE CorreoElectronico = ? OR (DNI = ? AND DNI != '') LIMIT 1`,
       [email, docIdentidad]
@@ -50,7 +50,7 @@ const registerHandler = async (req, res) => {
 
     await connection.beginTransaction();
 
-    // NOTA: UsuarioCreacion se define con el entero 1 (Usuario Administrador/Sistema)
+    // UsuarioCreacion = 1 (entero para cumplir con el tipo de columna en MySQL)
     const [resUser] = await connection.query(
       `INSERT INTO Usuario 
        (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, UsuarioCreacion, FechaCreacion, EstadoRegistro, IdAcademia)
@@ -60,7 +60,7 @@ const registerHandler = async (req, res) => {
 
     const nuevoIdUsuario = resUser.insertId;
 
-    // Asignación de rol en tabla intermedia
+    // Asignación de rol en la tabla intermedia Usuario_Perfiles
     await connection.query(
       `INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)`,
       [nuevoIdUsuario, perfilFinal]
@@ -87,7 +87,7 @@ const registerHandler = async (req, res) => {
 };
 
 // ==========================================
-// 2. INICIO DE SESIÓN FLEXIBLE
+// 2. LOGIN INTELIGENTE Y TOLERANTE
 // ==========================================
 const loginHandler = async (req, res) => {
   try {
@@ -110,7 +110,12 @@ const loginHandler = async (req, res) => {
     const termino = String(usuarioInput).trim();
     const clave = String(passwordInput).trim();
 
-    // Busca por Correo, DNI, Código de Usuario o Nombres
+    // Normalizaciones rápidas en memoria
+    const termLower   = termino.toLowerCase();
+    const termNoDots  = termLower.replace(/\./g, '');
+    const termNoSpace = termLower.replace(/\s+/g, '');
+
+    // Consulta flexible: busca por correo, DNI, código, nombres separados o Nombre+Apellido juntos
     const [rows] = await pool.query(
       `SELECT u.IdUsuario, 
               CONCAT(u.Nombres, ' ', COALESCE(u.ApellidoPaterno, '')) AS nombreCompleto,
@@ -122,12 +127,28 @@ const loginHandler = async (req, res) => {
        LEFT JOIN Usuario_Perfiles up ON u.IdUsuario = up.IdUsuario AND up.EstadoRegistro = 1
        LEFT JOIN perfil p ON up.IdPerfil = p.IdPerfil
        LEFT JOIN Academia a ON u.IdAcademia = a.IdAcademia
-       WHERE LOWER(TRIM(u.CorreoElectronico)) = LOWER(?) 
-          OR TRIM(u.DNI) = ? 
-          OR LOWER(TRIM(u.CodigoUsuario)) = LOWER(?)
-          OR LOWER(TRIM(u.Nombres)) = LOWER(?)
+       WHERE u.EstadoRegistro = 1
+         AND (
+            LOWER(TRIM(u.CorreoElectronico)) = ?
+            OR REPLACE(LOWER(TRIM(u.CorreoElectronico)), '.', '') = ?
+            OR LOWER(SUBSTRING_INDEX(u.CorreoElectronico, '@', 1)) = ?
+            OR LOWER(TRIM(u.CodigoUsuario)) = ?
+            OR TRIM(u.DNI) = ?
+            OR LOWER(TRIM(u.Nombres)) = ?
+            OR LOWER(REPLACE(CONCAT(TRIM(u.Nombres), COALESCE(TRIM(u.ApellidoPaterno), '')), ' ', '')) = ?
+            OR LOWER(CONCAT(TRIM(u.Nombres), ' ', COALESCE(TRIM(u.ApellidoPaterno), ''))) = ?
+         )
        LIMIT 1`,
-      [termino, termino, termino, termino]
+      [
+        termLower,   // 1. Correo exacto
+        termNoDots,  // 2. Correo sin puntos
+        termLower,   // 3. Usuario antes del @
+        termLower,   // 4. Código institucional
+        termino,     // 5. DNI
+        termLower,   // 6. Primer Nombre
+        termNoSpace, // 7. Nombre y Apellido pegados (ej. johanzamora)
+        termLower    // 8. Nombre y Apellido con espacio (ej. johan zamora)
+      ]
     );
 
     if (rows.length === 0) {
@@ -136,11 +157,7 @@ const loginHandler = async (req, res) => {
 
     const user = rows[0];
 
-    if (user.EstadoRegistro !== 1) {
-      return res.status(403).json({ error: 'La cuenta se encuentra inactiva o bloqueada.' });
-    }
-
-    // Validación Bcrypt vs Texto Plano heredado
+    // Validación de contraseña cifrada con bcrypt o fallback plano
     let claveValida = false;
     const claveEnBD = String(user.Clave);
 
@@ -154,6 +171,7 @@ const loginHandler = async (req, res) => {
       return res.status(401).json({ error: 'Contraseña incorrecta.' });
     }
 
+    // Creación del Token JWT con multi-tenant
     const token = jwt.sign(
       {
         id: user.IdUsuario,
@@ -198,12 +216,12 @@ const loginHandler = async (req, res) => {
 };
 
 // ==========================================
-// 3. DECLARACIÓN DE ENDPOINTS
+// 3. DECLARACIÓN DE RUTAS
 // ==========================================
 router.post('/login', loginHandler);
 router.post('/auth/login', loginHandler);
 
-// Endpoints de registro público (ubicados antes del middleware JWT de index.js)
+// Endpoints públicos de registro atendidos antes del middleware global
 router.post('/usuarios', registerHandler);
 router.post('/auth/register', registerHandler);
 router.post('/register', registerHandler);
