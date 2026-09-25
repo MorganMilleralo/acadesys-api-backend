@@ -1,0 +1,124 @@
+{
+  "info": {
+    "name": "AcadeSys API - Integración Global & DevOps",
+    "description": "Colección completa para pruebas de Backend, Seguridad Multi-tenant y Tutor IA",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000/api" },
+    { "key": "token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "01. Auth - Login Dual (Admin / Docente)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "var jsonData = pm.response.json();",
+              "if (jsonData.token) {",
+              "    pm.collectionVariables.set('token', jsonData.token);",
+              "    console.log('Token JWT capturado con éxito.');",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"usuario\": \"admin@acadesys.edu.pe\",\n  \"password\": \"Admin123\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/login"
+        }
+      }
+    },
+    {
+      "name": "02. Matrícula - Registro Cero Fricción",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"nombres\": \"Luis Fernando\",\n  \"apellidos\": \"Tóccas Quispe\",\n  \"dni\": \"75849201\",\n  \"idCiclo\": 1,\n  \"idAcademia\": 1\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/matriculas"
+        }
+      }
+    },
+    {
+      "name": "03. Finanzas - Semáforo Pagos por Ciclo",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/pagos/ciclo/1"
+        }
+      }
+    },
+    {
+      "name": "04. Tutor IA - Diagnóstico Estructurado",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"alumno\": {\n    \"nombre\": \"Luis Fernando Tóccas\",\n    \"aula\": \"5to de Secundaria - Aula 101 UNI\",\n    \"promedio\": 15.8\n  },\n  \"historialNotas\": [\n    { \"curso\": \"Álgebra Superior\", \"nota\": 16.2 },\n    { \"curso\": \"Física y Cinemática\", \"nota\": 11.0 },\n    { \"curso\": \"Química Orgánica\", \"nota\": 12.3 }\n  ]\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/tutor-ia/diagnostico"
+        }
+      }
+    },
+    {
+      "name": "05. Tutor IA - Consulta Interactiva",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"pregunta\": \"¿Qué temas de cinemática suelen venir con mayor frecuencia en el examen de la UNI?\",\n  \"estudiante\": {\n    \"nombre\": \"Luis Fernando\",\n    \"promedio\": 15.8\n  }\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/tutor-ia"
+        }
+      }
+    },
+    {
+      "name": "06. QA - Intrusión Multi-tenant (Prueba de Aislamiento)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"idAcademia\": 2,\n  \"idCiclo\": 99,\n  \"idCurso\": 1,\n  \"listaNotas\": [\n    { \"idAlumno\": 101, \"parcial\": 20 }\n  ]\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/notas"
+        }
+      }
+    }
+  ]
+}
