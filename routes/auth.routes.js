@@ -122,4 +122,74 @@ const loginHandler = async (req, res) => {
 router.post('/login', loginHandler);
 router.post('/auth/login', loginHandler);
 
+// ==========================================
+// REGISTRO PÚBLICO DE USUARIOS
+// Permite que la creación de usuarios desde LandingPage sea pública
+// (endpoint sin middleware de autenticación)
+// ==========================================
+router.post('/usuarios', async (req, res) => {
+  try {
+    const { 
+      DNI, dni, 
+      Nombres, nombre, 
+      ApellidoPaterno, apellido, 
+      ApellidoMaterno, apellidoMaterno, 
+      Celular, celular, 
+      CorreoElectronico, correo, 
+      Clave, contrasena, password, 
+      IdPerfil, perfiles, 
+      IdAcademia, idAcademia 
+    } = req.body;
+
+    const docIdentidad = (DNI || dni || '').trim();
+    const nom = (Nombres || nombre || '').trim();
+    const apeP = (ApellidoPaterno || apellido || '').trim();
+    const apeM = (ApellidoMaterno || apellidoMaterno || '').trim();
+    const pass = (Clave || contrasena || password || '').trim();
+    const email = (CorreoElectronico || correo || `${nom.toLowerCase()}@acadesys.edu.pe`).trim();
+    const tel = (Celular || celular || '').trim();
+    
+    // Perfil asignado (por defecto 1 = Admin o 4 = Alumno)
+    const perfilFinal = IdPerfil || (Array.isArray(perfiles) ? perfiles[0] : 1);
+    const academiaFinal = IdAcademia || idAcademia || 1;
+
+    // Validaciones mínimas
+    if (!docIdentidad || !nom || !apeP || !pass) {
+      return res.status(400).json({ 
+        error: 'Faltan campos obligatorios: DNI, Nombres, Apellido Paterno y Contraseña.' 
+      });
+    }
+
+    // Hashear la contraseña con bcrypt
+    const claveHasheada = await bcrypt.hash(pass, 10);
+    const codigoGenerado = `USR-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    // Inserción en la tabla Usuario
+    const [result] = await pool.query(
+      `INSERT INTO Usuario 
+       (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, EstadoRegistro, IdAcademia, FechaCreacion) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NOW())`,
+      [codigoGenerado, docIdentidad, nom, apeP, apeM, tel, email, claveHasheada, academiaFinal]
+    );
+
+    const nuevoIdUsuario = result.insertId;
+
+    // Vincular perfil en Usuario_Perfiles
+    await pool.query(
+      `INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)`,
+      [nuevoIdUsuario, perfilFinal]
+    );
+
+    return res.status(201).json({
+      mensaje: 'Usuario registrado exitosamente en la base de datos.',
+      idUsuario: nuevoIdUsuario,
+      codigoUsuario: codigoGenerado,
+      correo: email
+    });
+  } catch (error) {
+    console.error('Error en registro público de usuario:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;
