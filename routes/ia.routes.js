@@ -11,23 +11,26 @@ const tutorHandler = async (req, res) => {
     const nombreEstudiante = (alumno && alumno.nombre) || estudiante || "Estudiante";
     const notas = historialNotas || historialSimulacros || [];
 
+    // Prompt adaptado: permite diagnósticos y conversación interactiva fluida
     const prompt = `
       Eres un tutor pedagógico preuniversitario experto de AcadeSys.
       Estudiante: ${nombreEstudiante}
-      Pregunta/Contexto: ${pregunta || "Diagnóstico general de rendimiento"}
+      Consulta/Pregunta del estudiante: ${pregunta || "Diagnóstico general de rendimiento"}
       Historial de Evaluaciones: ${JSON.stringify(notas)}
 
-      Responde únicamente en formato JSON con la siguiente estructura:
+      Responde ÚNICAMENTE en formato JSON con la siguiente estructura exacta:
       {
-        "resumenGeneral": "Evaluación breve y directa",
+        "respuesta": "Tu mensaje o respuesta pedagógica directa, amigable y motivadora para el alumno",
+        "resumenGeneral": "Evaluación breve y directa de su rendimiento",
         "puntosFuertes": ["Tema o habilidad destacada"],
         "areasMejora": ["Puntos críticos que debe reforzar"],
         "planEstudio": ["Recomendación de estudio inmediata"]
       }
     `;
 
+    // Se actualiza al modelo actual compatible
     const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.5-flash",
       generationConfig: {
         responseMimeType: "application/json",
       },
@@ -36,7 +39,14 @@ const tutorHandler = async (req, res) => {
     const result = await model.generateContent(prompt);
     const responseText = result.response.text();
 
-    return res.status(200).json(JSON.parse(responseText));
+    const dataParsed = JSON.parse(responseText);
+
+    // Aseguramos compatibilidad total con api.js y TutorIAPage
+    return res.status(200).json({
+      ...dataParsed,
+      mensaje: dataParsed.respuesta,
+      analisis: dataParsed.respuesta
+    });
   } catch (error) {
     console.error("Error en Tutor IA:", error.message);
     return res.status(500).json({
