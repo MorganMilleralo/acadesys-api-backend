@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 
 // ==========================================
-// 1. REGISTRO PÚBLICO (Crea usuario en MySQL sin pedir Token)
+// 1. REGISTRO PÚBLICO (Sin pedir Token)
 // ==========================================
 const registerHandler = async (req, res) => {
   const connection = await pool.getConnection();
@@ -23,7 +23,8 @@ const registerHandler = async (req, res) => {
     } = req.body;
 
     const docIdentidad = String(DNI || dni || '').trim().slice(0, 8);
-    const nom = String(Nombres || nombre || nombreUsuario || usuario || 'Usuario').trim();
+    const apodoUsuario = String(nombreUsuario || usuario || '').trim();
+    const nom = String(Nombres || nombre || apodoUsuario || 'Usuario').trim();
     const apeP = String(ApellidoPaterno || apellido || 'General').trim();
     const apeM = String(ApellidoMaterno || apellidoMaterno || '').trim();
     const tel = String(Celular || celular || '').trim();
@@ -31,6 +32,9 @@ const registerHandler = async (req, res) => {
     const rawClave = String(Clave || contrasena || password || '123456').trim();
     const perfilFinal = Number(IdPerfil || (Array.isArray(perfiles) ? perfiles[0] : 1)) || 1;
     const academiaFinal = Number(IdAcademia || idAcademia || 1);
+
+    // Asignamos el apodo (ej. FrancoEsca) como CodigoUsuario para permitir login directo
+    const codigoGenerado = apodoUsuario || `USR-${Math.floor(1000 + Math.random() * 9000)}`;
 
     // Validar duplicados básicos
     const [existentes] = await connection.query(
@@ -43,15 +47,14 @@ const registerHandler = async (req, res) => {
     }
 
     const claveHasheada = await bcrypt.hash(rawClave, 10);
-    const codigoGenerado = `USR-${Math.floor(1000 + Math.random() * 9000)}`;
 
     await connection.beginTransaction();
 
-    // Inserción en tabla principal Usuario
+    // NOTA: UsuarioCreacion se define con el entero 1 (Usuario Administrador/Sistema)
     const [resUser] = await connection.query(
       `INSERT INTO Usuario 
        (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, UsuarioCreacion, FechaCreacion, EstadoRegistro, IdAcademia)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'registro_web', NOW(), 1, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), 1, ?)`,
       [codigoGenerado, docIdentidad, nom, apeP, apeM, tel, email, claveHasheada, academiaFinal]
     );
 
@@ -71,7 +74,7 @@ const registerHandler = async (req, res) => {
       id: nuevoIdUsuario,
       codigoUsuario: codigoGenerado,
       correo: email,
-      usuario: nom
+      usuario: apodoUsuario || nom
     });
 
   } catch (error) {
@@ -84,7 +87,7 @@ const registerHandler = async (req, res) => {
 };
 
 // ==========================================
-// 2. INICIO DE SESIÓN ADAPTATIVO
+// 2. INICIO DE SESIÓN FLEXIBLE
 // ==========================================
 const loginHandler = async (req, res) => {
   try {
@@ -107,7 +110,7 @@ const loginHandler = async (req, res) => {
     const termino = String(usuarioInput).trim();
     const clave = String(passwordInput).trim();
 
-    // Busca por Correo, DNI, Código de Usuario O Nombre registrado
+    // Busca por Correo, DNI, Código de Usuario o Nombres
     const [rows] = await pool.query(
       `SELECT u.IdUsuario, 
               CONCAT(u.Nombres, ' ', COALESCE(u.ApellidoPaterno, '')) AS nombreCompleto,
@@ -137,7 +140,7 @@ const loginHandler = async (req, res) => {
       return res.status(403).json({ error: 'La cuenta se encuentra inactiva o bloqueada.' });
     }
 
-    // Compatibilidad Bcrypt vs Texto Plano heredado
+    // Validación Bcrypt vs Texto Plano heredado
     let claveValida = false;
     const claveEnBD = String(user.Clave);
 
@@ -195,12 +198,12 @@ const loginHandler = async (req, res) => {
 };
 
 // ==========================================
-// 3. DECLARACIÓN DE RUTAS
+// 3. DECLARACIÓN DE ENDPOINTS
 // ==========================================
 router.post('/login', loginHandler);
 router.post('/auth/login', loginHandler);
 
-// Endpoints de registro atendidos antes del candado de token
+// Endpoints de registro público (ubicados antes del middleware JWT de index.js)
 router.post('/usuarios', registerHandler);
 router.post('/auth/register', registerHandler);
 router.post('/register', registerHandler);
