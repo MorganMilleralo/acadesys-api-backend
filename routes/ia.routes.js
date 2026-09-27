@@ -28,7 +28,7 @@ const tutorHandler = async (req, res) => {
     `;
 
     // Lista de modelos ordenados por prioridad ante picos de demanda (503)
-    const modelosDisponibles = ["gemini-3.8-flash", "gemini-2.5-pro"];
+    const modelosDisponibles = ["gemini-3.8-flash", "gemini-3.1-pro-preview"];
     let responseText = null;
     let ultimoError = null;
 
