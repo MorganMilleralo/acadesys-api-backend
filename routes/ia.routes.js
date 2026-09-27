@@ -11,7 +11,6 @@ const tutorHandler = async (req, res) => {
     const nombreEstudiante = (alumno && alumno.nombre) || estudiante || "Estudiante";
     const notas = historialNotas || historialSimulacros || [];
 
-    // Prompt adaptado: permite diagnósticos y conversación interactiva fluida
     const prompt = `
       Eres un tutor pedagógico preuniversitario experto de AcadeSys.
       Estudiante: ${nombreEstudiante}
@@ -28,24 +27,39 @@ const tutorHandler = async (req, res) => {
       }
     `;
 
-    // Se actualiza al modelo actual compatible
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.8-flash",
-      generationConfig: {
-        responseMimeType: "application/json",
-      },
-    });
+    // Lista de modelos ordenados por prioridad ante picos de demanda (503)
+    const modelosDisponibles = ["gemini-3.8-flash", "gemini-2.5-pro"];
+    let responseText = null;
+    let ultimoError = null;
 
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
+    for (const nombreModelo of modelosDisponibles) {
+      try {
+        const model = genAI.getGenerativeModel({
+          model: nombreModelo,
+          generationConfig: {
+            responseMimeType: "application/json",
+          },
+        });
+
+        const result = await model.generateContent(prompt);
+        responseText = result.response.text();
+        if (responseText) break; // Si respondió con éxito, salimos del ciclo
+      } catch (err) {
+        console.warn(`[Tutor IA] ${nombreModelo} no respondió (${err.message}). Evaluando alternativa...`);
+        ultimoError = err;
+      }
+    }
+
+    if (!responseText) {
+      throw ultimoError || new Error("No hubo disponibilidad en los modelos de IA.");
+    }
 
     const dataParsed = JSON.parse(responseText);
 
-    // Aseguramos compatibilidad total con api.js y TutorIAPage
     return res.status(200).json({
       ...dataParsed,
       mensaje: dataParsed.respuesta,
-      analisis: dataParsed.respuesta
+      analisis: dataParsed.respuesta,
     });
   } catch (error) {
     console.error("Error en Tutor IA:", error.message);
