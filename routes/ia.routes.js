@@ -30,7 +30,7 @@ const tutorHandler = async (req, res) => {
 
     // Se actualiza al modelo actual compatible
     const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-flash",
+      model: "gemini-3.8-flash",
       generationConfig: {
         responseMimeType: "application/json",
       },
