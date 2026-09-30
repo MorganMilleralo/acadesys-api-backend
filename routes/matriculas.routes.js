@@ -4,7 +4,6 @@ const pool = require('../config/db');
 const bcrypt = require('bcrypt');
 const nodemailer = require('nodemailer');
 
-// 1. Configuración con el tiempo de espera corto (10 segundos) que pidió Luis
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -42,8 +41,9 @@ router.post('/checkout', async (req, res) => {
         );
         const idNuevoAlumno = insertUser.insertId;
 
+        // AQUÍ ESTABA EL DEDAZO: Corregido a IdPerfil
         await connection.query(
-            `INSERT INTO Usuario_Perfiles (IdUsuario, IdUsuario, EstadoRegistro) VALUES (?, 4, 1)`,
+            `INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, 4, 1)`,
             [idNuevoAlumno]
         );
 
@@ -57,16 +57,13 @@ router.post('/checkout', async (req, res) => {
             [idNuevoAlumno, IdCiclo]
         );
 
-        // 2. Guardamos la matrícula en la base de datos PRIMERO
         await connection.commit();
 
-        // 3. Le respondemos a la página web de Luis AL INSTANTE
         res.status(201).json({ 
             exito: true,
             mensaje: 'Pago e inscripción procesados con éxito. Las credenciales llegarán a tu correo en breve.' 
         });
 
-        // 4. Mandamos el correo DESPUÉS sin bloquear la página web (le quitamos el "await")
         const mailOptions = {
             from: `"Admisión AcadeSys" <${process.env.EMAIL_USER}>`,
             to: Correo,
@@ -84,7 +81,7 @@ router.post('/checkout', async (req, res) => {
         };
 
         transporter.sendMail(mailOptions).catch(err => {
-            console.error('Error enviando correo:', err);
+            console.error('Error enviando correo SMTP:', err);
         });
 
     } catch (error) {
