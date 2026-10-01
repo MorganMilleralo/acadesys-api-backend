@@ -6,13 +6,13 @@ const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
-    port: 465,
-    secure: true, 
+    port: 587,           // Cambiamos al puerto alternativo de Google
+    secure: false,       // STARTTLS (falso porque la conexión empieza en texto plano y luego se cifra)
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS
     },
-    family: 4, // Fuerza IPv4 para evitar bloqueos ENETUNREACH en Render
+    family: 4, 
     connectionTimeout: 10000 
 });
 
