@@ -12,7 +12,7 @@ const transporter = nodemailer.createTransport({
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS
     },
-    family: 4, // <-- LA MAGIA: Fuerza la red IPv4 para evitar el bloqueo de Render
+    family: 4, // Fuerza IPv4 para evitar bloqueos ENETUNREACH en Render
     connectionTimeout: 10000 
 });
 
@@ -66,25 +66,43 @@ router.post('/checkout', async (req, res) => {
             mensaje: 'Pago e inscripción procesados con éxito. Las credenciales llegarán a tu correo en breve.' 
         });
 
+        const asuntoCorreo = '¡Inscripción Exitosa! Tus accesos a la Intranet';
+        const cuerpoHtml = `
+            <div style="font-family: Arial, sans-serif; padding: 20px;">
+                <h2 style="color: #4f46e5;">¡Bienvenido a AcadeSys, ${Nombres}!</h2>
+                <p>Hemos procesado tu pago correctamente y tu matrícula ya está oficializada.</p>
+                <div style="background-color: #f8fafc; padding: 15px; border-radius: 8px;">
+                    <p><strong>Código de Usuario:</strong> ${codigoUsuario}</p>
+                    <p><strong>Contraseña:</strong> ${claveSinEncriptar}</p>
+                </div>
+            </div>
+        `;
+
         const mailOptions = {
             from: `"Admisión AcadeSys" <${process.env.EMAIL_USER}>`,
             to: Correo,
-            subject: '¡Inscripción Exitosa! Tus accesos a la Intranet',
-            html: `
-                <div style="font-family: Arial, sans-serif; padding: 20px;">
-                    <h2 style="color: #4f46e5;">¡Bienvenido a AcadeSys, ${Nombres}!</h2>
-                    <p>Hemos procesado tu pago correctamente y tu matrícula ya está oficializada.</p>
-                    <div style="background-color: #f8fafc; padding: 15px; border-radius: 8px;">
-                        <p><strong>Código de Usuario:</strong> ${codigoUsuario}</p>
-                        <p><strong>Contraseña:</strong> ${claveSinEncriptar}</p>
-                    </div>
-                </div>
-            `
+            subject: asuntoCorreo,
+            html: cuerpoHtml
         };
 
+        // Enviamos el correo. Si falla, lo guardamos en la nueva tabla CorreosPendientes
         transporter.sendMail(mailOptions)
             .then(info => console.log('Correo enviado con éxito:', info.response))
-            .catch(err => console.error('Error enviando correo SMTP:', err));
+            .catch(async (err) => {
+                console.error('Fallo SMTP. Guardando en la caja de seguridad (CorreosPendientes)...', err);
+                try {
+                    const connRespaldo = await pool.getConnection();
+                    await connRespaldo.query(
+                        `INSERT INTO CorreosPendientes (IdUsuario, Destinatario, Asunto, CuerpoHtml, CodigoUsuario, ClaveTemporal, Estado) 
+                         VALUES (?, ?, ?, ?, ?, ?, 'Pendiente')`,
+                        [idNuevoAlumno, Correo, asuntoCorreo, cuerpoHtml, codigoUsuario, claveSinEncriptar]
+                    );
+                    connRespaldo.release();
+                    console.log('Correo respaldado exitosamente en la base de datos.');
+                } catch (dbErr) {
+                    console.error('Error crítico guardando el correo en BD:', dbErr);
+                }
+            });
 
     } catch (error) {
         await connection.rollback();
