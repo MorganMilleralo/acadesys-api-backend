@@ -3,17 +3,19 @@ const router = express.Router();
 const pool = require('../config/db');
 const bcrypt = require('bcrypt');
 const nodemailer = require('nodemailer');
+const dns = require('dns');
+
+// EL HACK DEFINITIVO: Obligamos a Node.js a usar solo IPv4 a nivel de sistema operativo
+dns.setDefaultResultOrder('ipv4first');
 
 const transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
-    port: 587,           // Cambiamos al puerto alternativo de Google
-    secure: false,       // STARTTLS (falso porque la conexión empieza en texto plano y luego se cifra)
+    port: 465,
+    secure: true, 
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS
-    },
-    family: 4, 
-    connectionTimeout: 10000 
+    }
 });
 
 function generarClaveTemporal() {
@@ -85,11 +87,11 @@ router.post('/checkout', async (req, res) => {
             html: cuerpoHtml
         };
 
-        // Enviamos el correo. Si falla, lo guardamos en la nueva tabla CorreosPendientes
+        // El envío asíncrono. Mantenemos el respaldo en BD solo por seguridad profesional.
         transporter.sendMail(mailOptions)
-            .then(info => console.log('Correo enviado con éxito:', info.response))
+            .then(info => console.log('✅ Correo enviado con éxito de forma automática:', info.response))
             .catch(async (err) => {
-                console.error('Fallo SMTP. Guardando en la caja de seguridad (CorreosPendientes)...', err);
+                console.error('❌ Fallo SMTP final. Guardando en BD...', err);
                 try {
                     const connRespaldo = await pool.getConnection();
                     await connRespaldo.query(
@@ -98,9 +100,8 @@ router.post('/checkout', async (req, res) => {
                         [idNuevoAlumno, Correo, asuntoCorreo, cuerpoHtml, codigoUsuario, claveSinEncriptar]
                     );
                     connRespaldo.release();
-                    console.log('Correo respaldado exitosamente en la base de datos.');
                 } catch (dbErr) {
-                    console.error('Error crítico guardando el correo en BD:', dbErr);
+                    console.error('Error guardando en BD:', dbErr);
                 }
             });
 
