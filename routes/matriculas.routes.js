@@ -5,7 +5,9 @@ const bcrypt = require('bcrypt');
 const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true, 
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS
@@ -41,7 +43,6 @@ router.post('/checkout', async (req, res) => {
         );
         const idNuevoAlumno = insertUser.insertId;
 
-        // AQUÍ ESTABA EL DEDAZO: Corregido a IdPerfil
         await connection.query(
             `INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, 4, 1)`,
             [idNuevoAlumno]
