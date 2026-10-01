@@ -12,6 +12,7 @@ const transporter = nodemailer.createTransport({
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS
     },
+    family: 4, // <-- LA MAGIA: Fuerza la red IPv4 para evitar el bloqueo de Render
     connectionTimeout: 10000 
 });
 
@@ -81,9 +82,9 @@ router.post('/checkout', async (req, res) => {
             `
         };
 
-        transporter.sendMail(mailOptions).catch(err => {
-            console.error('Error enviando correo SMTP:', err);
-        });
+        transporter.sendMail(mailOptions)
+            .then(info => console.log('Correo enviado con éxito:', info.response))
+            .catch(err => console.error('Error enviando correo SMTP:', err));
 
     } catch (error) {
         await connection.rollback();
