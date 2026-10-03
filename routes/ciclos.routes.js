@@ -10,6 +10,8 @@ router.get('/publicos', async (req, res) => {
                 c.IdCiclo, 
                 c.Nombre, 
                 c.PrefijoCodigo,
+                c.Turno, 
+                c.Horario,
                 c.FechaInicio,
                 c.FechaFin,
                 (SELECT COUNT(*) FROM Matricula m WHERE m.IdCiclo = c.IdCiclo AND m.EstadoRegistro = 1) AS TotalAlumnos
