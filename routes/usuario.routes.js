@@ -31,11 +31,38 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
   try {
     await connection.beginTransaction();
 
+    const baseCodigo = String(
+      req.body.CodigoUsuario ||
+      req.body.codigoUsuario ||
+      `${Nombres}${ApellidoPaterno}`
+    )
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .toUpperCase()
+      .slice(0, 20) || "USR";
+
+    let codigoUsuario = `${baseCodigo}-${String(Date.now()).slice(-6)}`;
+    for (let intento = 0; intento < 10; intento += 1) {
+      const candidato = intento === 0
+        ? codigoUsuario
+        : `${baseCodigo}-${String(Date.now() + intento).slice(-6)}`;
+      const [existeCodigo] = await connection.query(
+        "SELECT IdUsuario FROM Usuario WHERE CodigoUsuario = ? LIMIT 1",
+        [candidato]
+      );
+      if (existeCodigo.length === 0) {
+        codigoUsuario = candidato;
+        break;
+      }
+    }
+
     const [resultUsuario] = await connection.query(
       `INSERT INTO Usuario
-                (DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, IdAcademia, FechaCreacion, EstadoRegistro)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1)`,
+                (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, IdAcademia, FechaCreacion, EstadoRegistro)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1)`,
       [
+        codigoUsuario,
         DNI || null,
         Nombres,
         ApellidoPaterno,
@@ -58,6 +85,7 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
     res.status(201).json({
       message: "Usuario creado y perfil asignado con éxito",
       id: idGenerado,
+      codigoUsuario,
     });
   } catch (error) {
     await connection.rollback();

@@ -13,9 +13,13 @@ const requiereRol = (...rolesPermitidos) => {
     }
 
     // Validación por nombre de rol o por ID directo (Administrador = 1)
+    const rolNormalizado = String(rolUsuario || '').toLowerCase();
     const esAdmin =
       rolesPermitidos.includes("Administrador") &&
-      (rolUsuario === "Administrador" || idPerfil === 1);
+      (rolNormalizado.includes("administrador") ||
+       rolNormalizado.includes("recursos humanos") ||
+       rolNormalizado === "rrhh" ||
+       idPerfil === 1);
     const tieneRolValido = rolesPermitidos.includes(rolUsuario);
 
     if (!tieneRolValido && !esAdmin) {
