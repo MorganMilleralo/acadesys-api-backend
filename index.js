@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 require('./config/db');
 
 const app = express();
@@ -21,8 +22,10 @@ if (faltantes.length > 0) {
     process.exit(1);
 }
 
-app.use(cors());
-app.use(express.json());
+app.set('trust proxy', 1);
+app.use(cors({ origin: true }));
+app.use(express.json({ limit: '15mb' }));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // ==========================================
 // 1. RUTAS PÚBLICAS (Sin Token / Cero Fricción)
@@ -56,6 +59,8 @@ app.use('/api/notas', require('./routes/notas.routes'));
 app.use('/api', require('./routes/actas.routes'));
 app.use('/api', require('./routes/pagos.routes'));
 app.use('/api', require('./routes/ia.routes'));
+app.use('/api/alumno', require('./routes/alumno.routes'));
+app.use('/api/materiales', require('./routes/materiales.routes'));
 
 app.listen(port, () => {
     console.log(`🚀 AcadeSys E-commerce corriendo en el puerto ${port}`);

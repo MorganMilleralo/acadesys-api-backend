@@ -4,179 +4,270 @@ const pool = require('../config/db');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 
+const universidadDesdeNombre = (nombre = '') => {
+  const n = String(nombre).toLowerCase();
+  if (n.includes('san marcos') || n.includes('unmsm')) return 'UNMSM';
+  if (/\buni\b/.test(n) || n.includes('ingenier')) return 'UNI';
+  if (n.includes('católica') || n.includes('catolica') || n.includes('pucp')) return 'PUCP';
+  if (n.includes('villarreal') || n.includes('unfv')) return 'UNFV';
+  if (n.includes('unt') || n.includes('trujillo')) return 'UNT';
+  if (n.includes('callao') || n.includes('unac')) return 'UNAC';
+  return 'Preuniversitario';
+};
+
+const horarioDesdeTurno = (turno = '') => {
+  const t = String(turno).toLowerCase();
+  if (t.includes('mañana') || t.includes('manana')) return '08:00 - 13:00';
+  if (t.includes('tarde')) return '14:00 - 19:00';
+  if (t.includes('noche')) return '18:00 - 22:00';
+  return '08:00 - 13:00';
+};
+
+const obtenerPerfilPorNombre = async (connection, nombre) => {
+  const [rows] = await connection.query(
+    `SELECT IdPerfil,
+            COALESCE(NULLIF(Nombre, ''), 'Sin Rol') AS Nombre
+       FROM perfil
+      WHERE EstadoRegistro = 1
+        AND LOWER(COALESCE(NULLIF(Nombre, ''), '')) = LOWER(?)
+      LIMIT 1`,
+    [nombre]
+  );
+  return rows[0]?.IdPerfil || null;
+};
+
 // ==========================================
-// 1. REGISTRO PÚBLICO (Sin exigir Token JWT)
+// REGISTRO PÚBLICO: SOLO ALUMNO
 // ==========================================
 const registerHandler = async (req, res) => {
   const connection = await pool.getConnection();
+
   try {
     const {
-      DNI, dni,
-      Nombres, nombre, nombreUsuario, usuario,
-      ApellidoPaterno, apellido,
-      ApellidoMaterno, apellidoMaterno,
-      Celular, celular,
-      CorreoElectronico, correo,
-      Clave, contrasena, password,
-      IdPerfil, perfiles,
-      IdAcademia, idAcademia
-    } = req.body;
+      DNI,
+      dni,
+      Nombres,
+      nombre,
+      ApellidoPaterno,
+      apellido,
+      ApellidoMaterno,
+      apellidoMaterno,
+      Celular,
+      celular,
+      CorreoElectronico,
+      correo,
+      Clave,
+      contrasena,
+      password
+    } = req.body || {};
 
-    const docIdentidad = String(DNI || dni || '').trim().slice(0, 8);
-    const apodoUsuario = String(nombreUsuario || usuario || '').trim();
-    const nom = String(Nombres || nombre || apodoUsuario || 'Usuario').trim();
-    const apeP = String(ApellidoPaterno || apellido || 'General').trim();
+    const docIdentidad = String(DNI || dni || '').trim().slice(0, 8) || null;
+    const nom = String(Nombres || nombre || '').trim();
+    const apeP = String(ApellidoPaterno || apellido || '').trim();
     const apeM = String(ApellidoMaterno || apellidoMaterno || '').trim();
     const tel = String(Celular || celular || '').trim();
-    const email = String(CorreoElectronico || correo || `${nom.toLowerCase().replace(/\s+/g, '')}@acadesys.edu.pe`).trim();
-    const rawClave = String(Clave || contrasena || password || '123456').trim();
-    const perfilFinal = Number(IdPerfil || (Array.isArray(perfiles) ? perfiles[0] : 1)) || 1;
-    const academiaFinal = Number(IdAcademia || idAcademia || 1);
+    const email = String(CorreoElectronico || correo || '').trim().toLowerCase();
+    const rawClave = String(Clave || contrasena || password || '').trim();
 
-    // Si viene apodo lo usa; si no, une Nombre+Apellido (ej. JohanZamora) o genera un USR
-    const codigoGenerado = apodoUsuario || `${nom.replace(/\s+/g, '')}${apeP.replace(/\s+/g, '')}` || `USR-${Math.floor(1000 + Math.random() * 9000)}`;
+    if (!nom || !apeP || !email || !rawClave) {
+      return res.status(400).json({
+        error: 'Nombres, apellido, correo y contraseña son obligatorios.'
+      });
+    }
 
-    // Comprobación de duplicados (Email o DNI)
     const [existentes] = await connection.query(
-      `SELECT IdUsuario FROM Usuario WHERE CorreoElectronico = ? OR (DNI = ? AND DNI != '') LIMIT 1`,
-      [email, docIdentidad]
+      `SELECT IdUsuario
+         FROM Usuario
+        WHERE LOWER(CorreoElectronico) = ?
+           OR (? IS NOT NULL AND DNI = ?)
+        LIMIT 1`,
+      [email, docIdentidad, docIdentidad]
     );
 
     if (existentes.length > 0) {
-      return res.status(409).json({ error: 'El correo electrónico o DNI ya se encuentra registrado.' });
+      return res.status(409).json({
+        error: 'El correo electrónico o DNI ya se encuentra registrado.'
+      });
+    }
+
+    const idPerfilAlumno = await obtenerPerfilPorNombre(connection, 'Alumno');
+    if (!idPerfilAlumno) {
+      return res.status(500).json({
+        error: 'No existe el perfil Alumno en la base de datos.'
+      });
     }
 
     const claveHasheada = await bcrypt.hash(rawClave, 10);
+    const baseCodigo = `${nom.replace(/\s+/g, '')}${apeP.replace(/\s+/g, '')}`
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^A-Za-z0-9]/g, '')
+      .slice(0, 28) || 'ALUMNO';
 
     await connection.beginTransaction();
 
-    // UsuarioCreacion = 1 (entero para cumplir con el tipo de columna en MySQL)
+    let codigoUsuario = '';
+    for (let intento = 0; intento < 10; intento += 1) {
+      const sufijo = String(Math.floor(1000 + Math.random() * 9000));
+      const candidato = `${baseCodigo}-${sufijo}`;
+      const [existenteCodigo] = await connection.query(
+        'SELECT IdUsuario FROM Usuario WHERE CodigoUsuario = ? LIMIT 1',
+        [candidato]
+      );
+      if (existenteCodigo.length === 0) {
+        codigoUsuario = candidato;
+        break;
+      }
+    }
+
+    if (!codigoUsuario) {
+      await connection.rollback();
+      return res.status(500).json({ error: 'No se pudo generar un código de alumno disponible.' });
+    }
+
     const [resUser] = await connection.query(
-      `INSERT INTO Usuario 
-       (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, UsuarioCreacion, FechaCreacion, EstadoRegistro, IdAcademia)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), 1, ?)`,
-      [codigoGenerado, docIdentidad, nom, apeP, apeM, tel, email, claveHasheada, academiaFinal]
+      `INSERT INTO Usuario
+        (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular,
+         CorreoElectronico, Clave, FechaCreacion, EstadoRegistro, IdAcademia)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1, 1)`,
+      [codigoUsuario, docIdentidad, nom, apeP, apeM, tel, email, claveHasheada]
     );
 
     const nuevoIdUsuario = resUser.insertId;
 
-    // Asignación de rol en la tabla intermedia Usuario_Perfiles
     await connection.query(
-      `INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)`,
-      [nuevoIdUsuario, perfilFinal]
+      `INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro)
+       VALUES (?, ?, 1)`,
+      [nuevoIdUsuario, idPerfilAlumno]
     );
 
     await connection.commit();
 
-    return res.status(201).json({
-      mensaje: 'Usuario registrado exitosamente en la base de datos.',
+    res.status(201).json({
+      mensaje: 'Alumno registrado exitosamente.',
       idUsuario: nuevoIdUsuario,
       id: nuevoIdUsuario,
-      codigoUsuario: codigoGenerado,
+      codigoUsuario,
       correo: email,
-      usuario: apodoUsuario || nom
+      usuario: `${nom} ${apeP}`
     });
-
   } catch (error) {
     await connection.rollback();
-    console.error('Error en registro de usuario:', error);
-    return res.status(500).json({ error: 'Error al registrar usuario: ' + error.message });
+    console.error('Error en registro público:', error.message);
+    res.status(500).json({ error: 'Error al registrar el alumno: ' + error.message });
   } finally {
     connection.release();
   }
 };
 
 // ==========================================
-// 2. LOGIN INTELIGENTE Y TOLERANTE
+// LOGIN
 // ==========================================
 const loginHandler = async (req, res) => {
   try {
-    const usuarioInput = req.body.usuario || 
-                         req.body.codigo_usuario || 
-                         req.body.codigoUsuario || 
-                         req.body.correo || 
-                         req.body.email || 
-                         req.body.dni;
+    const usuarioInput =
+      req.body?.usuario ||
+      req.body?.codigo_usuario ||
+      req.body?.codigoUsuario ||
+      req.body?.correo ||
+      req.body?.email ||
+      req.body?.dni;
 
-    const passwordInput = req.body.password || 
-                          req.body.Clave || 
-                          req.body.clave || 
-                          req.body.contrasena;
+    const passwordInput =
+      req.body?.password ||
+      req.body?.Clave ||
+      req.body?.clave ||
+      req.body?.contrasena;
 
     if (!usuarioInput || !passwordInput) {
-      return res.status(400).json({ error: 'Debes enviar usuario y contraseña.' });
+      return res.status(400).json({
+        error: 'Debes enviar usuario/código/correo/DNI y contraseña.'
+      });
     }
 
     const termino = String(usuarioInput).trim();
     const clave = String(passwordInput).trim();
+    const termLower = termino.toLowerCase();
 
-    // Normalizaciones rápidas en memoria
-    const termLower   = termino.toLowerCase();
-    const termNoDots  = termLower.replace(/\./g, '');
-    const termNoSpace = termLower.replace(/\s+/g, '');
-
-    // Consulta flexible: busca por correo, DNI, código, nombres separados o Nombre+Apellido juntos
     const [rows] = await pool.query(
-      `SELECT u.IdUsuario, 
-              CONCAT(u.Nombres, ' ', COALESCE(u.ApellidoPaterno, '')) AS nombreCompleto,
-              u.Nombres, u.ApellidoPaterno, u.CorreoElectronico, u.Clave, 
-              u.EstadoRegistro, u.CodigoUsuario, u.IdAcademia,
-              p.IdPerfil, COALESCE(p.Nombre, 'Sin Rol') AS rol,
-              a.NombreAcademia, a.ColorTema, a.LogoUrl
-       FROM Usuario u
-       LEFT JOIN Usuario_Perfiles up ON u.IdUsuario = up.IdUsuario AND up.EstadoRegistro = 1
-       LEFT JOIN perfil p ON up.IdPerfil = p.IdPerfil
-       LEFT JOIN Academia a ON u.IdAcademia = a.IdAcademia
-       WHERE u.EstadoRegistro = 1
-         AND (
-            LOWER(TRIM(u.CorreoElectronico)) = ?
-            OR REPLACE(LOWER(TRIM(u.CorreoElectronico)), '.', '') = ?
-            OR LOWER(SUBSTRING_INDEX(u.CorreoElectronico, '@', 1)) = ?
-            OR LOWER(TRIM(u.CodigoUsuario)) = ?
-            OR TRIM(u.DNI) = ?
-            OR LOWER(TRIM(u.Nombres)) = ?
-            OR LOWER(REPLACE(CONCAT(TRIM(u.Nombres), COALESCE(TRIM(u.ApellidoPaterno), '')), ' ', '')) = ?
-            OR LOWER(CONCAT(TRIM(u.Nombres), ' ', COALESCE(TRIM(u.ApellidoPaterno), ''))) = ?
-         )
-       LIMIT 1`,
-      [
-        termLower,   // 1. Correo exacto
-        termNoDots,  // 2. Correo sin puntos
-        termLower,   // 3. Usuario antes del @
-        termLower,   // 4. Código institucional
-        termino,     // 5. DNI
-        termLower,   // 6. Primer Nombre
-        termNoSpace, // 7. Nombre y Apellido pegados (ej. johanzamora)
-        termLower    // 8. Nombre y Apellido con espacio (ej. johan zamora)
-      ]
+      `SELECT
+        u.IdUsuario,
+        u.DNI,
+        u.Nombres,
+        u.ApellidoPaterno,
+        u.ApellidoMaterno,
+        CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno) AS NombreCompleto,
+        u.CorreoElectronico,
+        u.Clave,
+        u.EstadoRegistro,
+        u.CodigoUsuario,
+        u.IdAcademia,
+        up.IdPerfil,
+        COALESCE(NULLIF(p.Nombre, ''), 'Sin Rol') AS Rol,
+        a.NombreAcademia,
+        a.ColorTema,
+        a.LogoUrl
+      FROM Usuario u
+      LEFT JOIN Usuario_Perfiles up
+        ON u.IdUsuario = up.IdUsuario
+       AND up.EstadoRegistro = 1
+      LEFT JOIN perfil p
+        ON up.IdPerfil = p.IdPerfil
+      LEFT JOIN Academia a
+        ON u.IdAcademia = a.IdAcademia
+      WHERE u.EstadoRegistro = 1
+        AND (
+          LOWER(TRIM(u.CorreoElectronico)) = ?
+          OR LOWER(TRIM(u.CodigoUsuario)) = ?
+          OR TRIM(COALESCE(u.DNI, '')) = ?
+          OR (
+            LOWER(SUBSTRING_INDEX(u.CorreoElectronico, '@', 1)) = ?
+            AND (
+              SELECT COUNT(*)
+              FROM Usuario ux
+              WHERE ux.EstadoRegistro = 1
+                AND LOWER(SUBSTRING_INDEX(ux.CorreoElectronico, '@', 1)) = ?
+            ) = 1
+          )
+        )
+      ORDER BY CASE
+        WHEN LOWER(TRIM(u.CorreoElectronico)) = ? THEN 1
+        WHEN LOWER(TRIM(u.CodigoUsuario)) = ? THEN 2
+        WHEN TRIM(COALESCE(u.DNI, '')) = ? THEN 3
+        ELSE 4
+      END
+      LIMIT 1`,
+      [termLower, termLower, termino, termLower, termLower, termLower, termLower, termLower, termino]
     );
 
     if (rows.length === 0) {
-      return res.status(401).json({ error: 'Usuario, código o correo no encontrado.' });
+      return res.status(401).json({
+        error: 'Usuario, código, correo o DNI no encontrado.'
+      });
     }
 
     const user = rows[0];
-
-    // Validación de contraseña cifrada con bcrypt o fallback plano
+    const claveEnBD = String(user.Clave || '');
     let claveValida = false;
-    const claveEnBD = String(user.Clave);
 
-    if (claveEnBD.startsWith('$2a$') || claveEnBD.startsWith('$2b$') || claveEnBD.startsWith('$2y$')) {
+    if (/^\$2[aby]\$/.test(claveEnBD)) {
       claveValida = await bcrypt.compare(clave, claveEnBD);
     } else {
-      claveValida = (clave === claveEnBD);
+      // Compatibilidad temporal con cuentas antiguas. Se recomienda migrarlas a bcrypt.
+      claveValida = clave === claveEnBD;
     }
 
     if (!claveValida) {
       return res.status(401).json({ error: 'Contraseña incorrecta.' });
     }
 
-    // Creación del Token JWT con multi-tenant
+    const rol = user.Rol || 'Sin Rol';
+
     const token = jwt.sign(
       {
         id: user.IdUsuario,
         idUsuario: user.IdUsuario,
-        rol: user.rol,
+        rol,
         idPerfil: user.IdPerfil,
         idAcademia: user.IdAcademia
       },
@@ -184,45 +275,97 @@ const loginHandler = async (req, res) => {
       { expiresIn: '8h' }
     );
 
-    return res.status(200).json({
+    let matricula = null;
+
+    const esAlumno =
+      String(rol).toLowerCase().includes('alumno') ||
+      String(rol).toLowerCase().includes('estudiante');
+
+    if (esAlumno) {
+      const [matriculas] = await pool.query(
+        `SELECT
+          m.IdMatricula,
+          c.IdCiclo,
+          c.Nombre AS NombreCiclo,
+          c.Turno,
+          c.Horario,
+          c.DiasClase,
+          c.UniversidadObjetivo,
+          c.FechaInicio,
+          c.FechaFin,
+          (
+            SELECT COUNT(*)
+            FROM Matricula m2
+            WHERE m2.IdCiclo = c.IdCiclo
+              AND m2.EstadoRegistro = 1
+          ) AS TotalAlumnos
+        FROM Matricula m
+        INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo
+        WHERE m.IdUsuario = ?
+          AND m.EstadoRegistro = 1
+          AND c.EstadoRegistro = 1
+        ORDER BY m.IdMatricula DESC
+        LIMIT 1`,
+        [user.IdUsuario]
+      );
+
+      if (matriculas.length > 0) {
+        const m = matriculas[0];
+        matricula = {
+          idMatricula: m.IdMatricula,
+          idCiclo: m.IdCiclo,
+          nombreCiclo: m.NombreCiclo,
+          turno: m.Turno || '',
+          horario: m.Horario || horarioDesdeTurno(m.Turno),
+          diasClase: m.DiasClase || 'Lunes a Sábado',
+          universidadObjetivo: (!m.UniversidadObjetivo || m.UniversidadObjetivo === 'Preuniversitario') ? universidadDesdeNombre(m.NombreCiclo) : m.UniversidadObjetivo,
+          fechaInicio: m.FechaInicio,
+          fechaFin: m.FechaFin,
+          totalAlumnos: Number(m.TotalAlumnos || 0)
+        };
+      }
+    }
+
+    res.status(200).json({
       mensaje: 'Autenticación exitosa',
       token,
       idUsuario: user.IdUsuario,
-      usuario: user.nombreCompleto || user.Nombres,
-      nombre: user.nombreCompleto || user.Nombres,
+      usuario: user.NombreCompleto,
+      nombre: user.NombreCompleto,
       correo: user.CorreoElectronico,
+      dni: user.DNI,
       codigoUsuario: user.CodigoUsuario,
       idAcademia: user.IdAcademia,
-      rol: user.rol,
+      rol,
       idPerfil: user.IdPerfil,
+      matricula,
       academia: {
-        nombre: user.NombreAcademia || 'AcadeSys SaaS',
-        colorTema: user.ColorTema || '#4f46e5',
+        idAcademia: user.IdAcademia,
+        nombreAcademia: user.NombreAcademia || 'AcadeSys Pre-U',
+        colorTema: user.ColorTema || '#2563eb',
         logoUrl: user.LogoUrl || ''
       },
       user: {
         id: user.IdUsuario,
-        nombre: user.nombreCompleto || user.Nombres,
+        idUsuario: user.IdUsuario,
+        nombre: user.NombreCompleto,
         correo: user.CorreoElectronico,
-        rol: user.rol,
+        dni: user.DNI,
+        codigoUsuario: user.CodigoUsuario,
+        rol,
         idAcademia: user.IdAcademia
       }
     });
-
   } catch (error) {
     console.error('Error en autenticación:', error);
-    return res.status(500).json({ error: 'Error interno en el servidor.' });
+    res.status(500).json({ error: 'Error interno en el servidor.' });
   }
 };
 
-// ==========================================
-// 3. DECLARACIÓN DE RUTAS
-// ==========================================
 router.post('/login', loginHandler);
 router.post('/auth/login', loginHandler);
 
-// Endpoints públicos de registro atendidos antes del middleware global
-router.post('/usuarios', registerHandler);
+// Registro público compatible, pero siempre como Alumno.
 router.post('/auth/register', registerHandler);
 router.post('/register', registerHandler);
 
