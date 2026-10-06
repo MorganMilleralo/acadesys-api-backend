@@ -4,18 +4,54 @@ const pool = require("../config/db");
 const requiereRol = require("../middlewares/roles.middleware");
 const verificarPeriodoAbierto = require("../middlewares/cierre.middleware");
 
-// GET /api/notas - Listado de evaluaciones de la academia
+/* ============================================================
+   🛡️ MAPA DE ESCALAS POR UNIVERSIDAD OBJETIVO (Backend, no se toca)
+   ============================================================ */
+const ESCALAS_POR_UNIVERSIDAD = {
+  UNMSM: 2000,
+  UNI: 2000,
+  PUCP: 1000,
+  UNFV: 1000,
+  UNAC: 100,
+  UNT: 300,
+  Preuniversitario: 20,
+  // Default por si el ciclo no tiene universidad definida
+  DEFAULT: 2000,
+};
+
+const obtenerMaximoPermitido = (universidad = "") => {
+  const key = String(universidad || "").trim();
+  return ESCALAS_POR_UNIVERSIDAD[key] ?? ESCALAS_POR_UNIVERSIDAD.DEFAULT;
+};
+
+const TIPOS_VALIDOS = [
+  "Practica",
+  "Práctica",
+  "Examen",
+  "Simulacro",
+  "Oral",
+  "Tarea",
+  "Participacion",
+  "Participación",
+];
+
+/* ============================================================
+   GET /api/notas - Listado de evaluaciones de la academia
+   ============================================================ */
 router.get("/", async (req, res) => {
   try {
     const [rows] = await pool.query(
       `SELECT e.IdEvaluacion, e.IdMatricula, e.TipoEvaluacion, e.Calificacion, e.FechaCreacion,
-                    u.CodigoUsuario, CONCAT(u.Nombres, ' ', u.ApellidoPaterno) AS Alumno,
-                    COALESCE(c.Nombre, 'Simulacro General') AS Curso
-             FROM Evaluacion e
-             INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
-             INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
-             LEFT JOIN Curso c ON m.IdCurso = c.IdCurso
-             WHERE e.EstadoRegistro = 1 AND u.IdAcademia = ?`,
+              u.CodigoUsuario, CONCAT(u.Nombres, ' ', u.ApellidoPaterno) AS Alumno,
+              COALESCE(c.Nombre, 'Simulacro General') AS Curso,
+              ci.Nombre AS Ciclo,
+              ci.UniversidadObjetivo
+       FROM Evaluacion e
+       INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
+       INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
+       LEFT JOIN Curso c ON m.IdCurso = c.IdCurso
+       LEFT JOIN Ciclo ci ON m.IdCiclo = ci.IdCiclo
+       WHERE e.EstadoRegistro = 1 AND u.IdAcademia = ?`,
       [req.usuario.idAcademia],
     );
     res.json(rows);
@@ -25,19 +61,23 @@ router.get("/", async (req, res) => {
   }
 });
 
-// GET /api/notas/alumno/:id - Historial y promedio académico individual
+/* ============================================================
+   GET /api/notas/alumno/:id - Historial y promedio individual
+   ============================================================ */
 router.get("/alumno/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
     const [notas] = await pool.query(
       `SELECT COALESCE(c.Nombre, 'Simulacro General') AS Curso,
-                    e.TipoEvaluacion, e.Calificacion, e.FechaCreacion
-             FROM Evaluacion e
-             INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
-             LEFT JOIN Curso c ON m.IdCurso = c.IdCurso
-             INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
-             WHERE u.IdUsuario = ? AND u.IdAcademia = ? AND e.EstadoRegistro = 1`,
+              e.TipoEvaluacion, e.Calificacion, e.FechaCreacion,
+              ci.UniversidadObjetivo, ci.Nombre AS Ciclo
+       FROM Evaluacion e
+       INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
+       LEFT JOIN Curso c ON m.IdCurso = c.IdCurso
+       LEFT JOIN Ciclo ci ON m.IdCiclo = ci.IdCiclo
+       INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
+       WHERE u.IdUsuario = ? AND u.IdAcademia = ? AND e.EstadoRegistro = 1`,
       [id, req.usuario.idAcademia],
     );
 
@@ -47,8 +87,15 @@ router.get("/alumno/:id", async (req, res) => {
       promedio = suma / notas.length;
     }
 
+    // Tomamos la universidad del ciclo más reciente para saber la escala con la que se muestra
+    const universidadMostrar =
+      notas[0]?.UniversidadObjetivo || "UNMSM";
+    const escalaMaxima = obtenerMaximoPermitido(universidadMostrar);
+
     res.json({
       idAlumno: id,
+      universidadEscala: universidadMostrar,
+      escalaMaxima,
       promedioGeneral: parseFloat(promedio.toFixed(2)),
       totalCursosEvaluados: notas.length,
       historialNotas: notas,
@@ -59,56 +106,148 @@ router.get("/alumno/:id", async (req, res) => {
   }
 });
 
-// POST /api/notas - Registro de notas masivo con validación transaccional
+/* ============================================================
+   POST /api/notas - Registro masivo con BLINDAJE NIVEL DIOS
+   ============================================================ */
 router.post(
   "/",
   requiereRol("Docente", "Tutor de Aula", "Administrador"),
   verificarPeriodoAbierto,
   async (req, res) => {
-    const { notas } = req.body;
+    const { idCiclo, notas } = req.body;
     const idUsuario = req.usuario.id;
+    const idAcademia = req.usuario.idAcademia;
+
+    if (!idCiclo) {
+      return res
+        .status(400)
+        .json({ error: "Debes enviar el idCiclo al que pertenecen las notas." });
+    }
 
     if (!Array.isArray(notas) || notas.length === 0) {
       return res
         .status(400)
-        .json({
-          error: 'Debes enviar un arreglo "notas" con al menos un registro.',
-        });
-    }
-
-    for (const nota of notas) {
-      const calif = Number(nota.Calificacion);
-      if (
-        !nota.IdMatricula ||
-        !nota.TipoEvaluacion ||
-        Number.isNaN(calif) ||
-        calif < 0 ||
-        calif > 20
-      ) {
-        return res.status(400).json({
-          error:
-            "Nota inválida: La calificación debe ser un valor numérico entre 0 y 20.",
-        });
-      }
+        .json({ error: 'Debes enviar un arreglo "notas" con al menos un registro.' });
     }
 
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
 
+      /* ---------- 1. Universidad objetivo del ciclo ---------- */
+      const [cicloData] = await connection.query(
+        `SELECT IdCiclo, Nombre, UniversidadObjetivo
+         FROM Ciclo
+         WHERE IdCiclo = ? AND EstadoRegistro = 1
+         LIMIT 1`,
+        [idCiclo],
+      );
+
+      if (cicloData.length === 0) {
+        await connection.rollback();
+        return res
+          .status(404)
+          .json({ error: "El ciclo indicado no existe o está inactivo." });
+      }
+
+      const ciclo = cicloData[0];
+      const uniObjetivo = ciclo.UniversidadObjetivo || "UNMSM";
+      const maxPermitido = obtenerMaximoPermitido(uniObjetivo);
+
+      /* ---------- 2. Validación estricta + verificación de matrículas ---------- */
+      for (const nota of notas) {
+        const califRaw = nota.Calificacion;
+        const calif = Number(califRaw);
+
+        // 2.1 Bloqueo de NaN, null, vacío, infinito
+        if (
+          califRaw === null ||
+          califRaw === undefined ||
+          califRaw === "" ||
+          Number.isNaN(calif) ||
+          !Number.isFinite(calif)
+        ) {
+          await connection.rollback();
+          return res.status(400).json({
+            error: `Registro rechazado. La calificación (${califRaw}) no es un número válido.`,
+          });
+        }
+
+        // 2.2 Escala dinámica según universidad objetivo
+        if (calif < 0 || calif > maxPermitido) {
+          await connection.rollback();
+          return res.status(400).json({
+            error: `Fraude detectado. El puntaje ${calif} es matemáticamente imposible para la escala de ${uniObjetivo} (Máximo: ${maxPermitido}).`,
+          });
+        }
+
+        // 2.3 IdMatricula obligatorio
+        const idMat = Number(nota.IdMatricula);
+        if (!Number.isInteger(idMat) || idMat <= 0) {
+          await connection.rollback();
+          return res.status(400).json({
+            error: `Registro rechazado. El IdMatricula (${nota.IdMatricula}) no es válido.`,
+          });
+        }
+
+        // 2.4 TipoEvaluacion obligatorio + whitelist
+        const tipo = String(nota.TipoEvaluacion || "").trim();
+        if (!tipo) {
+          await connection.rollback();
+          return res.status(400).json({
+            error: "Registro rechazado. El campo TipoEvaluacion es obligatorio.",
+          });
+        }
+        if (!TIPOS_VALIDOS.includes(tipo)) {
+          await connection.rollback();
+          return res.status(400).json({
+            error: `TipoEvaluacion inválido: "${tipo}". Permitidos: ${TIPOS_VALIDOS.join(", ")}.`,
+          });
+        }
+
+        // 2.5 La matrícula debe pertenecer al ciclo enviado y a la academia del usuario
+        const [matValida] = await connection.query(
+          `SELECT m.IdMatricula
+           FROM Matricula m
+           INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
+           WHERE m.IdMatricula = ?
+             AND m.IdCiclo = ?
+             AND m.EstadoRegistro = 1
+             AND u.IdAcademia = ?
+           LIMIT 1`,
+          [idMat, idCiclo, idAcademia],
+        );
+
+        if (matValida.length === 0) {
+          await connection.rollback();
+          return res.status(403).json({
+            error: `La matrícula ${idMat} no pertenece al ciclo ${idCiclo} o a tu academia.`,
+          });
+        }
+      }
+
+      /* ---------- 3. Inserción masiva ---------- */
       for (const nota of notas) {
         await connection.query(
           `INSERT INTO Evaluacion
-                    (IdMatricula, Calificacion, TipoEvaluacion, UsuarioCreacion, FechaCreacion, EstadoRegistro)
-                 VALUES (?, ?, ?, ?, NOW(), 1)`,
-          [nota.IdMatricula, nota.Calificacion, nota.TipoEvaluacion, idUsuario],
+             (IdMatricula, Calificacion, TipoEvaluacion, UsuarioCreacion, FechaCreacion, EstadoRegistro)
+           VALUES (?, ?, ?, ?, NOW(), 1)`,
+          [
+            Number(nota.IdMatricula),
+            Number(nota.Calificacion),
+            String(nota.TipoEvaluacion).trim(),
+            idUsuario,
+          ],
         );
       }
 
       await connection.commit();
-      res
-        .status(201)
-        .json({ message: "Calificaciones registradas con éxito en bloque" });
+      res.status(201).json({
+        message: `Calificaciones registradas con éxito (${notas.length} en bloque).`,
+        ciclo: ciclo.Nombre,
+        universidadObjetivo: uniObjetivo,
+        escalaMaxima: maxPermitido,
+      });
     } catch (error) {
       await connection.rollback();
       console.error("Error en POST /notas:", error.message);
@@ -119,47 +258,93 @@ router.post(
   },
 );
 
-// PUT /api/notas/:id - Modificación puntual asegurando aislamiento por academia
+/* ============================================================
+   PUT /api/notas/:id - Modificación puntual (TAMBIÉN BLINDADO)
+   ============================================================ */
 router.put(
   "/:id",
   requiereRol("Docente", "Tutor de Aula", "Administrador"),
   verificarPeriodoAbierto,
   async (req, res) => {
     const { id } = req.params;
-    const calif = Number(req.body.Calificacion);
+    const califRaw = req.body.Calificacion;
+    const calif = Number(califRaw);
     const idUsuario = req.usuario.id;
     const idAcademia = req.usuario.idAcademia;
 
-    if (Number.isNaN(calif) || calif < 0 || calif > 20) {
-      return res
-        .status(400)
-        .json({ error: "La calificación debe ser un número entre 0 y 20." });
+    // Validación numérica básica antes de tocar la BD
+    if (
+      califRaw === null ||
+      califRaw === undefined ||
+      califRaw === "" ||
+      Number.isNaN(calif) ||
+      !Number.isFinite(calif) ||
+      calif < 0
+    ) {
+      return res.status(400).json({
+        error: `Registro rechazado. La calificación (${califRaw}) no es un número válido.`,
+      });
     }
 
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
 
+      /* ---------- 1. Obtener la universidad objetivo del ciclo de esa evaluación ---------- */
+      const [evalData] = await connection.query(
+        `SELECT e.IdEvaluacion, ci.UniversidadObjetivo, ci.Nombre AS CicloNombre
+         FROM Evaluacion e
+         INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
+         INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
+         INNER JOIN Ciclo ci ON m.IdCiclo = ci.IdCiclo
+         WHERE e.IdEvaluacion = ?
+           AND u.IdAcademia = ?
+           AND e.EstadoRegistro = 1
+         LIMIT 1`,
+        [id, idAcademia],
+      );
+
+      if (evalData.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({
+          error: "Evaluación no encontrada o no pertenece a tu academia.",
+        });
+      }
+
+      const uniObjetivo = evalData[0].UniversidadObjetivo || "UNMSM";
+      const maxPermitido = obtenerMaximoPermitido(uniObjetivo);
+
+      /* ---------- 2. Validación dinámica según escala ---------- */
+      if (calif > maxPermitido) {
+        await connection.rollback();
+        return res.status(400).json({
+          error: `Fraude detectado. El puntaje ${calif} es matemáticamente imposible para la escala de ${uniObjetivo} (Máximo: ${maxPermitido}).`,
+        });
+      }
+
+      /* ---------- 3. Update ---------- */
       const [result] = await connection.query(
         `UPDATE Evaluacion e
-             INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
-             INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
-             SET e.Calificacion = ?, e.UsuarioModificacion = ?, e.FechaModificacion = NOW()
-             WHERE e.IdEvaluacion = ? AND u.IdAcademia = ?`,
+         INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
+         INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
+         SET e.Calificacion = ?, e.UsuarioModificacion = ?, e.FechaModificacion = NOW()
+         WHERE e.IdEvaluacion = ? AND u.IdAcademia = ?`,
         [calif, idUsuario, id, idAcademia],
       );
 
       if (result.affectedRows === 0) {
         await connection.rollback();
-        return res
-          .status(404)
-          .json({
-            error: "Evaluación no encontrada o no pertenece a tu academia.",
-          });
+        return res.status(404).json({
+          error: "Evaluación no encontrada o no pertenece a tu academia.",
+        });
       }
 
       await connection.commit();
-      res.json({ message: "Calificación actualizada con éxito" });
+      res.json({
+        message: "Calificación actualizada con éxito.",
+        universidadObjetivo: uniObjetivo,
+        escalaMaxima: maxPermitido,
+      });
     } catch (error) {
       await connection.rollback();
       console.error("Error en PUT /notas/:id:", error.message);

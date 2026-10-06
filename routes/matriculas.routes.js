@@ -17,6 +17,68 @@ function generarCodigo(prefix) {
   return `${base}-${aleatorio}`;
 }
 
+/* ============================================================
+   PASO A: Verificación previa del alumno por correo
+   POST /api/matriculas/verificar
+   ============================================================ */
+router.post('/verificar', async (req, res) => {
+  const { correo } = req.body || {};
+
+  if (!correo) {
+    return res.status(400).json({ error: 'Correo obligatorio.' });
+  }
+
+  const correoFinal = String(correo).trim().toLowerCase();
+
+  try {
+    // 1. ¿Existe el usuario?
+    const [usuarios] = await pool.query(
+      `SELECT IdUsuario, Nombres, ApellidoPaterno
+       FROM Usuario
+       WHERE LOWER(CorreoElectronico) = ?
+       LIMIT 1`,
+      [correoFinal]
+    );
+
+    if (usuarios.length === 0) {
+      // Alumno nuevo -> Yan puede continuar normal
+      return res.status(200).json({ existe: false });
+    }
+
+    const alumno = usuarios[0];
+
+    // 2. ¿En qué ciclos está matriculado actualmente?
+    const [ciclosActuales] = await pool.query(
+      `SELECT c.IdCiclo, c.Nombre
+       FROM Matricula m
+       INNER JOIN Ciclo c ON m.IdCiclo = c.IdCiclo
+       WHERE m.IdUsuario = ?
+         AND m.EstadoRegistro = 1
+         AND c.EstadoRegistro = 1`,
+      [alumno.IdUsuario]
+    );
+
+    const ciclosInscritos = ciclosActuales.map((c) => c.Nombre);
+    const idsCiclosInscritos = ciclosActuales.map((c) => c.IdCiclo);
+
+    // Yan dispara el SweetAlert2 con esta data
+    return res.status(200).json({
+      existe: true,
+      idUsuario: alumno.IdUsuario,
+      mensaje: `Hola ${alumno.Nombres}, ya estás registrado en el sistema.`,
+      ciclosInscritos,
+      idsCiclosInscritos
+    });
+  } catch (error) {
+    console.error('Error verificando correo:', error);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
+/* ============================================================
+   PASO B: Checkout con soporte de reinscripción
+   POST /api/matriculas/checkout
+   ============================================================ */
 router.post('/checkout', async (req, res) => {
   const {
     Nombres,
@@ -48,6 +110,7 @@ router.post('/checkout', async (req, res) => {
   try {
     await connection.beginTransaction();
 
+    /* ---------- 1. Validar ciclo y capacidad ---------- */
     const [ciclos] = await connection.query(
       `SELECT
         c.IdCiclo,
@@ -82,96 +145,136 @@ router.post('/checkout', async (req, res) => {
       });
     }
 
+    /* ---------- 2. ¿Existe el alumno? ---------- */
     const [existentes] = await connection.query(
-      `SELECT u.IdUsuario
-       FROM Usuario u
-       WHERE LOWER(u.CorreoElectronico) = ?
+      `SELECT IdUsuario, CodigoUsuario
+       FROM Usuario
+       WHERE LOWER(CorreoElectronico) = ?
        LIMIT 1`,
       [correoFinal]
     );
 
+    let idAlumnoFinal;
+    let codigoUsuarioFinal;
+    let esReinscripcion = false;
+    let claveSinEncriptar = null;
+
     if (existentes.length > 0) {
-      await connection.rollback();
-      return res.status(409).json({
-        error: 'El correo ya está registrado. Ingresa con tu cuenta o utiliza otro correo.'
-      });
-    }
+      /* =====================================================
+         ✅ REINSCRIPCIÓN
+         ===================================================== */
+      idAlumnoFinal = existentes[0].IdUsuario;
+      codigoUsuarioFinal = existentes[0].CodigoUsuario;
+      esReinscripcion = true;
 
-    const [perfilesAlumno] = await connection.query(`
-      SELECT IdPerfil
-      FROM perfil
-      WHERE EstadoRegistro = 1
-        AND LOWER(COALESCE(NULLIF(Nombre, ''), '')) = 'alumno'
-      LIMIT 1
-    `);
-
-    if (perfilesAlumno.length === 0) {
-      await connection.rollback();
-      return res.status(500).json({
-        error: 'No está configurado el perfil Alumno en la base de datos.'
-      });
-    }
-
-    let codigoUsuario = '';
-    for (let intento = 0; intento < 10; intento += 1) {
-      const candidato = generarCodigo(prefijoFinal);
-      const [existeCodigo] = await connection.query(
-        'SELECT IdUsuario FROM Usuario WHERE CodigoUsuario = ? LIMIT 1',
-        [candidato]
+      // Verificamos que no se matricule al MISMO ciclo otra vez
+      const [yaMatriculado] = await connection.query(
+        `SELECT IdMatricula
+         FROM Matricula
+         WHERE IdUsuario = ?
+           AND IdCiclo = ?
+           AND EstadoRegistro = 1
+         LIMIT 1`,
+        [idAlumnoFinal, idCicloFinal]
       );
-      if (existeCodigo.length === 0) {
-        codigoUsuario = candidato;
-        break;
+
+      if (yaMatriculado.length > 0) {
+        await connection.rollback();
+        return res.status(409).json({
+          error: 'Ya te encuentras matriculado en este ciclo específico.'
+        });
       }
+
+      // Actualizamos sus datos por si los cambió (opcional pero recomendado)
+      await connection.query(
+        `UPDATE Usuario
+         SET Nombres = ?, ApellidoPaterno = ?
+         WHERE IdUsuario = ?`,
+        [nombreFinal, apellidosFinal, idAlumnoFinal]
+      );
+    } else {
+      /* =====================================================
+         ✅ ALUMNO NUEVO
+         ===================================================== */
+      const [perfilesAlumno] = await connection.query(`
+        SELECT IdPerfil
+        FROM perfil
+        WHERE EstadoRegistro = 1
+          AND LOWER(COALESCE(NULLIF(Nombre, ''), '')) = 'alumno'
+        LIMIT 1
+      `);
+
+      if (perfilesAlumno.length === 0) {
+        await connection.rollback();
+        return res.status(500).json({
+          error: 'No está configurado el perfil Alumno en la base de datos.'
+        });
+      }
+
+      // Generar código único
+      let codigoUsuario = '';
+      for (let intento = 0; intento < 10; intento += 1) {
+        const candidato = generarCodigo(prefijoFinal);
+        const [existeCodigo] = await connection.query(
+          'SELECT IdUsuario FROM Usuario WHERE CodigoUsuario = ? LIMIT 1',
+          [candidato]
+        );
+        if (existeCodigo.length === 0) {
+          codigoUsuario = candidato;
+          break;
+        }
+      }
+
+      if (!codigoUsuario) {
+        await connection.rollback();
+        return res.status(500).json({
+          error: 'No se pudo generar un código de alumno disponible.'
+        });
+      }
+
+      claveSinEncriptar = generarClaveTemporal();
+      const claveHasheada = await bcrypt.hash(claveSinEncriptar, 10);
+
+      const [insertUser] = await connection.query(
+        `INSERT INTO Usuario
+          (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno,
+           Celular, CorreoElectronico, Clave, FechaCreacion,
+           EstadoRegistro, IdAcademia)
+         VALUES (?, NULL, ?, ?, '', '', ?, ?, NOW(), 1, 1)`,
+        [
+          codigoUsuario,
+          nombreFinal,
+          apellidosFinal,
+          correoFinal,
+          claveHasheada
+        ]
+      );
+
+      idAlumnoFinal = insertUser.insertId;
+      codigoUsuarioFinal = codigoUsuario;
+
+      await connection.query(
+        `INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro)
+         VALUES (?, ?, 1)`,
+        [idAlumnoFinal, perfilesAlumno[0].IdPerfil]
+      );
     }
 
-    if (!codigoUsuario) {
-      await connection.rollback();
-      return res.status(500).json({
-        error: 'No se pudo generar un código de alumno disponible.'
-      });
-    }
-
-    const claveSinEncriptar = generarClaveTemporal();
-    const claveHasheada = await bcrypt.hash(claveSinEncriptar, 10);
-    const nombreCompleto = `${nombreFinal} ${apellidosFinal}`.trim();
-
-    const [insertUser] = await connection.query(
-      `INSERT INTO Usuario
-        (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno,
-         Celular, CorreoElectronico, Clave, FechaCreacion,
-         EstadoRegistro, IdAcademia)
-       VALUES (?, NULL, ?, ?, '', '', ?, ?, NOW(), 1, 1)`,
-      [
-        codigoUsuario,
-        nombreFinal,
-        apellidosFinal,
-        correoFinal,
-        claveHasheada
-      ]
-    );
-
-    const idNuevoAlumno = insertUser.insertId;
-
-    await connection.query(
-      `INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro)
-       VALUES (?, ?, 1)`,
-      [idNuevoAlumno, perfilesAlumno[0].IdPerfil]
-    );
-
+    /* ---------- 3. Insertar matrícula + pago ---------- */
     const [insertMatricula] = await connection.query(
       `INSERT INTO Matricula (IdUsuario, IdCiclo, EstadoRegistro)
        VALUES (?, ?, 1)`,
-      [idNuevoAlumno, idCicloFinal]
+      [idAlumnoFinal, idCicloFinal]
     );
 
     await connection.query(
       `INSERT INTO PagosMensualidad
         (IdUsuario, IdCiclo, Mes, Monto, Estado, FechaPago, EstadoRegistro)
        VALUES (?, ?, 'Inscripcion', 1.00, 'Pagado', NOW(), 1)`,
-      [idNuevoAlumno, idCicloFinal]
+      [idAlumnoFinal, idCicloFinal]
     );
 
+    /* ---------- 4. Conteo final ---------- */
     const [nuevoConteo] = await connection.query(
       `SELECT COUNT(*) AS TotalAlumnos
        FROM Matricula
@@ -183,28 +286,43 @@ router.post('/checkout', async (req, res) => {
 
     const totalAlumnos = Number(nuevoConteo[0]?.TotalAlumnos || 0);
 
+    /* ---------- 5. Respuesta ---------- */
     res.status(201).json({
       exito: true,
-      idUsuario: idNuevoAlumno,
+      esReinscripcion,
+      idUsuario: idAlumnoFinal,
       idMatricula: insertMatricula.insertId,
-      codigoUsuario,
+      codigoUsuario: codigoUsuarioFinal,
       correo: correoFinal,
       idCiclo: idCicloFinal,
       ciclo: ciclo.Nombre,
       totalAlumnos,
-      mensaje: 'Inscripción procesada correctamente. Las credenciales se enviarán al correo registrado.'
+      mensaje: esReinscripcion
+        ? 'Reinscripción procesada correctamente.'
+        : 'Inscripción procesada correctamente. Las credenciales se enviarán al correo registrado.'
     });
 
-    const asuntoCorreo = '¡Inscripción Exitosa! Tus accesos a la Intranet AcadeSys';
-    const cuerpoHtml = `
+    /* ---------- 6. Correo (solo a nuevos / o ambos según quieras) ---------- */
+    const asuntoCorreo = esReinscripcion
+      ? `¡Reinscripción Exitosa al ${ciclo.Nombre}!`
+      : '¡Inscripción Exitosa! Tus accesos a la Intranet AcadeSys';
+
+    const cuerpoHtml = esReinscripcion
+      ? `
+      <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px; max-width: 600px;">
+        <h2 style="color: #2563eb;">¡Hola de nuevo, ${nombreFinal}!</h2>
+        <p>Tu <strong>reinscripción al ${ciclo.Nombre}</strong> fue procesada correctamente.</p>
+        <p>Puedes ingresar a la intranet con tu usuario habitual:</p>
+        <p><strong>Usuario / código:</strong> <span style="font-family: monospace;">${codigoUsuarioFinal}</span></p>
+      </div>`
+      : `
       <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px; max-width: 600px;">
         <h2 style="color: #2563eb;">¡Bienvenido a AcadeSys, ${nombreFinal}!</h2>
         <p>Tu inscripción al <strong>${ciclo.Nombre}</strong> fue procesada correctamente.</p>
-        <p><strong>Usuario / código:</strong> <span style="font-family: monospace;">${codigoUsuario}</span></p>
+        <p><strong>Usuario / código:</strong> <span style="font-family: monospace;">${codigoUsuarioFinal}</span></p>
         <p><strong>Contraseña temporal:</strong> <span style="font-family: monospace;">${claveSinEncriptar}</span></p>
         <p>Ingresa a la plataforma y luego cambia tu contraseña.</p>
-      </div>
-    `;
+      </div>`;
 
     if (URL_GOOGLE_SCRIPT) {
       fetch(URL_GOOGLE_SCRIPT, {
@@ -219,13 +337,13 @@ router.post('/checkout', async (req, res) => {
         .then((response) => response.json())
         .then((data) => {
           if (data?.status === 'success') {
-            console.log('✅ Correo de inscripción enviado a:', correoFinal);
+            console.log('✅ Correo enviado a:', correoFinal);
           } else {
             console.warn('⚠️ El servicio de correo respondió sin éxito:', data);
           }
         })
         .catch((err) => {
-          console.error('❌ Error enviando correo de bienvenida:', err.message);
+          console.error('❌ Error enviando correo:', err.message);
         });
     }
   } catch (error) {

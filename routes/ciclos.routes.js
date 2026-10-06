@@ -2,6 +2,10 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 
+// ⚠️ Ajusta la ruta según dónde tengas tu middleware de roles
+// Ej: '../middlewares/auth' o '../middleware/requiereRol'
+const { requiereRol } = require('../middlewares/auth');
+
 const universidadDesdeNombre = (nombre = '') => {
   const n = String(nombre).toLowerCase();
   if (n.includes('san marcos') || n.includes('unmsm')) return 'UNMSM';
@@ -29,7 +33,9 @@ const horarioDesdeTurno = (turno = '') => {
   return '08:00 - 13:00';
 };
 
-// GET /api/ciclos/publicos
+/* ============================================================
+   GET /api/ciclos/publicos  → Vitrina pública
+   ============================================================ */
 router.get('/publicos', async (req, res) => {
   try {
     const [ciclos] = await pool.query(`
@@ -74,7 +80,9 @@ router.get('/publicos', async (req, res) => {
       return {
         ...ciclo,
         Turno: ciclo.Turno || turnoDesdeHorario(horario),
-        UniversidadObjetivo: (!ciclo.UniversidadObjetivo || ciclo.UniversidadObjetivo === 'Preuniversitario') ? universidadDesdeNombre(ciclo.Nombre) : ciclo.UniversidadObjetivo,
+        UniversidadObjetivo: (!ciclo.UniversidadObjetivo || ciclo.UniversidadObjetivo === 'Preuniversitario')
+          ? universidadDesdeNombre(ciclo.Nombre)
+          : ciclo.UniversidadObjetivo,
         Horario: horario,
         DiasClase: ciclo.DiasClase || 'Lunes a Sábado'
       };
@@ -87,7 +95,9 @@ router.get('/publicos', async (req, res) => {
   }
 });
 
-// GET /api/ciclos/:id/cursos
+/* ============================================================
+   GET /api/ciclos/:id/cursos  → Cursos del ciclo
+   ============================================================ */
 router.get('/:id/cursos', async (req, res) => {
   try {
     const { id } = req.params;
@@ -109,6 +119,62 @@ router.get('/:id/cursos', async (req, res) => {
   } catch (error) {
     console.error('Error al cargar cursos del ciclo:', error.message);
     res.status(500).json({ error: 'No se pudieron cargar los cursos del ciclo.' });
+  }
+});
+
+/* ============================================================
+   POST /api/ciclos  → Crear ciclo (Solo Administradores)
+   ============================================================ */
+router.post('/', requiereRol('Administrador'), async (req, res) => {
+  const { nombre, turno, horario, capacidad } = req.body || {};
+
+  // ---------- 1. Restricción de nomenclatura "imposible" ----------
+  const nombreLimpio = String(nombre || '').trim();
+
+  if (nombreLimpio.length < 10) {
+    return res.status(400).json({
+      error: 'El nombre del ciclo es muy corto. Debe ser descriptivo (ej. "Semestral San Marcos").'
+    });
+  }
+
+  // Regex: debe contener al menos una palabra clave académica preuniversitaria
+  const regexPre = /(semestral|anual|repaso|verano|veranito|intensivo|san marcos|uni|pucp|villareal|callao)/i;
+  if (!regexPre.test(nombreLimpio)) {
+    return res.status(400).json({
+      error: 'Nombre inválido. El ciclo debe incluir palabras clave (ej. Semestral, Repaso, UNI, Verano).'
+    });
+  }
+
+  // ---------- 2. Validaciones numéricas básicas ----------
+  const capacidadFinal = Number(capacidad);
+  if (capacidad !== undefined && capacidad !== null && capacidad !== '' &&
+      (!Number.isFinite(capacidadFinal) || capacidadFinal < 0)) {
+    return res.status(400).json({ error: 'La capacidad debe ser un número válido mayor o igual a 0.' });
+  }
+
+  // ---------- 3. Turno / Horario por defecto coherentes ----------
+  const turnoFinal = String(turno || '').trim() || turnoDesdeHorario(horario);
+  const horarioFinal = String(horario || '').trim() || horarioDesdeTurno(turnoFinal);
+
+  try {
+    const [result] = await pool.query(
+      `INSERT INTO Ciclo (Nombre, Turno, Horario, Capacidad, EstadoRegistro)
+       VALUES (?, ?, ?, ?, 1)`,
+      [
+        nombreLimpio,
+        turnoFinal,
+        horarioFinal,
+        Number.isFinite(capacidadFinal) ? capacidadFinal : 0
+      ]
+    );
+
+    res.status(201).json({
+      message: 'Ciclo aperturado exitosamente.',
+      idCiclo: result.insertId
+    });
+  } catch (error) {
+    console.error('Error creando ciclo:', error);
+    res.status(500).json({ error: 'Error al aperturar el ciclo.' });
   }
 });
 
