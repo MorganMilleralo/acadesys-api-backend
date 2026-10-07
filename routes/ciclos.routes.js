@@ -2,39 +2,143 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 
-// ⚠️ Ajusta la ruta según dónde tengas tu middleware de roles
-// Ej: '../middlewares/auth' o '../middleware/requiereRol'
-const { requiereRol } = require('../middlewares/auth');
+const UNIVERSIDADES_VALIDAS = new Set([
+  'UNMSM',
+  'UNI',
+  'PUCP',
+  'UNFV',
+  'UNAC',
+  'UNT',
+  'Preuniversitario',
+]);
 
-const universidadDesdeNombre = (nombre = '') => {
-  const n = String(nombre).toLowerCase();
+const MIN_CAPACIDAD = 1;
+const MAX_CAPACIDAD = 500;
+const MAX_PRECIO = 9999.99;
+
+function normalizarTexto(valor = '') {
+  return String(valor)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+function universidadDesdeNombre(nombre = '') {
+  const n = normalizarTexto(nombre).toLowerCase();
   if (n.includes('san marcos') || n.includes('unmsm')) return 'UNMSM';
-  if (/\buni\b/.test(n) || n.includes('universidad nacional de ingenier')) return 'UNI';
-  if (n.includes('católica') || n.includes('catolica') || n.includes('pucp')) return 'PUCP';
+  if (/\buni\b/.test(n) || n.includes('ingenier')) return 'UNI';
+  if (n.includes('catolica') || n.includes('pucp')) return 'PUCP';
   if (n.includes('villarreal') || n.includes('unfv')) return 'UNFV';
-  if (n.includes('unt') || n.includes('trujillo')) return 'UNT';
   if (n.includes('callao') || n.includes('unac')) return 'UNAC';
+  if (n.includes('trujillo') || n.includes('unt')) return 'UNT';
   return 'Preuniversitario';
-};
+}
 
-const turnoDesdeHorario = (horario = '') => {
-  const h = String(horario).toLowerCase();
-  if (h.startsWith('08') || h.includes('07:') || h.includes('09:')) return 'Mañana';
-  if (h.startsWith('14') || h.includes('15:') || h.includes('16:')) return 'Tarde';
-  if (h.startsWith('18') || h.includes('19:') || h.includes('20:')) return 'Noche';
+function turnoDesdeHorario(horario = '') {
+  const h = String(horario).trim();
+  const match = h.match(/^(\d{2}):(\d{2})/);
+  if (!match) return 'Mañana';
+
+  const hour = Number(match[1]);
+  if (hour >= 6 && hour < 13) return 'Mañana';
+  if (hour >= 13 && hour < 18) return 'Tarde';
+  if (hour >= 18 && hour <= 23) return 'Noche';
   return 'Mañana';
-};
+}
 
-const horarioDesdeTurno = (turno = '') => {
-  const t = String(turno).toLowerCase();
-  if (t.includes('mañana') || t.includes('manana')) return '08:00 - 13:00';
+function horarioDesdeTurno(turno = '') {
+  const t = normalizarTexto(turno).toLowerCase();
+  if (t.includes('manana')) return '08:00 - 13:00';
   if (t.includes('tarde')) return '14:00 - 19:00';
   if (t.includes('noche')) return '18:00 - 22:00';
   return '08:00 - 13:00';
-};
+}
+
+function validarFechaISO(valor, campo) {
+  if (!valor) return null;
+  const texto = String(valor).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(texto)) {
+    return `${campo} debe tener formato YYYY-MM-DD.`;
+  }
+  const fecha = new Date(`${texto}T00:00:00`);
+  if (Number.isNaN(fecha.getTime())) return `${campo} no es una fecha válida.`;
+  return null;
+}
+
+function validarNombreCiclo(nombre = '') {
+  const limpio = String(nombre).trim().replace(/\s+/g, ' ');
+  if (limpio.length < 10) {
+    return 'El nombre del ciclo debe tener al menos 10 caracteres.';
+  }
+  if (limpio.length > 100) {
+    return 'El nombre del ciclo no puede superar los 100 caracteres.';
+  }
+  if (!/[A-Za-zÁÉÍÓÚáéíóúÑñ]/.test(limpio)) {
+    return 'El nombre debe contener texto descriptivo.';
+  }
+  if (/^(.)\1{3,}$/i.test(normalizarTexto(limpio))) {
+    return 'El nombre ingresado no es descriptivo.';
+  }
+  if (/^\d+$/.test(limpio) || /^[A-Za-z]$/i.test(limpio)) {
+    return 'El nombre ingresado no es válido para un ciclo académico.';
+  }
+
+  // Se conserva la regla pedida por el profesor: nombres preuniversitarios reconocibles.
+  const regexPre = /(semestral|anual|repaso|verano|veranito|intensivo|ciclo|pre|san\s+marcos|unmsm|\buni\b|pucp|catolica|villarreal|unfv|callao|unac|trujillo|unt|ingenier)/i;
+  if (!regexPre.test(limpio)) {
+    return 'El nombre debe identificar un ciclo preuniversitario (ej. Repaso UNI, Semestral San Marcos o Veranito PUCP).';
+  }
+
+  // Evita cadenas de prueba típicas.
+  if (/^(test|asdf|qwerty|curso|prueba|abc)(\s*\d*)?$/i.test(normalizarTexto(limpio))) {
+    return 'El nombre ingresado corresponde a un valor de prueba y no a una oferta académica válida.';
+  }
+
+  return null;
+}
+
+function generarPrefijo(nombre, universidad) {
+  const base = {
+    UNMSM: 'SEMSM',
+    UNI: 'UNI',
+    PUCP: 'PUCP',
+    UNFV: 'UNFV',
+    UNAC: 'UNAC',
+    UNT: 'UNT',
+    Preuniversitario: 'PREU',
+  }[universidad] || universidadDesdeNombre(nombre);
+
+  return String(base).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10) || 'ACAD';
+}
+
+function normalizarSalida(ciclo) {
+  const horario = ciclo.Horario || horarioDesdeTurno(ciclo.Turno);
+  const capacidad = Number(ciclo.Capacidad || 0);
+  const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
+
+  return {
+    idCiclo: ciclo.IdCiclo,
+    nombre: ciclo.Nombre,
+    prefijo: ciclo.PrefijoCodigo,
+    turno: ciclo.Turno || turnoDesdeHorario(horario),
+    horario,
+    diasClase: ciclo.DiasClase || 'Lunes a Sábado',
+    universidadObjetivo: ciclo.UniversidadObjetivo || universidadDesdeNombre(ciclo.Nombre),
+    fechaInicio: ciclo.FechaInicio,
+    fechaFin: ciclo.FechaFin,
+    precio: Number(ciclo.Precio || 0),
+    capacidad,
+    totalAlumnos,
+    vacantesDisponibles: capacidad > 0 ? Math.max(capacidad - totalAlumnos, 0) : null,
+    totalCursos: Number(ciclo.TotalCursos || 0),
+    disponible: capacidad === 0 || totalAlumnos < capacidad,
+    estadoRegistro: Number(ciclo.EstadoRegistro),
+  };
+}
 
 /* ============================================================
-   GET /api/ciclos/publicos  → Vitrina pública
+   GET /api/ciclos/publicos
+   Vitrina pública: SOLO ciclos visibles/activos.
    ============================================================ */
 router.get('/publicos', async (req, res) => {
   try {
@@ -44,28 +148,29 @@ router.get('/publicos', async (req, res) => {
         c.Nombre,
         c.PrefijoCodigo,
         c.Turno,
-        COALESCE(NULLIF(TRIM(c.Horario), ''), CASE
-          WHEN LOWER(COALESCE(c.Turno, '')) LIKE '%mañana%' OR LOWER(COALESCE(c.Turno, '')) LIKE '%manana%' THEN '08:00 - 13:00'
-          WHEN LOWER(COALESCE(c.Turno, '')) LIKE '%tarde%' THEN '14:00 - 19:00'
-          WHEN LOWER(COALESCE(c.Turno, '')) LIKE '%noche%' THEN '18:00 - 22:00'
-          ELSE '08:00 - 13:00'
-        END) AS Horario,
-        COALESCE(NULLIF(TRIM(c.DiasClase), ''), 'Lunes a Sábado') AS DiasClase,
-        COALESCE(NULLIF(TRIM(c.UniversidadObjetivo), ''), '') AS UniversidadObjetivo,
+        c.Horario,
+        c.DiasClase,
+        c.UniversidadObjetivo,
         c.FechaInicio,
         c.FechaFin,
-        COALESCE(c.Capacidad, 0) AS Capacidad,
+        c.Precio,
+        c.Capacidad,
+        c.EstadoRegistro,
         (
           SELECT COUNT(*)
           FROM Matricula m
+          INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
           WHERE m.IdCiclo = c.IdCiclo
             AND m.EstadoRegistro = 1
+            AND u.EstadoRegistro = 1
         ) AS TotalAlumnos,
         (
           SELECT COUNT(*)
           FROM CicloCurso cc
+          INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
           WHERE cc.IdCiclo = c.IdCiclo
             AND cc.EstadoRegistro = 1
+            AND cu.EstadoRegistro = 1
         ) AS TotalCursos
       FROM Ciclo c
       WHERE c.EstadoRegistro = 1
@@ -75,107 +180,179 @@ router.get('/publicos', async (req, res) => {
         c.IdCiclo ASC
     `);
 
-    const salida = ciclos.map((ciclo) => {
-      const horario = ciclo.Horario || horarioDesdeTurno(ciclo.Turno);
-      return {
-        ...ciclo,
-        Turno: ciclo.Turno || turnoDesdeHorario(horario),
-        UniversidadObjetivo: (!ciclo.UniversidadObjetivo || ciclo.UniversidadObjetivo === 'Preuniversitario')
-          ? universidadDesdeNombre(ciclo.Nombre)
-          : ciclo.UniversidadObjetivo,
-        Horario: horario,
-        DiasClase: ciclo.DiasClase || 'Lunes a Sábado'
-      };
-    });
-
+    const salida = ciclos.map(normalizarSalida);
     res.status(200).json(salida);
   } catch (error) {
-    console.error('Error al cargar la vitrina de ciclos:', error);
-    res.status(500).json({ error: 'Error interno del servidor al cargar los ciclos.' });
+    console.error('Error en GET /api/ciclos/publicos:', error);
+    res.status(500).json({ error: 'No se pudo cargar la oferta académica pública.' });
   }
 });
 
 /* ============================================================
-   GET /api/ciclos/:id/cursos  → Cursos del ciclo
+   GET /api/ciclos/publicos/:id/detalle
+   Detalle público: ciclo + cursos + horarios + docentes.
    ============================================================ */
-router.get('/:id/cursos', async (req, res) => {
-  try {
-    const { id } = req.params;
+router.get('/publicos/:id/detalle', async (req, res) => {
+  const idCiclo = Number(req.params.id);
+  if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
+    return res.status(400).json({ error: 'El IdCiclo no es válido.' });
+  }
 
-    const [rows] = await pool.query(`
+  try {
+    const [ciclos] = await pool.query(`
+      SELECT
+        c.IdCiclo,
+        c.Nombre,
+        c.PrefijoCodigo,
+        c.Turno,
+        c.Horario,
+        c.DiasClase,
+        c.UniversidadObjetivo,
+        c.FechaInicio,
+        c.FechaFin,
+        c.Precio,
+        c.Capacidad,
+        c.EstadoRegistro,
+        (
+          SELECT COUNT(*)
+          FROM Matricula m
+          INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
+          WHERE m.IdCiclo = c.IdCiclo
+            AND m.EstadoRegistro = 1
+            AND u.EstadoRegistro = 1
+        ) AS TotalAlumnos,
+        (
+          SELECT COUNT(*)
+          FROM CicloCurso cc
+          INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
+          WHERE cc.IdCiclo = c.IdCiclo
+            AND cc.EstadoRegistro = 1
+            AND cu.EstadoRegistro = 1
+        ) AS TotalCursos
+      FROM Ciclo c
+      WHERE c.IdCiclo = ?
+        AND c.EstadoRegistro = 1
+      LIMIT 1
+    `, [idCiclo]);
+
+    if (ciclos.length === 0) {
+      return res.status(404).json({ error: 'El ciclo no existe o ya no está publicado.' });
+    }
+
+    const ciclo = normalizarSalida(ciclos[0]);
+
+    const [cursos] = await pool.query(`
       SELECT
         cc.IdCiclo,
-        cu.IdCurso,
-        cu.Nombre
+        cc.IdCurso,
+        cc.Orden,
+        cu.Nombre,
+        cu.Codigo,
+        cu.Descripcion
       FROM CicloCurso cc
       INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
       WHERE cc.IdCiclo = ?
         AND cc.EstadoRegistro = 1
         AND cu.EstadoRegistro = 1
       ORDER BY cc.Orden ASC, cu.Nombre ASC
-    `, [id]);
+    `, [idCiclo]);
 
-    res.json(rows);
+    const [horarios] = await pool.query(`
+      SELECT
+        h.IdHorario,
+        h.IdCiclo,
+        h.IdCurso,
+        h.DiaNumero,
+        h.DiaSemana,
+        TIME_FORMAT(h.HoraInicio, '%H:%i') AS HoraInicio,
+        TIME_FORMAT(h.HoraFin, '%H:%i') AS HoraFin,
+        h.Docente,
+        h.Orden,
+        cu.Nombre AS Curso
+      FROM HorarioCurso h
+      INNER JOIN Curso cu ON cu.IdCurso = h.IdCurso
+      WHERE h.IdCiclo = ?
+        AND h.EstadoRegistro = 1
+        AND cu.EstadoRegistro = 1
+      ORDER BY
+        h.DiaNumero ASC,
+        h.HoraInicio ASC,
+        h.Orden ASC,
+        cu.Nombre ASC
+    `, [idCiclo]);
+
+    res.json({
+      ciclo,
+      cursos: cursos.map((curso) => ({
+        idCurso: curso.IdCurso,
+        nombre: curso.Nombre,
+        codigo: curso.Codigo || '',
+        descripcion: curso.Descripcion || '',
+        orden: Number(curso.Orden || 0),
+      })),
+      horarios: horarios.map((h) => ({
+        idHorario: h.IdHorario,
+        idCurso: h.IdCurso,
+        curso: h.Curso,
+        diaNumero: Number(h.DiaNumero || 0),
+        diaSemana: h.DiaSemana,
+        horaInicio: h.HoraInicio,
+        horaFin: h.HoraFin,
+        docente: h.Docente || 'Por asignar',
+        orden: Number(h.Orden || 0),
+      })),
+    });
   } catch (error) {
-    console.error('Error al cargar cursos del ciclo:', error.message);
-    res.status(500).json({ error: 'No se pudieron cargar los cursos del ciclo.' });
+    console.error('Error en GET /api/ciclos/publicos/:id/detalle:', error);
+    res.status(500).json({ error: 'No se pudo cargar el detalle del ciclo.' });
   }
 });
 
 /* ============================================================
-   POST /api/ciclos  → Crear ciclo (Solo Administradores)
+   GET /api/ciclos/:id/cursos
+   Mantiene compatibilidad con el frontend existente.
    ============================================================ */
-router.post('/', requiereRol('Administrador'), async (req, res) => {
-  const { nombre, turno, horario, capacidad } = req.body || {};
-
-  // ---------- 1. Restricción de nomenclatura "imposible" ----------
-  const nombreLimpio = String(nombre || '').trim();
-
-  if (nombreLimpio.length < 10) {
-    return res.status(400).json({
-      error: 'El nombre del ciclo es muy corto. Debe ser descriptivo (ej. "Semestral San Marcos").'
-    });
+router.get('/:id/cursos', async (req, res) => {
+  const idCiclo = Number(req.params.id);
+  if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
+    return res.status(400).json({ error: 'El IdCiclo no es válido.' });
   }
-
-  // Regex: debe contener al menos una palabra clave académica preuniversitaria
-  const regexPre = /(semestral|anual|repaso|verano|veranito|intensivo|san marcos|uni|pucp|villareal|callao)/i;
-  if (!regexPre.test(nombreLimpio)) {
-    return res.status(400).json({
-      error: 'Nombre inválido. El ciclo debe incluir palabras clave (ej. Semestral, Repaso, UNI, Verano).'
-    });
-  }
-
-  // ---------- 2. Validaciones numéricas básicas ----------
-  const capacidadFinal = Number(capacidad);
-  if (capacidad !== undefined && capacidad !== null && capacidad !== '' &&
-      (!Number.isFinite(capacidadFinal) || capacidadFinal < 0)) {
-    return res.status(400).json({ error: 'La capacidad debe ser un número válido mayor o igual a 0.' });
-  }
-
-  // ---------- 3. Turno / Horario por defecto coherentes ----------
-  const turnoFinal = String(turno || '').trim() || turnoDesdeHorario(horario);
-  const horarioFinal = String(horario || '').trim() || horarioDesdeTurno(turnoFinal);
 
   try {
-    const [result] = await pool.query(
-      `INSERT INTO Ciclo (Nombre, Turno, Horario, Capacidad, EstadoRegistro)
-       VALUES (?, ?, ?, ?, 1)`,
-      [
-        nombreLimpio,
-        turnoFinal,
-        horarioFinal,
-        Number.isFinite(capacidadFinal) ? capacidadFinal : 0
-      ]
-    );
+    const [rows] = await pool.query(`
+      SELECT
+        cc.IdCiclo,
+        cc.IdCurso,
+        cc.Orden,
+        cu.Nombre,
+        cu.Codigo,
+        cu.Descripcion
+      FROM CicloCurso cc
+      INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
+      WHERE cc.IdCiclo = ?
+        AND cc.EstadoRegistro = 1
+        AND cu.EstadoRegistro = 1
+      ORDER BY cc.Orden ASC, cu.Nombre ASC
+    `, [idCiclo]);
 
-    res.status(201).json({
-      message: 'Ciclo aperturado exitosamente.',
-      idCiclo: result.insertId
-    });
+    res.json(rows);
   } catch (error) {
-    console.error('Error creando ciclo:', error);
-    res.status(500).json({ error: 'Error al aperturar el ciclo.' });
+    console.error('Error al cargar cursos del ciclo:', error);
+    res.status(500).json({ error: 'No se pudieron cargar los cursos del ciclo.' });
   }
 });
 
-module.exports = router;
+module.exports = {
+  router,
+  validarNombreCiclo,
+  validarFechaISO,
+  normalizarTexto,
+  universidadDesdeNombre,
+  horarioDesdeTurno,
+  turnoDesdeHorario,
+  generarPrefijo,
+  UNIVERSIDADES_VALIDAS,
+  MIN_CAPACIDAD,
+  MAX_CAPACIDAD,
+  MAX_PRECIO,
+};

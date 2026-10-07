@@ -7,219 +7,403 @@ const URL_GOOGLE_SCRIPT =
   process.env.GOOGLE_SCRIPT_URL ||
   'https://script.google.com/macros/s/AKfycbwYym4iIz1mW0qjrmoVa6WI_qSY9Z3xdVx5hI8_k8tnZ7eKkSSiE7UKB6Zk0v3dw9SC/exec';
 
+const UNIVERSIDADES = new Set(['UNMSM', 'UNI', 'PUCP', 'UNFV', 'UNAC', 'UNT', 'Preuniversitario']);
+
+function normalizarCorreo(correo = '') {
+  return String(correo).trim().toLowerCase();
+}
+
+function correoValido(correo = '') {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo);
+}
+
+function textoNombreValido(texto = '') {
+  const limpio = String(texto).trim().replace(/\s+/g, ' ');
+  return limpio.length >= 2 && limpio.length <= 100 && /^[A-Za-zÁÉÍÓÚáéíóúÑñÜü .'-]+$/.test(limpio);
+}
+
 function generarClaveTemporal() {
-  return Math.random().toString(36).substring(2, 8).toUpperCase();
+  return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
 
 function generarCodigo(prefix) {
-  const base = String(prefix || 'ACAD').trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  const base = String(prefix || 'ACAD')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9-]/g, '')
+    .slice(0, 10) || 'ACAD';
   const aleatorio = Math.floor(1000 + Math.random() * 9000);
   return `${base}-${aleatorio}`;
 }
 
-/* ============================================================
-   PASO A: Verificación previa del alumno por correo
-   POST /api/matriculas/verificar
-   ============================================================ */
-router.post('/verificar', async (req, res) => {
-  const { correo } = req.body || {};
+function universidadDesdeNombre(nombre = '') {
+  const n = String(nombre).toLowerCase();
+  if (n.includes('san marcos') || n.includes('unmsm')) return 'UNMSM';
+  if (/\buni\b/.test(n) || n.includes('ingenier')) return 'UNI';
+  if (n.includes('pucp') || n.includes('católica') || n.includes('catolica')) return 'PUCP';
+  if (n.includes('villarreal') || n.includes('unfv')) return 'UNFV';
+  if (n.includes('callao') || n.includes('unac')) return 'UNAC';
+  if (n.includes('trujillo') || n.includes('unt')) return 'UNT';
+  return 'Preuniversitario';
+}
 
-  if (!correo) {
-    return res.status(400).json({ error: 'Correo obligatorio.' });
+function obtenerEstadoCicloValido(ciclo) {
+  if (!ciclo) return 'NO_EXISTE';
+  if (Number(ciclo.EstadoRegistro) !== 1) return 'CERRADO';
+
+  const hoy = new Date();
+  hoy.setHours(0, 0, 0, 0);
+
+  if (ciclo.FechaFin) {
+    const fin = new Date(`${ciclo.FechaFin}T23:59:59`);
+    if (fin < hoy) return 'FINALIZADO';
   }
 
-  const correoFinal = String(correo).trim().toLowerCase();
+  if (ciclo.FechaInicio) {
+    const inicio = new Date(`${ciclo.FechaInicio}T00:00:00`);
+    // Un ciclo futuro sigue siendo inscribible si está visible y no está lleno.
+    if (inicio < new Date('2000-01-01T00:00:00')) return 'INVALIDO';
+  }
+
+  return 'ABIERTO';
+}
+
+async function obtenerCicloDisponible(idCiclo, connection = pool, bloquear = false) {
+  const lock = bloquear ? ' FOR UPDATE' : '';
+  const [rows] = await connection.query(`
+    SELECT
+      c.IdCiclo,
+      c.IdAcademia,
+      c.Nombre,
+      c.PrefijoCodigo,
+      c.UniversidadObjetivo,
+      c.Turno,
+      c.Horario,
+      c.DiasClase,
+      c.FechaInicio,
+      c.FechaFin,
+      c.Precio,
+      c.Capacidad,
+      c.EstadoRegistro,
+      (
+        SELECT COUNT(*)
+        FROM Matricula m
+        INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
+        WHERE m.IdCiclo = c.IdCiclo
+          AND m.EstadoRegistro = 1
+          AND u.EstadoRegistro = 1
+      ) AS TotalAlumnos
+    FROM Ciclo c
+    WHERE c.IdCiclo = ?
+    LIMIT 1${lock}
+  `, [idCiclo]);
+
+  return rows[0] || null;
+}
+
+async function buscarAlumnoActivoPorCorreo(correo, idAcademia, connection = pool, bloquear = false) {
+  const lock = bloquear ? ' FOR UPDATE' : '';
+  const [rows] = await connection.query(`
+    SELECT
+      u.IdUsuario,
+      u.CodigoUsuario,
+      u.Nombres,
+      u.ApellidoPaterno,
+      u.ApellidoMaterno,
+      u.CorreoElectronico,
+      u.IdAcademia,
+      u.EstadoRegistro,
+      up.IdPerfil,
+      p.Nombre AS NombrePerfil
+    FROM Usuario u
+    INNER JOIN Usuario_Perfiles up
+      ON up.IdUsuario = u.IdUsuario
+     AND up.EstadoRegistro = 1
+    INNER JOIN perfil p
+      ON p.IdPerfil = up.IdPerfil
+     AND p.EstadoRegistro = 1
+    WHERE LOWER(TRIM(u.CorreoElectronico)) = ?
+      AND u.EstadoRegistro = 1
+    ORDER BY CASE WHEN LOWER(TRIM(p.Nombre)) = 'alumno' THEN 0 ELSE 1 END
+    LIMIT 1${lock}
+  `, [correo, idAcademia]);
+
+  if (rows.length === 0) return null;
+  return rows[0];
+}
+
+/* ============================================================
+   POST /api/matriculas/verificar
+   Verifica identidad existente y ciclos actuales.
+   ============================================================ */
+router.post('/verificar', async (req, res) => {
+  const correo = normalizarCorreo(req.body?.correo);
+  const idCiclo = Number(req.body?.idCiclo);
+
+  if (!correo || !correoValido(correo)) {
+    return res.status(400).json({ error: 'Debes proporcionar un correo electrónico válido.' });
+  }
+  if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
+    return res.status(400).json({ error: 'Debes proporcionar un IdCiclo válido.' });
+  }
 
   try {
-    // 1. ¿Existe el usuario?
-    const [usuarios] = await pool.query(
-      `SELECT IdUsuario, Nombres, ApellidoPaterno
-       FROM Usuario
-       WHERE LOWER(CorreoElectronico) = ?
-       LIMIT 1`,
-      [correoFinal]
-    );
+    const ciclo = await obtenerCicloDisponible(idCiclo);
+    if (!ciclo) return res.status(404).json({ error: 'El ciclo seleccionado no existe.' });
 
-    if (usuarios.length === 0) {
-      // Alumno nuevo -> Yan puede continuar normal
-      return res.status(200).json({ existe: false });
+    const estadoCiclo = obtenerEstadoCicloValido(ciclo);
+    if (estadoCiclo !== 'ABIERTO') {
+      return res.status(409).json({
+        existe: false,
+        error: estadoCiclo === 'CERRADO'
+          ? 'El ciclo seleccionado se encuentra cerrado o no está publicado.'
+          : 'El ciclo seleccionado ya no admite nuevas inscripciones.',
+      });
     }
 
-    const alumno = usuarios[0];
+    if (Number(ciclo.Capacidad || 0) > 0 && Number(ciclo.TotalAlumnos || 0) >= Number(ciclo.Capacidad)) {
+      return res.status(409).json({ existe: false, error: 'El ciclo seleccionado ya alcanzó su capacidad máxima.' });
+    }
 
-    // 2. ¿En qué ciclos está matriculado actualmente?
-    const [ciclosActuales] = await pool.query(
-      `SELECT c.IdCiclo, c.Nombre
-       FROM Matricula m
-       INNER JOIN Ciclo c ON m.IdCiclo = c.IdCiclo
-       WHERE m.IdUsuario = ?
-         AND m.EstadoRegistro = 1
-         AND c.EstadoRegistro = 1`,
-      [alumno.IdUsuario]
-    );
+    const alumno = await buscarAlumnoActivoPorCorreo(correo, ciclo.IdAcademia);
 
-    const ciclosInscritos = ciclosActuales.map((c) => c.Nombre);
-    const idsCiclosInscritos = ciclosActuales.map((c) => c.IdCiclo);
+    if (!alumno) {
+      return res.status(200).json({
+        existe: false,
+        esAlumno: false,
+        idCiclo,
+      });
+    }
 
-    // Yan dispara el SweetAlert2 con esta data
-    return res.status(200).json({
+    const esAlumno = String(alumno.NombrePerfil || '').trim().toLowerCase() === 'alumno';
+
+    if (!esAlumno) {
+      return res.status(200).json({
+        existe: true,
+        esAlumno: false,
+        idUsuario: alumno.IdUsuario,
+        mensaje: 'El correo ya pertenece a una cuenta del sistema, pero no corresponde a un alumno.',
+        puedeReinscribirse: false,
+        idCiclo,
+      });
+    }
+
+    const [ciclosActuales] = await pool.query(`
+      SELECT
+        c.IdCiclo,
+        c.Nombre,
+        c.Turno,
+        c.FechaInicio,
+        c.FechaFin,
+        m.IdMatricula
+      FROM Matricula m
+      INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo
+      WHERE m.IdUsuario = ?
+        AND m.EstadoRegistro = 1
+        AND c.EstadoRegistro = 1
+      ORDER BY c.FechaInicio DESC, c.IdCiclo DESC
+    `, [alumno.IdUsuario]);
+
+    const yaMatriculadoEnCiclo = ciclosActuales.some((c) => Number(c.IdCiclo) === idCiclo);
+
+    res.status(200).json({
       existe: true,
+      esAlumno: true,
       idUsuario: alumno.IdUsuario,
-      mensaje: `Hola ${alumno.Nombres}, ya estás registrado en el sistema.`,
-      ciclosInscritos,
-      idsCiclosInscritos
+      codigoUsuario: alumno.CodigoUsuario,
+      nombreCompleto: `${alumno.Nombres} ${alumno.ApellidoPaterno}`.trim(),
+      mensaje: yaMatriculadoEnCiclo
+        ? `Ya estás matriculado en ${ciclo.Nombre}.`
+        : `Ya estás registrado en el sistema y actualmente tienes ${ciclosActuales.length} ciclo(s) activo(s).`,
+      puedeReinscribirse: !yaMatriculadoEnCiclo,
+      yaInscritoEnCiclo: yaMatriculadoEnCiclo,
+      cicloSeleccionado: {
+        idCiclo,
+        nombre: ciclo.Nombre,
+      },
+      ciclos: ciclosActuales.map((c) => ({
+        idCiclo: c.IdCiclo,
+        nombre: c.Nombre,
+        turno: c.Turno,
+        fechaInicio: c.FechaInicio,
+        fechaFin: c.FechaFin,
+        idMatricula: c.IdMatricula,
+      })),
     });
   } catch (error) {
-    console.error('Error verificando correo:', error);
-    return res.status(500).json({ error: 'Error interno del servidor.' });
+    console.error('Error en POST /api/matriculas/verificar:', error);
+    res.status(500).json({ error: 'No se pudo verificar el correo del alumno.' });
   }
 });
 
 /* ============================================================
-   PASO B: Checkout con soporte de reinscripción
    POST /api/matriculas/checkout
+   Inscripción/reinscripción transaccional.
    ============================================================ */
 router.post('/checkout', async (req, res) => {
-  const {
-    Nombres,
-    Apellidos,
-    Correo,
-    IdCiclo,
-    PrefijoCiclo,
-    nombres,
-    apellidos,
-    correo,
-    idCiclo,
-    prefijoCiclo
-  } = req.body || {};
+  const nombre = String(req.body?.Nombres ?? req.body?.nombres ?? '').trim().replace(/\s+/g, ' ');
+  const apellidos = String(req.body?.Apellidos ?? req.body?.apellidos ?? '').trim().replace(/\s+/g, ' ');
+  const correo = normalizarCorreo(req.body?.Correo ?? req.body?.correo);
+  const idCiclo = Number(req.body?.IdCiclo ?? req.body?.idCiclo);
 
-  const nombreFinal = String(Nombres || nombres || '').trim();
-  const apellidosFinal = String(Apellidos || apellidos || '').trim();
-  const correoFinal = String(Correo || correo || '').trim().toLowerCase();
-  const idCicloFinal = Number(IdCiclo || idCiclo);
-  let prefijoFinal = PrefijoCiclo || prefijoCiclo || '';
-
-  if (!nombreFinal || !apellidosFinal || !correoFinal || !idCicloFinal) {
-    return res.status(400).json({
-      error: 'Faltan datos obligatorios para procesar la inscripción.'
-    });
+  if (!textoNombreValido(nombre)) {
+    return res.status(400).json({ error: 'Los nombres no tienen un formato válido.' });
+  }
+  if (!textoNombreValido(apellidos)) {
+    return res.status(400).json({ error: 'Los apellidos no tienen un formato válido.' });
+  }
+  if (!correoValido(correo)) {
+    return res.status(400).json({ error: 'El correo electrónico no tiene un formato válido.' });
+  }
+  if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
+    return res.status(400).json({ error: 'El IdCiclo no es válido.' });
   }
 
   const connection = await pool.getConnection();
+  let correoParaEnviar = null;
+  let datosCorreo = null;
 
   try {
     await connection.beginTransaction();
 
-    /* ---------- 1. Validar ciclo y capacidad ---------- */
-    const [ciclos] = await connection.query(
-      `SELECT
-        c.IdCiclo,
-        c.Nombre,
-        c.PrefijoCodigo,
-        c.Capacidad,
-        (
-          SELECT COUNT(*)
-          FROM Matricula m
-          WHERE m.IdCiclo = c.IdCiclo
-            AND m.EstadoRegistro = 1
-        ) AS TotalAlumnos
-      FROM Ciclo c
-      WHERE c.IdCiclo = ?
-        AND c.EstadoRegistro = 1
-      FOR UPDATE`,
-      [idCicloFinal]
-    );
+    /* 1. Bloqueamos el ciclo para impedir sobreventa/concurrencia. */
+    const ciclo = await obtenerCicloDisponible(idCiclo, connection, true);
 
-    if (ciclos.length === 0) {
+    if (!ciclo) {
       await connection.rollback();
-      return res.status(404).json({ error: 'El ciclo seleccionado no existe o no está disponible.' });
+      return res.status(404).json({ error: 'El ciclo seleccionado no existe.' });
     }
 
-    const ciclo = ciclos[0];
-    prefijoFinal = ciclo.PrefijoCodigo || prefijoFinal || 'ACAD';
-
-    if (Number(ciclo.Capacidad || 0) > 0 && Number(ciclo.TotalAlumnos || 0) >= Number(ciclo.Capacidad)) {
+    const estadoCiclo = obtenerEstadoCicloValido(ciclo);
+    if (estadoCiclo !== 'ABIERTO') {
       await connection.rollback();
       return res.status(409).json({
-        error: 'El ciclo seleccionado ya alcanzó su capacidad máxima.'
+        error: estadoCiclo === 'CERRADO'
+          ? 'El ciclo está cerrado y no admite nuevas matrículas.'
+          : 'El ciclo ya no admite nuevas matrículas.',
       });
     }
 
-    /* ---------- 2. ¿Existe el alumno? ---------- */
-    const [existentes] = await connection.query(
-      `SELECT IdUsuario, CodigoUsuario
-       FROM Usuario
-       WHERE LOWER(CorreoElectronico) = ?
-       LIMIT 1`,
-      [correoFinal]
-    );
+    const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
+    const capacidad = Number(ciclo.Capacidad || 0);
+    if (capacidad > 0 && totalAlumnos >= capacidad) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'El ciclo seleccionado ya alcanzó su capacidad máxima.' });
+    }
 
-    let idAlumnoFinal;
-    let codigoUsuarioFinal;
+    /* 2. Precio real desde BD. Nunca confiar en monto enviado por frontend. */
+    const precioReal = Number(ciclo.Precio || 0);
+    const montoReportado = req.body?.monto ?? req.body?.Monto;
+    if (montoReportado !== undefined && montoReportado !== null && montoReportado !== '') {
+      const montoCliente = Number(montoReportado);
+      if (!Number.isFinite(montoCliente) || montoCliente < 0) {
+        await connection.rollback();
+        return res.status(400).json({ error: 'El monto enviado no es válido.' });
+      }
+    }
+
+    /* 3. Si existe usuario, bloqueamos su fila antes de revisar duplicados. */
+    const [usuarios] = await connection.query(`
+      SELECT
+        u.IdUsuario,
+        u.CodigoUsuario,
+        u.Nombres,
+        u.ApellidoPaterno,
+        u.CorreoElectronico,
+        u.IdAcademia,
+        u.EstadoRegistro,
+        up.IdPerfil,
+        p.Nombre AS NombrePerfil
+      FROM Usuario u
+      INNER JOIN Usuario_Perfiles up
+        ON up.IdUsuario = u.IdUsuario
+       AND up.EstadoRegistro = 1
+      INNER JOIN perfil p
+        ON p.IdPerfil = up.IdPerfil
+       AND p.EstadoRegistro = 1
+      WHERE LOWER(TRIM(u.CorreoElectronico)) = ?
+        AND u.EstadoRegistro = 1
+      ORDER BY CASE WHEN LOWER(TRIM(p.Nombre)) = 'alumno' THEN 0 ELSE 1 END
+      LIMIT 1
+      FOR UPDATE
+    `, [correo]);
+
+    let idAlumnoFinal = null;
+    let codigoUsuarioFinal = null;
     let esReinscripcion = false;
     let claveSinEncriptar = null;
 
-    if (existentes.length > 0) {
-      /* =====================================================
-         ✅ REINSCRIPCIÓN
-         ===================================================== */
-      idAlumnoFinal = existentes[0].IdUsuario;
-      codigoUsuarioFinal = existentes[0].CodigoUsuario;
+    if (usuarios.length > 0) {
+      const existente = usuarios[0];
+      const esAlumno = String(existente.NombrePerfil || '').trim().toLowerCase() === 'alumno';
+
+      if (!esAlumno) {
+        await connection.rollback();
+        return res.status(409).json({
+          error: 'El correo ya pertenece a una cuenta que no tiene el perfil Alumno. No se puede reutilizar para una matrícula pública.',
+        });
+      }
+
+      if (Number(existente.IdAcademia) !== Number(ciclo.IdAcademia)) {
+        await connection.rollback();
+        return res.status(409).json({
+          error: 'El correo pertenece a otra academia y no puede reutilizarse en este ciclo.',
+        });
+      }
+
+      idAlumnoFinal = existente.IdUsuario;
+      codigoUsuarioFinal = existente.CodigoUsuario;
       esReinscripcion = true;
 
-      // Verificamos que no se matricule al MISMO ciclo otra vez
-      const [yaMatriculado] = await connection.query(
-        `SELECT IdMatricula
-         FROM Matricula
-         WHERE IdUsuario = ?
-           AND IdCiclo = ?
-           AND EstadoRegistro = 1
-         LIMIT 1`,
-        [idAlumnoFinal, idCicloFinal]
-      );
+      const [yaMatriculado] = await connection.query(`
+        SELECT IdMatricula
+        FROM Matricula
+        WHERE IdUsuario = ?
+          AND IdCiclo = ?
+          AND EstadoRegistro = 1
+        LIMIT 1
+        FOR UPDATE
+      `, [idAlumnoFinal, idCiclo]);
 
       if (yaMatriculado.length > 0) {
         await connection.rollback();
         return res.status(409).json({
-          error: 'Ya te encuentras matriculado en este ciclo específico.'
+          error: `Ya te encuentras matriculado en el ciclo "${ciclo.Nombre}".`,
+          yaInscritoEnCiclo: true,
+          idCiclo,
+          idUsuario: idAlumnoFinal,
         });
       }
 
-      // Actualizamos sus datos por si los cambió (opcional pero recomendado)
-      await connection.query(
-        `UPDATE Usuario
-         SET Nombres = ?, ApellidoPaterno = ?
-         WHERE IdUsuario = ?`,
-        [nombreFinal, apellidosFinal, idAlumnoFinal]
-      );
+      await connection.query(`
+        UPDATE Usuario
+        SET Nombres = ?, ApellidoPaterno = ?
+        WHERE IdUsuario = ?
+          AND IdAcademia = ?
+      `, [nombre, apellidos, idAlumnoFinal, ciclo.IdAcademia]);
     } else {
-      /* =====================================================
-         ✅ ALUMNO NUEVO
-         ===================================================== */
+      /* 4. Alumno nuevo. */
       const [perfilesAlumno] = await connection.query(`
         SELECT IdPerfil
         FROM perfil
         WHERE EstadoRegistro = 1
-          AND LOWER(COALESCE(NULLIF(Nombre, ''), '')) = 'alumno'
+          AND LOWER(TRIM(Nombre)) = 'alumno'
         LIMIT 1
       `);
 
       if (perfilesAlumno.length === 0) {
         await connection.rollback();
-        return res.status(500).json({
-          error: 'No está configurado el perfil Alumno en la base de datos.'
-        });
+        return res.status(500).json({ error: 'No está configurado el perfil Alumno en la base de datos.' });
       }
 
-      // Generar código único
       let codigoUsuario = '';
-      for (let intento = 0; intento < 10; intento += 1) {
-        const candidato = generarCodigo(prefijoFinal);
-        const [existeCodigo] = await connection.query(
+      for (let intento = 0; intento < 15; intento += 1) {
+        const candidato = generarCodigo(ciclo.PrefijoCodigo || universidadDesdeNombre(ciclo.Nombre));
+        const [codigoExistente] = await connection.query(
           'SELECT IdUsuario FROM Usuario WHERE CodigoUsuario = ? LIMIT 1',
           [candidato]
         );
-        if (existeCodigo.length === 0) {
+        if (codigoExistente.length === 0) {
           codigoUsuario = candidato;
           break;
         }
@@ -227,135 +411,143 @@ router.post('/checkout', async (req, res) => {
 
       if (!codigoUsuario) {
         await connection.rollback();
-        return res.status(500).json({
-          error: 'No se pudo generar un código de alumno disponible.'
-        });
+        return res.status(500).json({ error: 'No se pudo generar un código de alumno disponible.' });
       }
 
       claveSinEncriptar = generarClaveTemporal();
       const claveHasheada = await bcrypt.hash(claveSinEncriptar, 10);
 
-      const [insertUser] = await connection.query(
-        `INSERT INTO Usuario
+      const [resultUsuario] = await connection.query(`
+        INSERT INTO Usuario
           (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno,
            Celular, CorreoElectronico, Clave, FechaCreacion,
            EstadoRegistro, IdAcademia)
-         VALUES (?, NULL, ?, ?, '', '', ?, ?, NOW(), 1, 1)`,
-        [
-          codigoUsuario,
-          nombreFinal,
-          apellidosFinal,
-          correoFinal,
-          claveHasheada
-        ]
-      );
+        VALUES (?, NULL, ?, ?, '', '', ?, ?, NOW(), 1, ?)
+      `, [
+        codigoUsuario,
+        nombre,
+        apellidos,
+        correo,
+        claveHasheada,
+        ciclo.IdAcademia,
+      ]);
 
-      idAlumnoFinal = insertUser.insertId;
+      idAlumnoFinal = resultUsuario.insertId;
       codigoUsuarioFinal = codigoUsuario;
 
-      await connection.query(
-        `INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro)
-         VALUES (?, ?, 1)`,
-        [idAlumnoFinal, perfilesAlumno[0].IdPerfil]
-      );
+      await connection.query(`
+        INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro)
+        VALUES (?, ?, 1)
+      `, [idAlumnoFinal, perfilesAlumno[0].IdPerfil]);
     }
 
-    /* ---------- 3. Insertar matrícula + pago ---------- */
-    const [insertMatricula] = await connection.query(
-      `INSERT INTO Matricula (IdUsuario, IdCiclo, EstadoRegistro)
-       VALUES (?, ?, 1)`,
-      [idAlumnoFinal, idCicloFinal]
-    );
+    /* 5. Matrícula nueva. El IdUsuario puede repetirse en distintos ciclos. */
+    const [insertMatricula] = await connection.query(`
+      INSERT INTO Matricula (IdUsuario, IdCiclo, EstadoRegistro)
+      VALUES (?, ?, 1)
+    `, [idAlumnoFinal, idCiclo]);
 
-    await connection.query(
-      `INSERT INTO PagosMensualidad
+    /* 6. Pago real según Precio del ciclo. */
+    await connection.query(`
+      INSERT INTO PagosMensualidad
         (IdUsuario, IdCiclo, Mes, Monto, Estado, FechaPago, EstadoRegistro)
-       VALUES (?, ?, 'Inscripcion', 1.00, 'Pagado', NOW(), 1)`,
-      [idAlumnoFinal, idCicloFinal]
-    );
+      VALUES (?, ?, 'Inscripcion', ?, 'Pagado', NOW(), 1)
+    `, [idAlumnoFinal, idCiclo, precioReal]);
 
-    /* ---------- 4. Conteo final ---------- */
-    const [nuevoConteo] = await connection.query(
-      `SELECT COUNT(*) AS TotalAlumnos
-       FROM Matricula
-       WHERE IdCiclo = ? AND EstadoRegistro = 1`,
-      [idCicloFinal]
-    );
+    const [nuevoConteo] = await connection.query(`
+      SELECT COUNT(*) AS TotalAlumnos
+      FROM Matricula m
+      INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
+      WHERE m.IdCiclo = ?
+        AND m.EstadoRegistro = 1
+        AND u.EstadoRegistro = 1
+    `, [idCiclo]);
 
     await connection.commit();
 
-    const totalAlumnos = Number(nuevoConteo[0]?.TotalAlumnos || 0);
+    const totalFinal = Number(nuevoConteo[0]?.TotalAlumnos || 0);
 
-    /* ---------- 5. Respuesta ---------- */
+    correoParaEnviar = correo;
+    datosCorreo = {
+      nombre,
+      codigoUsuario: codigoUsuarioFinal,
+      claveSinEncriptar,
+      cicloNombre: ciclo.Nombre,
+      precio: precioReal,
+      esReinscripcion,
+    };
+
     res.status(201).json({
       exito: true,
       esReinscripcion,
       idUsuario: idAlumnoFinal,
       idMatricula: insertMatricula.insertId,
       codigoUsuario: codigoUsuarioFinal,
-      correo: correoFinal,
-      idCiclo: idCicloFinal,
+      correo,
+      idCiclo,
       ciclo: ciclo.Nombre,
-      totalAlumnos,
+      precio: precioReal,
+      totalAlumnos: totalFinal,
+      vacantesDisponibles: capacidad > 0 ? Math.max(capacidad - totalFinal, 0) : null,
       mensaje: esReinscripcion
-        ? 'Reinscripción procesada correctamente.'
-        : 'Inscripción procesada correctamente. Las credenciales se enviarán al correo registrado.'
+        ? 'Reinscripción procesada correctamente usando la cuenta existente.'
+        : 'Inscripción procesada correctamente. Se generó una cuenta de alumno.',
     });
+  } catch (error) {
+    try { await connection.rollback(); } catch (_) {}
+    console.error('Error en POST /api/matriculas/checkout:', error);
 
-    /* ---------- 6. Correo (solo a nuevos / o ambos según quieras) ---------- */
-    const asuntoCorreo = esReinscripcion
-      ? `¡Reinscripción Exitosa al ${ciclo.Nombre}!`
-      : '¡Inscripción Exitosa! Tus accesos a la Intranet AcadeSys';
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        error: 'La operación generó un registro duplicado. Vuelve a consultar el estado de la matrícula antes de intentarlo nuevamente.',
+      });
+    }
 
-    const cuerpoHtml = esReinscripcion
-      ? `
-      <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px; max-width: 600px;">
-        <h2 style="color: #2563eb;">¡Hola de nuevo, ${nombreFinal}!</h2>
-        <p>Tu <strong>reinscripción al ${ciclo.Nombre}</strong> fue procesada correctamente.</p>
-        <p>Puedes ingresar a la intranet con tu usuario habitual:</p>
-        <p><strong>Usuario / código:</strong> <span style="font-family: monospace;">${codigoUsuarioFinal}</span></p>
-      </div>`
-      : `
-      <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px; max-width: 600px;">
-        <h2 style="color: #2563eb;">¡Bienvenido a AcadeSys, ${nombreFinal}!</h2>
-        <p>Tu inscripción al <strong>${ciclo.Nombre}</strong> fue procesada correctamente.</p>
-        <p><strong>Usuario / código:</strong> <span style="font-family: monospace;">${codigoUsuarioFinal}</span></p>
-        <p><strong>Contraseña temporal:</strong> <span style="font-family: monospace;">${claveSinEncriptar}</span></p>
-        <p>Ingresa a la plataforma y luego cambia tu contraseña.</p>
-      </div>`;
+    return res.status(500).json({ error: 'Hubo un problema procesando la inscripción.' });
+  } finally {
+    connection.release();
 
-    if (URL_GOOGLE_SCRIPT) {
+    /* El correo nunca provoca rollback de una matrícula ya confirmada. */
+    if (correoParaEnviar && datosCorreo && URL_GOOGLE_SCRIPT) {
+      const asunto = datosCorreo.esReinscripcion
+        ? `Reinscripción exitosa - ${datosCorreo.cicloNombre}`
+        : `Bienvenido a AcadeSys - ${datosCorreo.cicloNombre}`;
+
+      const bloqueClave = datosCorreo.esReinscripcion
+        ? '<p>Conserva tu código de acceso habitual; no se generó una contraseña nueva.</p>'
+        : `<p><strong>Contraseña temporal:</strong> <span style="font-family: monospace;">${datosCorreo.claveSinEncriptar}</span></p>`;
+
+      const cuerpoHtml = `
+        <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px; max-width: 600px;">
+          <h2 style="color: #2563eb;">¡Hola, ${datosCorreo.nombre}!</h2>
+          <p>Tu ${datosCorreo.esReinscripcion ? 'reinscripción' : 'inscripción'} al <strong>${datosCorreo.cicloNombre}</strong> fue procesada correctamente.</p>
+          <p><strong>Monto registrado:</strong> S/ ${Number(datosCorreo.precio || 0).toFixed(2)}</p>
+          <p><strong>Código de usuario:</strong> <span style="font-family: monospace;">${datosCorreo.codigoUsuario}</span></p>
+          ${bloqueClave}
+          <p>Gracias por confiar en AcadeSys.</p>
+        </div>`;
+
       fetch(URL_GOOGLE_SCRIPT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          to: correoFinal,
-          subject: asuntoCorreo,
-          htmlBody: cuerpoHtml
-        })
+          to: correoParaEnviar,
+          subject: asunto,
+          htmlBody: cuerpoHtml,
+        }),
       })
-        .then((response) => response.json())
+        .then((response) => response.json().catch(() => ({})))
         .then((data) => {
           if (data?.status === 'success') {
-            console.log('✅ Correo enviado a:', correoFinal);
+            console.log('✅ Correo de matrícula enviado a:', correoParaEnviar);
           } else {
-            console.warn('⚠️ El servicio de correo respondió sin éxito:', data);
+            console.warn('⚠️ El servicio de correo no confirmó éxito para:', correoParaEnviar, data);
           }
         })
         .catch((err) => {
-          console.error('❌ Error enviando correo:', err.message);
+          console.error('❌ Error enviando correo post-matrícula:', err.message);
         });
     }
-  } catch (error) {
-    await connection.rollback();
-    console.error('Error en Checkout:', error);
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: 'Hubo un problema procesando la inscripción: ' + error.message
-      });
-    }
-  } finally {
-    connection.release();
   }
 });
 
