@@ -62,6 +62,100 @@ router.get("/", async (req, res) => {
 });
 
 /* ============================================================
+   GET /api/notas/contexto/:idCiclo
+   Contexto de calificacion y escala dinamica del ciclo
+   ============================================================ */
+router.get("/contexto/:idCiclo", async (req, res) => {
+  try {
+    const idCiclo = Number(req.params.idCiclo);
+    const idAcademia = req.usuario.idAcademia;
+
+    if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
+      return res.status(400).json({
+        error: "El idCiclo no es valido.",
+      });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT ci.IdCiclo, ci.Nombre, ci.UniversidadObjetivo
+       FROM Ciclo ci
+       WHERE ci.IdCiclo = ?
+         AND ci.IdAcademia = ?
+         AND ci.EstadoRegistro = 1
+       LIMIT 1`,
+      [idCiclo, idAcademia],
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        error: "El ciclo indicado no existe, esta inactivo o no pertenece a tu academia.",
+      });
+    }
+
+    const ciclo = rows[0];
+    const universidadObjetivo = ciclo.UniversidadObjetivo || "UNMSM";
+    const escalaMaxima = obtenerMaximoPermitido(universidadObjetivo);
+
+    return res.json({
+      idCiclo: ciclo.IdCiclo,
+      ciclo: ciclo.Nombre,
+      universidadObjetivo,
+      escalaMinima: 0,
+      escalaMaxima,
+    });
+  } catch (error) {
+    console.error("Error en GET /notas/contexto/:idCiclo:", error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+/* ============================================================
+   GET /api/notas/matriculas/:idCiclo
+   Alumnos matriculados en un ciclo para registro de notas
+   ============================================================ */
+router.get("/matriculas/:idCiclo", async (req, res) => {
+  try {
+    const idCiclo = Number(req.params.idCiclo);
+    const idAcademia = req.usuario.idAcademia;
+
+    if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
+      return res.status(400).json({ error: "El idCiclo no es valido." });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT m.IdMatricula, m.IdUsuario, m.IdCiclo,
+              u.CodigoUsuario, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno
+       FROM Matricula m
+       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
+       INNER JOIN Ciclo ci ON ci.IdCiclo = m.IdCiclo
+       WHERE m.IdCiclo = ?
+         AND m.EstadoRegistro = 1
+         AND u.EstadoRegistro = 1
+         AND u.IdAcademia = ?
+         AND ci.IdAcademia = ?
+         AND ci.EstadoRegistro = 1
+       ORDER BY u.ApellidoPaterno, u.ApellidoMaterno, u.Nombres`,
+      [idCiclo, idAcademia, idAcademia],
+    );
+
+    return res.json(
+      rows.map((row) => ({
+        idMatricula: row.IdMatricula,
+        idUsuario: row.IdUsuario,
+        idCiclo: row.IdCiclo,
+        codigo: row.CodigoUsuario,
+        nombre: [row.Nombres, row.ApellidoPaterno, row.ApellidoMaterno]
+          .filter(Boolean)
+          .join(" "),
+      })),
+    );
+  } catch (error) {
+    console.error("Error en GET /notas/matriculas/:idCiclo:", error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+/* ============================================================
    GET /api/notas/alumno/:id - Historial y promedio individual
    ============================================================ */
 router.get("/alumno/:id", async (req, res) => {
