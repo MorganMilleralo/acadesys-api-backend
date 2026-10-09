@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 
 const express = require('express');
@@ -223,6 +224,12 @@ app.use(
 // ============================================================
 // 9. RUTAS PRIVADAS EXISTENTES
 // ============================================================
+
+// Aulas, cursos, asignaciones y asistencia (rutas privadas protegidas por JWT)
+app.use(
+    '/api',
+    require('./routes/academico.routes')
+);
 
 // Perfiles y permisos
 app.use(
