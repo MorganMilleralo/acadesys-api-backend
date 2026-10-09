@@ -6,9 +6,16 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const tutorHandler = async (req, res) => {
   try {
-    const { alumno, estudiante, historialNotas, historialSimulacros, pregunta } = req.body;
+    const {
+      alumno,
+      estudiante,
+      historialNotas,
+      historialSimulacros,
+      pregunta,
+    } = req.body;
 
-    const nombreEstudiante = (alumno && alumno.nombre) || estudiante || "Estudiante";
+    const nombreEstudiante =
+      (alumno && alumno.nombre) || estudiante || "Estudiante";
     const notas = historialNotas || historialSimulacros || [];
 
     const prompt = `
@@ -28,7 +35,10 @@ const tutorHandler = async (req, res) => {
     `;
 
     // Lista de modelos ordenados por prioridad ante picos de demanda (503)
-    const modelosDisponibles = ["gemini-3.8-flash", "gemini-3.1-pro-preview"];
+    const modelosDisponibles = [
+      "gemini-3.5-flash-lite",
+      "gemini-3.1-flash-lite",
+    ];
     let responseText = null;
     let ultimoError = null;
 
@@ -45,13 +55,17 @@ const tutorHandler = async (req, res) => {
         responseText = result.response.text();
         if (responseText) break; // Si respondió con éxito, salimos del ciclo
       } catch (err) {
-        console.warn(`[Tutor IA] ${nombreModelo} no respondió (${err.message}). Evaluando alternativa...`);
+        console.warn(
+          `[Tutor IA] ${nombreModelo} no respondió (${err.message}). Evaluando alternativa...`,
+        );
         ultimoError = err;
       }
     }
 
     if (!responseText) {
-      throw ultimoError || new Error("No hubo disponibilidad en los modelos de IA.");
+      throw (
+        ultimoError || new Error("No hubo disponibilidad en los modelos de IA.")
+      );
     }
 
     const dataParsed = JSON.parse(responseText);
