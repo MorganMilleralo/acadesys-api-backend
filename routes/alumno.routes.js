@@ -139,7 +139,7 @@ router.get('/me', async (req, res) => {
         TIME_FORMAT(h.HoraInicio, '%H:%i') AS HoraInicio,
         TIME_FORMAT(h.HoraFin, '%H:%i') AS HoraFin,
         cu.Nombre AS Curso,
-        COALESCE(h.Docente, 'Por asignar') AS Docente
+        'Por asignar' AS Docente
       FROM HorarioCurso h
       INNER JOIN Curso cu ON cu.IdCurso = h.IdCurso
       WHERE h.IdCiclo = ?
