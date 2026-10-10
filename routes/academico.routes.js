@@ -37,7 +37,7 @@ function horaValida(valor) {
 }
 
 // ============================================================
-// AULAS: requieren la migración database/2026_10_08_academico_asistencia.sql
+// AULAS
 // ============================================================
 router.get('/aulas', async (req, res) => {
   const idAcademia = academiaDelUsuario(req, res);
@@ -58,6 +58,7 @@ router.get('/aulas', async (req, res) => {
   }
 });
 
+// MODIFICADO: POST /aulas con Reactivación Inteligente (Baja Lógica)
 router.post('/aulas', requiereRol('Administrador'), async (req, res) => {
   const idAcademia = academiaDelUsuario(req, res);
   if (!idAcademia) return;
@@ -69,6 +70,28 @@ router.post('/aulas', requiereRol('Administrador'), async (req, res) => {
     return res.status(400).json({ error: 'La capacidad debe ser un entero entre 1 y 500.' });
   }
   try {
+    // 1. Buscamos si el aula ya existe en la academia, sin importar su estado
+    const [existentes] = await pool.query(
+        'SELECT IdAula, EstadoRegistro FROM Aula WHERE IdAcademia = ? AND Nombre = ?',
+        [idAcademia, nombre]
+    );
+
+    if (existentes.length > 0) {
+        const aula = existentes[0];
+        if (aula.EstadoRegistro === 0) {
+            // Reactivación si estaba dada de baja
+            await pool.query(
+                'UPDATE Aula SET EstadoRegistro = 1, Nivel = ?, Capacidad = ? WHERE IdAula = ?',
+                [nivel, capacidad, aula.IdAula]
+            );
+            return res.status(200).json({ message: 'Aula reactivada y actualizada correctamente.', idAula: aula.IdAula });
+        } else {
+            // Si está activa, bloqueamos
+            return res.status(409).json({ error: 'Ya existe un aula activa con ese nombre en esta academia.' });
+        }
+    }
+
+    // 2. Creación normal si no existía
     const [result] = await pool.query(
       `INSERT INTO Aula (IdAcademia, Nombre, Nivel, Capacidad, EstadoRegistro)
        VALUES (?, ?, ?, ?, 1)`,
@@ -76,7 +99,6 @@ router.post('/aulas', requiereRol('Administrador'), async (req, res) => {
     );
     res.status(201).json({ message: 'Aula creada correctamente.', idAula: result.insertId });
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Ya existe un aula con ese nombre en esta academia.' });
     console.error('POST /api/aulas:', error);
     res.status(500).json({ error: 'No se pudo crear el aula.' });
   }
@@ -128,7 +150,7 @@ router.delete('/aulas/:id', requiereRol('Administrador'), async (req, res) => {
 });
 
 // ============================================================
-// CURSOS: utiliza la tabla Curso existente (catálogo compartido).
+// CURSOS
 // ============================================================
 router.get('/cursos', async (_req, res) => {
   try {
@@ -147,6 +169,7 @@ router.get('/cursos', async (_req, res) => {
   }
 });
 
+// MODIFICADO: POST /cursos con Reactivación Inteligente (Baja Lógica)
 router.post('/cursos', requiereRol('Administrador'), async (req, res) => {
   const nombre = normalizarTexto(req.body?.nombre ?? req.body?.Nombre, 100);
   const codigo = normalizarTexto(req.body?.codigo ?? req.body?.Codigo, 20).toUpperCase();
@@ -155,6 +178,28 @@ router.post('/cursos', requiereRol('Administrador'), async (req, res) => {
   if (nombre.length < 2) return res.status(400).json({ error: 'El nombre del curso debe tener al menos 2 caracteres.' });
   if (!/^[A-Z0-9-]{2,20}$/.test(codigo)) return res.status(400).json({ error: 'El código debe tener entre 2 y 20 letras mayúsculas, números o guiones.' });
   try {
+    // 1. Buscamos si el curso ya existe por código
+    const [existentes] = await pool.query(
+        'SELECT IdCurso, EstadoRegistro FROM Curso WHERE Codigo = ?',
+        [codigo]
+    );
+
+    if (existentes.length > 0) {
+        const curso = existentes[0];
+        if (curso.EstadoRegistro === 0) {
+            // Reactivación si estaba dado de baja
+            await pool.query(
+                'UPDATE Curso SET EstadoRegistro = 1, Nombre = ?, Descripcion = ?, UniversidadObjetivo = ? WHERE IdCurso = ?',
+                [nombre, descripcion, universidad, curso.IdCurso]
+            );
+            return res.status(200).json({ message: 'Curso reactivado y actualizado correctamente.', idCurso: curso.IdCurso });
+        } else {
+            // Bloqueo de duplicado activo
+            return res.status(409).json({ error: 'Ya existe un curso activo con ese código.' });
+        }
+    }
+
+    // 2. Creación normal si no existía
     const [result] = await pool.query(
       `INSERT INTO Curso (Nombre, Codigo, Descripcion, UniversidadObjetivo, EstadoRegistro)
        VALUES (?, ?, ?, ?, 1)`,
@@ -162,7 +207,6 @@ router.post('/cursos', requiereRol('Administrador'), async (req, res) => {
     );
     res.status(201).json({ message: 'Curso creado correctamente.', idCurso: result.insertId });
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Ya existe un curso con ese código.' });
     console.error('POST /api/cursos:', error);
     res.status(500).json({ error: 'No se pudo crear el curso.' });
   }
@@ -212,7 +256,7 @@ router.delete('/cursos/:id', requiereRol('Administrador'), async (req, res) => {
 });
 
 // ============================================================
-// ASIGNACIONES: docente + ciclo + curso + aula + horas.
+// ASIGNACIONES (Sin modificaciones estructurales requeridas)
 // ============================================================
 router.get('/asignaciones', requiereRol(...ROLES_GESTION), async (req, res) => {
   const idAcademia = academiaDelUsuario(req, res);
@@ -333,7 +377,7 @@ router.delete('/asignaciones/:id', requiereRol('Administrador'), async (req, res
 });
 
 // ============================================================
-// ASISTENCIAS: cada matrícula tiene un registro diario por aula.
+// ASISTENCIAS (Sin modificaciones estructurales requeridas)
 // ============================================================
 router.get('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
   const idAcademia = academiaDelUsuario(req, res);
