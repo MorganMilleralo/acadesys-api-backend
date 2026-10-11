@@ -13,7 +13,7 @@ const UNIVERSIDADES_VALIDAS = new Set([
 ]);
 
 const MIN_CAPACIDAD = 1;
-const MAX_CAPACIDAD = 500;
+const MAX_CAPACIDAD = 100;
 const MAX_PRECIO = 9999.99;
 
 function normalizarTexto(valor = '') {
@@ -113,7 +113,10 @@ function generarPrefijo(nombre, universidad) {
 
 function normalizarSalida(ciclo) {
   const horario = ciclo.Horario || horarioDesdeTurno(ciclo.Turno);
-  const capacidad = Number(ciclo.Capacidad || 0);
+  // Regla de negocio: ningún ciclo admite más de 100 matrículas activas.
+  // Capacidad 0/null heredada se interpreta como el nuevo límite de 100.
+  const capacidadConfigurada = Number(ciclo.Capacidad || 100);
+  const capacidad = Math.min(100, capacidadConfigurada > 0 ? capacidadConfigurada : 100);
   const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
 
   return {
@@ -129,9 +132,9 @@ function normalizarSalida(ciclo) {
     precio: Number(ciclo.Precio || 0),
     capacidad,
     totalAlumnos,
-    vacantesDisponibles: capacidad > 0 ? Math.max(capacidad - totalAlumnos, 0) : null,
+    vacantesDisponibles: Math.max(capacidad - totalAlumnos, 0),
     totalCursos: Number(ciclo.TotalCursos || 0),
-    disponible: capacidad === 0 || totalAlumnos < capacidad,
+    disponible: totalAlumnos < capacidad,
     estadoRegistro: Number(ciclo.EstadoRegistro),
   };
 }
@@ -356,3 +359,5 @@ module.exports = {
   MAX_CAPACIDAD,
   MAX_PRECIO,
 };
+
+

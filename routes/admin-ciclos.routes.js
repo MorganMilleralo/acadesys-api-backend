@@ -219,13 +219,11 @@ router.get('/', async (req, res) => {
 
     res.json(rows.map((c) => ({
       ...c,
-      Capacidad: Number(c.Capacidad || 0),
+      Capacidad: Math.min(100, Number(c.Capacidad || 100) > 0 ? Number(c.Capacidad || 100) : 100),
       Precio: Number(c.Precio || 0),
       TotalAlumnos: Number(c.TotalAlumnos || 0),
       TotalCursos: Number(c.TotalCursos || 0),
-      VacantesDisponibles: Number(c.Capacidad || 0) > 0
-        ? Math.max(Number(c.Capacidad) - Number(c.TotalAlumnos || 0), 0)
-        : null,
+      VacantesDisponibles: Math.max(Math.min(100, Number(c.Capacidad || 100) > 0 ? Number(c.Capacidad || 100) : 100) - Number(c.TotalAlumnos || 0), 0),
       Estado: Number(c.EstadoRegistro) === 1 ? 'Activo / Visible' : 'Cerrado / Oculto',
     })));
   } catch (error) {
@@ -282,7 +280,7 @@ router.get('/:id', async (req, res) => {
     `, [idCiclo]);
 
     res.json({
-      ciclo,
+      ciclo: { ...ciclo, Capacidad: Math.min(100, Number(ciclo.Capacidad || 100) > 0 ? Number(ciclo.Capacidad || 100) : 100) },
       cursos,
       horarios,
     });
@@ -292,6 +290,35 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+function obtenerCursosSeleccionados(body = {}) {
+  const raw = body.cursosSeleccionados ?? body.cursos;
+  if (raw === undefined) return null; // PUT can preserve relations when caller omits the field.
+  if (!Array.isArray(raw)) return { error: 'cursosSeleccionados debe ser una lista de identificadores de cursos.' };
+  const ids = [...new Set(raw.map((x) => Number(x)).filter((x) => Number.isInteger(x) && x > 0))];
+  if (ids.length !== raw.length) return { error: 'La selección contiene identificadores de curso inválidos o repetidos.' };
+  return { ids };
+}
+
+async function reemplazarCursosCiclo(connection, idCiclo, ids) {
+  if (ids === null) return;
+  if (ids.length) {
+    const placeholders = ids.map(() => '?').join(',');
+    const [cursosValidos] = await connection.query(
+      `SELECT IdCurso FROM Curso WHERE EstadoRegistro = 1 AND IdCurso IN (${placeholders})`,
+      ids,
+    );
+    if (cursosValidos.length !== ids.length) { const error = new Error('Uno o más cursos no existen o están inactivos.'); error.code = 'CICLO_CURSOS_INVALIDOS'; throw error; }
+  }
+  await connection.query('UPDATE CicloCurso SET EstadoRegistro = 0 WHERE IdCiclo = ? AND EstadoRegistro = 1', [idCiclo]);
+  for (let index = 0; index < ids.length; index += 1) {
+    await connection.query(
+      `INSERT INTO CicloCurso (IdCiclo, IdCurso, Orden, EstadoRegistro) VALUES (?, ?, ?, 1)
+       ON DUPLICATE KEY UPDATE Orden = VALUES(Orden), EstadoRegistro = 1`,
+      [idCiclo, ids[index], index + 1],
+    );
+  }
+}
+
 /* POST /api/admin/ciclos */
 router.post('/', async (req, res) => {
   const idAcademia = req.usuario.idAcademia;
@@ -300,6 +327,9 @@ router.post('/', async (req, res) => {
   const data = prepararCiclo(req.body);
   const errorValidacion = validarDatosCiclo(data, { esCreacion: true });
   if (errorValidacion) return res.status(400).json({ error: errorValidacion });
+  const cursosParseados = obtenerCursosSeleccionados(req.body);
+  if (cursosParseados?.error) return res.status(400).json({ error: cursosParseados.error });
+  const cursosSeleccionados = cursosParseados?.ids ?? [];
 
   const connection = await pool.getConnection();
   try {
@@ -342,6 +372,8 @@ router.post('/', async (req, res) => {
       data.capacidad,
     ]);
 
+    await reemplazarCursosCiclo(connection, result.insertId, cursosSeleccionados);
+
     await connection.commit();
 
     res.status(201).json({
@@ -352,7 +384,7 @@ router.post('/', async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error('Error en POST /api/admin/ciclos:', error);
-    res.status(500).json({ error: 'No se pudo crear el ciclo.', detalle: error.code === 'ER_DUP_ENTRY' ? 'Existe un registro duplicado.' : undefined });
+    res.status(error.code === 'CICLO_CURSOS_INVALIDOS' ? 400 : 500).json({ error: error.code === 'CICLO_CURSOS_INVALIDOS' ? error.message : 'No se pudo crear el ciclo.', detalle: error.code === 'ER_DUP_ENTRY' ? 'Existe un registro duplicado.' : undefined });
   } finally {
     connection.release();
   }
@@ -379,6 +411,11 @@ router.put('/:id', async (req, res) => {
     if (errorValidacion) {
       await connection.rollback();
       return res.status(400).json({ error: errorValidacion });
+    }
+    const cursosParseados = obtenerCursosSeleccionados(req.body);
+    if (cursosParseados?.error) {
+      await connection.rollback();
+      return res.status(400).json({ error: cursosParseados.error });
     }
 
     const totalAlumnos = Number(existente.TotalAlumnos || 0);
@@ -443,13 +480,15 @@ router.put('/:id', async (req, res) => {
       idAcademia,
     ]);
 
+    if (cursosParseados) await reemplazarCursosCiclo(connection, idCiclo, cursosParseados.ids);
+
     await connection.commit();
 
     res.json({ message: 'Ciclo actualizado correctamente.', idCiclo });
   } catch (error) {
     await connection.rollback();
     console.error('Error en PUT /api/admin/ciclos/:id:', error);
-    res.status(500).json({ error: 'No se pudo actualizar el ciclo.' });
+    res.status(error.code === 'CICLO_CURSOS_INVALIDOS' ? 400 : 500).json({ error: error.code === 'CICLO_CURSOS_INVALIDOS' ? error.message : 'No se pudo actualizar el ciclo.' });
   } finally {
     connection.release();
   }
@@ -554,3 +593,5 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
+
+

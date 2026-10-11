@@ -117,6 +117,7 @@ async function obtenerCicloDisponible(idCiclo, connection = pool, bloquear = fal
         WHERE m.IdCiclo = c.IdCiclo
           AND m.EstadoRegistro = 1
           AND u.EstadoRegistro = 1
+          AND u.IdAcademia = c.IdAcademia
       ) AS TotalAlumnos
     FROM Ciclo c
     WHERE c.IdCiclo = ?
@@ -149,7 +150,8 @@ async function buscarAlumnoActivoPorCorreo(correo, idAcademia, connection = pool
      AND p.EstadoRegistro = 1
     WHERE LOWER(TRIM(u.CorreoElectronico)) = ?
       AND u.EstadoRegistro = 1
-    ORDER BY CASE WHEN LOWER(TRIM(p.Nombre)) = 'alumno' THEN 0 ELSE 1 END
+    ORDER BY CASE WHEN u.IdAcademia = ? THEN 0 ELSE 1 END,
+             CASE WHEN LOWER(TRIM(p.Nombre)) = 'alumno' THEN 0 ELSE 1 END
     LIMIT 1${lock}
   `, [correo, idAcademia]);
 
@@ -186,7 +188,8 @@ router.post('/verificar', async (req, res) => {
       });
     }
 
-    if (Number(ciclo.Capacidad || 0) > 0 && Number(ciclo.TotalAlumnos || 0) >= Number(ciclo.Capacidad)) {
+    const capacidadEfectiva = Math.min(100, Number(ciclo.Capacidad || 100) > 0 ? Number(ciclo.Capacidad || 100) : 100);
+    if (Number(ciclo.TotalAlumnos || 0) >= capacidadEfectiva) {
       return res.status(409).json({ existe: false, error: 'El ciclo seleccionado ya alcanzó su capacidad máxima.' });
     }
 
@@ -197,6 +200,16 @@ router.post('/verificar', async (req, res) => {
         existe: false,
         esAlumno: false,
         idCiclo,
+      });
+    }
+
+    if (Number(alumno.IdAcademia) !== Number(ciclo.IdAcademia)) {
+      return res.status(409).json({
+        existe: true,
+        esAlumno: false,
+        puedeReinscribirse: false,
+        idUsuario: alumno.IdUsuario,
+        mensaje: 'El correo pertenece a otra academia y no puede reutilizarse en este ciclo.',
       });
     }
 
@@ -309,9 +322,20 @@ router.post('/checkout', async (req, res) => {
       });
     }
 
-    const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
-    const capacidad = Number(ciclo.Capacidad || 0);
-    if (capacidad > 0 && totalAlumnos >= capacidad) {
+    // Count active registrations after the cycle row is locked. Every checkout
+    // locks the same cycle row first, so concurrent requests cannot oversell seats.
+    const [matriculasActivasCiclo] = await connection.query(
+      `SELECT m.IdMatricula
+       FROM Matricula m
+       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
+       WHERE m.IdCiclo = ? AND m.EstadoRegistro = 1 AND u.EstadoRegistro = 1
+       FOR UPDATE`,
+      [idCiclo],
+    );
+    const totalAlumnos = matriculasActivasCiclo.length;
+    const capacidadConfigurada = Number(ciclo.Capacidad || 100);
+    const capacidad = Math.min(100, capacidadConfigurada > 0 ? capacidadConfigurada : 100);
+    if (totalAlumnos >= capacidad) {
       await connection.rollback();
       return res.status(409).json({ error: 'El ciclo seleccionado ya alcanzó su capacidad máxima.' });
     }
@@ -520,7 +544,7 @@ router.post('/checkout', async (req, res) => {
       ciclo: ciclo.Nombre,
       precio: precioReal,
       totalAlumnos: totalFinal,
-      vacantesDisponibles: capacidad > 0 ? Math.max(capacidad - totalFinal, 0) : null,
+      vacantesDisponibles: Math.max(capacidad - totalFinal, 0),
       mensaje: esReinscripcion
         ? 'Reinscripción procesada correctamente usando la cuenta existente.'
         : 'Inscripción procesada correctamente. Se generó una cuenta de alumno.',
@@ -696,3 +720,5 @@ router.post('/restablecer-clave', async (req, res) => {
 });
 
 module.exports = router;
+
+
