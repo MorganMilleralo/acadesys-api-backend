@@ -14,14 +14,24 @@ router.get(
 
       const [rows] = await pool.query(
         `SELECT p.IdPago, u.IdUsuario, u.CodigoUsuario,
-                    CONCAT(u.Nombres, ' ', u.ApellidoPaterno, ' ', COALESCE(u.ApellidoMaterno, '')) AS Alumno,
-                    c.Nombre AS Ciclo, p.Mes, p.Monto, p.Estado, p.FechaPago
-             FROM PagosMensualidad p
-             INNER JOIN Usuario u ON p.IdUsuario = u.IdUsuario
-             INNER JOIN Ciclo c ON p.IdCiclo = c.IdCiclo
-             WHERE p.IdCiclo = ? AND u.IdAcademia = ? AND p.EstadoRegistro = 1
-             ORDER BY u.ApellidoPaterno ASC, p.IdPago ASC`,
-        [idCiclo, idAcademia],
+                    CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, NULLIF(u.ApellidoMaterno, '')) AS Alumno,
+                    c.Nombre AS Ciclo, p.Mes, p.Monto,
+                    COALESCE(p.Estado, 'Sin registro') AS Estado, p.FechaPago
+             FROM Matricula m
+             INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
+             INNER JOIN Ciclo c ON m.IdCiclo = c.IdCiclo
+             LEFT JOIN PagosMensualidad p
+               ON p.IdUsuario = m.IdUsuario
+              AND p.IdCiclo = m.IdCiclo
+              AND p.EstadoRegistro = 1
+             WHERE m.IdCiclo = ?
+               AND m.EstadoRegistro = 1
+               AND u.IdAcademia = ?
+               AND u.EstadoRegistro = 1
+               AND c.IdAcademia = ?
+               AND c.EstadoRegistro = 1
+             ORDER BY u.ApellidoPaterno ASC, u.Nombres ASC, p.IdPago ASC`,
+        [idCiclo, idAcademia, idAcademia],
       );
 
       res.json(rows);
@@ -73,3 +83,4 @@ router.put(
 );
 
 module.exports = router;
+

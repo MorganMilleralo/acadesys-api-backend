@@ -292,10 +292,11 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
   const idUsuario = idPositivo(req.body?.idUsuario ?? req.body?.IdUsuario);
   const idCiclo = idPositivo(req.body?.idCiclo ?? req.body?.IdCiclo);
   const idCurso = idPositivo(req.body?.idCurso ?? req.body?.IdCurso);
-  const idAula = idPositivo(req.body?.idAula ?? req.body?.IdAula);
+  const idAulaSolicitada = idPositivo(req.body?.idAula ?? req.body?.IdAula);
+  let idAula = idAulaSolicitada;
   const horas = Number(req.body?.horas ?? req.body?.Horas ?? 4);
-  if (!idUsuario || !idCiclo || !idCurso || !idAula) {
-    return res.status(400).json({ error: 'Selecciona un docente, ciclo, curso y aula vÃ¡lidos.' });
+  if (!idUsuario || !idCiclo || !idCurso) {
+    return res.status(400).json({ error: 'Selecciona un docente/tutor, ciclo y curso vÃ¡lidos.' });
   }
   if (!Number.isInteger(horas) || horas < 1 || horas > 30) return res.status(400).json({ error: 'Las horas semanales deben estar entre 1 y 30.' });
 
@@ -317,20 +318,48 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
       return res.status(400).json({ error: 'El usuario seleccionado no es un docente/tutor activo de esta academia.' });
     }
     const [[ciclo]] = await connection.query(
-      'SELECT IdCiclo FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
+      'SELECT IdCiclo, Nombre FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
       [idCiclo, idAcademia],
-    );
-    const [[aula]] = await connection.query(
-      'SELECT IdAula FROM Aula WHERE IdAula = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
-      [idAula, idAcademia],
     );
     const [[curso]] = await connection.query(
       'SELECT IdCurso FROM Curso WHERE IdCurso = ? AND EstadoRegistro = 1 LIMIT 1',
       [idCurso],
     );
-    if (!ciclo || !aula || !curso) {
+    if (!ciclo || !curso) {
       await connection.rollback();
-      return res.status(400).json({ error: 'El ciclo, aula o curso no existe, estÃ¡ inactivo o no pertenece a esta academia.' });
+      return res.status(400).json({ error: 'El ciclo o el curso no existe, estÃ¡ inactivo o no pertenece a esta academia.' });
+    }
+
+    // Aula interna de compatibilidad. En pantalla la organización es por ciclo,
+    // pero Asignacion_Aula conserva IdAula como campo obligatorio.
+    if (!idAula) {
+      const nombreAulaInterna = `Ciclo ${idCiclo}`;
+      const [[aulaExistente]] = await connection.query(
+        'SELECT IdAula, EstadoRegistro FROM Aula WHERE IdAcademia = ? AND Nombre = ? LIMIT 1',
+        [idAcademia, nombreAulaInterna],
+      );
+      if (aulaExistente) {
+        idAula = Number(aulaExistente.IdAula);
+        if (Number(aulaExistente.EstadoRegistro) !== 1) {
+          await connection.query('UPDATE Aula SET EstadoRegistro = 1, Nivel = ?, Capacidad = 100 WHERE IdAula = ? AND IdAcademia = ?', ['Preuniversitario', idAula, idAcademia]);
+        }
+      } else {
+        const [aulaCreada] = await connection.query(
+          `INSERT INTO Aula (IdAcademia, Nombre, Nivel, Capacidad, EstadoRegistro)
+           VALUES (?, ?, 'Preuniversitario', 100, 1)`,
+          [idAcademia, nombreAulaInterna],
+        );
+        idAula = aulaCreada.insertId;
+      }
+    } else {
+      const [[aulaSolicitada]] = await connection.query(
+        'SELECT IdAula FROM Aula WHERE IdAula = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
+        [idAula, idAcademia],
+      );
+      if (!aulaSolicitada) {
+        await connection.rollback();
+        return res.status(400).json({ error: 'El aula seleccionada no existe o estÃ¡ inactiva.' });
+      }
     }
     const [duplicados] = await connection.query(
       `SELECT IdAsignacion FROM Asignacion_Aula
@@ -519,58 +548,84 @@ router.delete('/horarios/:id', requiereRol('Administrador'), async (req, res) =>
 });
 
 // ============================================================
-// ASISTENCIAS (Sin modificaciones estructurales requeridas)
+// ASISTENCIAS — flujo principal por ciclo (sin migrar la BD).
+// Se conserva idAula para clientes antiguos. Como Asistencia.IdAula
+// existe en el modelo, el ciclo usa internamente una aula vinculada
+// a alguna asignación activa del ciclo para guardar el registro.
 // ============================================================
 router.get('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
   const idAcademia = academiaDelUsuario(req, res);
   if (!idAcademia) return;
   const idAula = idPositivo(req.query.idAula);
+  const idCiclo = idPositivo(req.query.idCiclo);
   const fecha = String(req.query.fecha ?? '');
-  if (!idAula || !fechaISOValida(fecha)) return res.status(400).json({ error: 'Debes indicar un idAula vÃ¡lido y una fecha en formato YYYY-MM-DD.' });
+  if ((!idAula && !idCiclo) || !fechaISOValida(fecha)) {
+    return res.status(400).json({ error: 'Debes indicar idCiclo (recomendado) o idAula y una fecha YYYY-MM-DD.' });
+  }
   try {
-    const [[aula]] = await pool.query(
-      'SELECT IdAula FROM Aula WHERE IdAula = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
-      [idAula, idAcademia],
-    );
-    if (!aula) return res.status(404).json({ error: 'Aula no encontrada en esta academia.' });
-    const [rows] = await pool.query(
-      `SELECT DISTINCT
-              m.IdMatricula AS idMatricula,
-              m.IdMatricula AS idAlumno,
-              u.IdUsuario AS idUsuario,
-              CONCAT(u.Nombres, ' ', u.ApellidoPaterno, ' ', COALESCE(u.ApellidoMaterno, '')) AS nombre,
-              COALESCE(DATE_FORMAT(ast.HoraLlegada, '%H:%i'), '--') AS horaLlegada,
-              COALESCE(ast.Estado, 'pendiente') AS estado
-       FROM Asignacion_Aula aa
-       INNER JOIN Ciclo c ON c.IdCiclo = aa.IdCiclo AND c.IdAcademia = aa.IdAcademia
-       INNER JOIN Matricula m ON m.IdCiclo = aa.IdCiclo
-         AND (aa.IdCurso IS NULL OR m.IdCurso IS NULL OR m.IdCurso = aa.IdCurso)
-       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario AND u.IdAcademia = aa.IdAcademia
-       LEFT JOIN Asistencia ast ON ast.IdMatricula = m.IdMatricula
-         AND ast.IdAula = aa.IdAula AND ast.Fecha = ? AND ast.EstadoRegistro = 1
-       WHERE aa.IdAula = ? AND aa.IdAcademia = ? AND aa.EstadoRegistro = 1
-         AND c.EstadoRegistro = 1 AND m.EstadoRegistro = 1 AND u.EstadoRegistro = 1
-         AND aa.IdAula IS NOT NULL
-       ORDER BY nombre ASC`,
-      [fecha, idAula, idAcademia],
-    );
+    if (idAula) {
+      const [[aula]] = await pool.query(
+        'SELECT IdAula FROM Aula WHERE IdAula = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
+        [idAula, idAcademia],
+      );
+      if (!aula) return res.status(404).json({ error: 'Aula no encontrada en esta academia.' });
+    }
+    if (idCiclo) {
+      const [[ciclo]] = await pool.query(
+        'SELECT IdCiclo FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
+        [idCiclo, idAcademia],
+      );
+      if (!ciclo) return res.status(404).json({ error: 'Ciclo no encontrado o inactivo.' });
+    }
+
+    const filtros = ['m.EstadoRegistro = 1', 'u.EstadoRegistro = 1', 'u.IdAcademia = ?', 'c.EstadoRegistro = 1'];
+    const params = [fecha, fecha, idAcademia];
+    if (idCiclo) { filtros.push('m.IdCiclo = ?'); params.push(idCiclo); }
+    if (idAula) {
+      filtros.push(`EXISTS (SELECT 1 FROM Asignacion_Aula aa
+        WHERE aa.IdCiclo = m.IdCiclo AND aa.IdAula = ? AND aa.IdAcademia = ?
+          AND aa.EstadoRegistro = 1 AND (aa.IdCurso IS NULL OR m.IdCurso IS NULL OR m.IdCurso = aa.IdCurso))`);
+      params.push(idAula, idAcademia);
+    }
+
+    const [rows] = await pool.query(`
+      SELECT
+        m.IdMatricula AS idMatricula,
+        m.IdMatricula AS idAlumno,
+        u.IdUsuario AS idUsuario,
+        CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, NULLIF(u.ApellidoMaterno, '')) AS nombre,
+        COALESCE((SELECT DATE_FORMAT(ast.HoraLlegada, '%H:%i')
+                  FROM Asistencia ast
+                  WHERE ast.IdMatricula = m.IdMatricula AND ast.Fecha = ? AND ast.EstadoRegistro = 1
+                  ORDER BY ast.IdAsistencia DESC LIMIT 1), '--') AS horaLlegada,
+        COALESCE((SELECT ast.Estado
+                  FROM Asistencia ast
+                  WHERE ast.IdMatricula = m.IdMatricula AND ast.Fecha = ? AND ast.EstadoRegistro = 1
+                  ORDER BY ast.IdAsistencia DESC LIMIT 1), 'pendiente') AS estado
+      FROM Matricula m
+      INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
+      INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo AND c.IdAcademia = u.IdAcademia
+      WHERE ${filtros.join(' AND ')}
+      ORDER BY nombre ASC
+    `, params);
     res.json(rows);
   } catch (error) {
     console.error('GET /api/asistencias:', error);
-    res.status(500).json({ error: 'No se pudo consultar la asistencia. Verifica que la migraciÃ³n estÃ© aplicada.' });
+    res.status(500).json({ error: 'No se pudo consultar la asistencia. Verifica la estructura de la tabla Asistencia.' });
   }
 });
 
 router.post('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
   const idAcademia = academiaDelUsuario(req, res);
   if (!idAcademia) return;
-  const idAula = idPositivo(req.body?.idAula);
+  const idAulaSolicitada = idPositivo(req.body?.idAula);
+  const idCiclo = idPositivo(req.body?.idCiclo);
   const fecha = String(req.body?.fecha ?? '');
   const lista = req.body?.listaAlumnos;
-  if (!idAula || !fechaISOValida(fecha) || !Array.isArray(lista) || lista.length === 0) {
-    return res.status(400).json({ error: 'EnvÃ­a un aula vÃ¡lida, una fecha YYYY-MM-DD y una lista de alumnos.' });
+  if ((!idAulaSolicitada && !idCiclo) || !fechaISOValida(fecha) || !Array.isArray(lista) || lista.length === 0) {
+    return res.status(400).json({ error: 'Envía un ciclo (o aula para compatibilidad), fecha YYYY-MM-DD y lista de alumnos.' });
   }
-  if (lista.length > 500) return res.status(413).json({ error: 'La lista de asistencia supera el lÃ­mite de 500 alumnos.' });
+  if (lista.length > 500) return res.status(413).json({ error: 'La lista de asistencia supera el límite técnico de 500 registros.' });
 
   const registros = [];
   const idsVistos = new Set();
@@ -578,8 +633,8 @@ router.post('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
     const idMatricula = idPositivo(alumno?.idMatricula);
     const estado = String(alumno?.estado ?? '').toLowerCase();
     const hora = horaValida(alumno?.horaLlegada);
-    if (!idMatricula || idsVistos.has(idMatricula)) return res.status(400).json({ error: 'La lista contiene una matrÃ­cula invÃ¡lida o duplicada.' });
-    if (!ESTADOS_ASISTENCIA.has(estado)) return res.status(400).json({ error: 'Todos los alumnos deben tener un estado vÃ¡lido: presente, tardanza, falta o justificado.' });
+    if (!idMatricula || idsVistos.has(idMatricula)) return res.status(400).json({ error: 'La lista contiene una matrícula inválida o duplicada.' });
+    if (!ESTADOS_ASISTENCIA.has(estado)) return res.status(400).json({ error: 'Todos los alumnos deben tener un estado válido: presente, tardanza, falta o justificado.' });
     if (hora === undefined) return res.status(400).json({ error: 'La hora de llegada debe tener formato HH:mm.' });
     idsVistos.add(idMatricula);
     registros.push({ idMatricula, estado, hora: ['presente', 'tardanza'].includes(estado) ? hora : null });
@@ -588,32 +643,67 @@ router.post('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
+    let idAula = idAulaSolicitada;
+    if (idCiclo) {
+      const [[ciclo]] = await connection.query(
+        'SELECT IdCiclo, Nombre FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1 FOR UPDATE',
+        [idCiclo, idAcademia],
+      );
+      if (!ciclo) {
+        await connection.rollback();
+        return res.status(404).json({ error: 'Ciclo no encontrado o inactivo.' });
+      }
+      // The old schema requires Asistencia.IdAula. Create/reuse a hidden
+      // compatibility row per cycle; attendance selection remains by IdCiclo.
+      const nombreAulaInterna = `Ciclo ${idCiclo}`;
+      const [[aulaExistente]] = await connection.query(
+        'SELECT IdAula, EstadoRegistro FROM Aula WHERE IdAcademia = ? AND Nombre = ? LIMIT 1 FOR UPDATE',
+        [idAcademia, nombreAulaInterna],
+      );
+      if (aulaExistente) {
+        idAula = Number(aulaExistente.IdAula);
+        if (Number(aulaExistente.EstadoRegistro) !== 1) {
+          await connection.query(
+            'UPDATE Aula SET EstadoRegistro = 1, Nivel = ?, Capacidad = 100 WHERE IdAula = ? AND IdAcademia = ?',
+            ['Preuniversitario', idAula, idAcademia],
+          );
+        }
+      } else {
+        const [aulaCreada] = await connection.query(
+          `INSERT INTO Aula (IdAcademia, Nombre, Nivel, Capacidad, EstadoRegistro)
+           VALUES (?, ?, 'Preuniversitario', 100, 1)`,
+          [idAcademia, nombreAulaInterna],
+        );
+        idAula = Number(aulaCreada.insertId);
+      }
+    }
+
     const [[aula]] = await connection.query(
       'SELECT IdAula FROM Aula WHERE IdAula = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
       [idAula, idAcademia],
     );
     if (!aula) {
       await connection.rollback();
-      return res.status(404).json({ error: 'Aula no encontrada en esta academia.' });
+      return res.status(404).json({ error: 'No existe un aula operativa asociada a este registro de asistencia.' });
     }
+
     const placeholders = registros.map(() => '?').join(',');
-    const params = [idAula, idAcademia, ...registros.map((r) => r.idMatricula)];
+    const parametrosMatriculas = [idAcademia, ...(idCiclo ? [idCiclo] : []), ...registros.map((r) => r.idMatricula)];
+    const whereCiclo = idCiclo ? 'AND m.IdCiclo = ?' : '';
     const [permitidas] = await connection.query(
       `SELECT DISTINCT m.IdMatricula
-       FROM Asignacion_Aula aa
-       INNER JOIN Matricula m ON m.IdCiclo = aa.IdCiclo
-         AND (aa.IdCurso IS NULL OR m.IdCurso IS NULL OR m.IdCurso = aa.IdCurso)
-       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario AND u.IdAcademia = aa.IdAcademia
-       INNER JOIN Ciclo c ON c.IdCiclo = aa.IdCiclo AND c.IdAcademia = aa.IdAcademia
-       WHERE aa.IdAula = ? AND aa.IdAcademia = ? AND aa.EstadoRegistro = 1
-         AND m.EstadoRegistro = 1 AND u.EstadoRegistro = 1 AND c.EstadoRegistro = 1
+       FROM Matricula m
+       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
+       INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo AND c.IdAcademia = u.IdAcademia
+       WHERE u.IdAcademia = ? AND u.EstadoRegistro = 1 AND m.EstadoRegistro = 1
+         AND c.EstadoRegistro = 1 ${whereCiclo}
          AND m.IdMatricula IN (${placeholders})`,
-      params,
+      parametrosMatriculas,
     );
     const permitidasSet = new Set(permitidas.map((r) => Number(r.IdMatricula)));
     if (permitidasSet.size !== registros.length) {
       await connection.rollback();
-      return res.status(400).json({ error: 'Una o mÃ¡s matrÃ­culas no corresponden a alumnos asignados al aula seleccionada.' });
+      return res.status(400).json({ error: 'Una o más matrículas no pertenecen al ciclo seleccionado o a esta academia.' });
     }
 
     const idUsuarioRegistro = idPositivo(req.usuario?.idUsuario ?? req.usuario?.id) || null;
@@ -630,14 +720,14 @@ router.post('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
       );
     }
     await connection.commit();
-    res.json({ message: 'Asistencia guardada correctamente.', registrosGuardados: registros.length });
+    res.json({ message: 'Asistencia del ciclo guardada correctamente.', registrosGuardados: registros.length, idCiclo: idCiclo || null });
   } catch (error) {
     await connection.rollback();
     console.error('POST /api/asistencias:', error);
-    res.status(500).json({ error: 'No se pudo guardar la asistencia. Verifica que la migraciÃ³n estÃ© aplicada.' });
+    res.status(500).json({ error: 'No se pudo guardar la asistencia. Verifica la estructura de la tabla Asistencia.' });
   } finally {
     connection.release();
   }
 });
-
 module.exports = router;
+
