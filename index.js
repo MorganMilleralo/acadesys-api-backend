@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const express = require("express");
@@ -34,17 +35,32 @@ if (faltantes.length > 0) {
   process.exit(1);
 }
 
+if (String(process.env.JWT_SECRET || '').length < 32) {
+  console.error('❌ JWT_SECRET debe tener al menos 32 caracteres. Configura un secreto largo y único en el entorno.');
+  process.exit(1);
+}
+
 // ============================================================
 // 2. CONFIGURACIÓN GENERAL DE EXPRESS
 // ============================================================
 
 app.set("trust proxy", 1);
 
-app.use(
-  cors({
-    origin: true,
-  }),
+const origenesPermitidos = new Set(
+  String(process.env.CORS_ORIGINS || 'http://localhost:5173,https://acadesys-web-frontend.vercel.app')
+    .split(',')
+    .map((origen) => origen.trim())
+    .filter(Boolean),
 );
+
+app.use(cors({
+  origin(origen, callback) {
+    // Permite herramientas servidor-a-servidor sin Origin y únicamente
+    // los frontends explícitamente configurados cuando sí viene Origin.
+    if (!origen || origenesPermitidos.has(origen)) return callback(null, true);
+    return callback(new Error('Origen no permitido por la política CORS.'));
+  },
+}));
 
 app.use(
   express.json({

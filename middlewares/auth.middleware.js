@@ -1,3 +1,4 @@
+
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
 
@@ -32,10 +33,12 @@ const verificarToken = async (req, res, next) => {
 
   let decoded;
   try {
-    decoded = jwt.verify(
-      token,
-      process.env.JWT_SECRET || "super_secreto_seguro_acadesys_2026",
-    );
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret || jwtSecret.length < 32) {
+      console.error('[Auth] JWT_SECRET no está configurado o es demasiado corto.');
+      return res.status(503).json({ error: 'La autenticación no está configurada correctamente.' });
+    }
+    decoded = jwt.verify(token, jwtSecret);
   } catch (error) {
     return res
       .status(401)
@@ -67,7 +70,7 @@ const verificarToken = async (req, res, next) => {
          AND p.EstadoRegistro = 1
        WHERE u.IdUsuario = ?
        ORDER BY CASE WHEN p.IdPerfil IS NULL THEN 1 ELSE 0 END ASC,
-                up.IdUsuarioPerfil ASC
+                up.IdPerfil ASC
        LIMIT 1`,
       [idUsuario],
     );

@@ -1,3 +1,4 @@
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
@@ -77,4 +78,20 @@ test('historial individual: no permite consultar sin academia válida', () => {
   });
   assert.equal(resultado.llamadaNext, false);
   assert.equal(resultado.res.statusCode, 401);
+});
+
+
+test('notas: no concede administrador solo por IdPerfil=1', () => {
+  const resultado = ejecutar(requiereGestionNotas, {
+    usuario: { id: 20, idUsuario: 20, idAcademia: 3, rol: 'Alumno', idPerfil: 1 },
+  });
+  assert.equal(resultado.llamadaNext, false);
+  assert.equal(resultado.res.statusCode, 403);
+});
+
+test('notas: reconoce administrador por el rol actual sin depender del ID', () => {
+  const resultado = ejecutar(requiereGestionNotas, {
+    usuario: { id: 20, idUsuario: 20, idAcademia: 3, rol: 'Administrador', idPerfil: 8 },
+  });
+  assert.equal(resultado.llamadaNext, true);
 });

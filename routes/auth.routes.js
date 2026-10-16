@@ -1,3 +1,4 @@
+
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
@@ -249,7 +250,7 @@ const loginHandler = async (req, res) => {
         ELSE 4
       END,
       CASE WHEN p.IdPerfil IS NULL THEN 1 ELSE 0 END ASC,
-      up.IdUsuarioPerfil ASC
+      up.IdPerfil ASC
       LIMIT 1`,
       [
         termLower,
@@ -273,12 +274,15 @@ const loginHandler = async (req, res) => {
     const user = rows[0];
     const claveEnBD = String(user.Clave || "");
     let claveValida = false;
+    let claveLegadaEnTextoPlano = false;
 
     if (/^\$2[aby]\$/.test(claveEnBD)) {
       claveValida = await bcrypt.compare(clave, claveEnBD);
     } else {
-      // Compatibilidad temporal con cuentas antiguas. Se recomienda migrarlas a bcrypt.
+      // Migración gradual: si una contraseña antigua coincide, se convierte a
+      // bcrypt inmediatamente después de validar las credenciales.
       claveValida = clave === claveEnBD;
+      claveLegadaEnTextoPlano = claveValida;
     }
 
     if (!claveValida) {
@@ -297,6 +301,17 @@ const loginHandler = async (req, res) => {
 
     const rol = user.Rol || "Sin Rol";
 
+    if (claveLegadaEnTextoPlano) {
+      const claveHash = await bcrypt.hash(clave, 10);
+      await pool.query('UPDATE Usuario SET Clave = ? WHERE IdUsuario = ?', [claveHash, user.IdUsuario]);
+    }
+
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret || jwtSecret.length < 32) {
+      console.error('[Auth] JWT_SECRET no está configurado o es demasiado corto.');
+      return res.status(503).json({ error: 'La autenticación no está configurada correctamente.' });
+    }
+
     const token = jwt.sign(
       {
         id: user.IdUsuario,
@@ -305,7 +320,7 @@ const loginHandler = async (req, res) => {
         idPerfil: user.IdPerfil,
         idAcademia: user.IdAcademia,
       },
-      process.env.JWT_SECRET || "super_secreto_seguro_acadesys_2026",
+      jwtSecret,
       { expiresIn: "8h" },
     );
 

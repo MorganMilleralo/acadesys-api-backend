@@ -1,4 +1,9 @@
+
 const ROLES_GESTION_NOTAS = ['docente', 'tutor de aula', 'administrador'];
+
+function normalizarTexto(valor) {
+  return String(valor ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
 
 function idPositivo(valor) {
   const numero = Number(valor);
@@ -14,19 +19,17 @@ function obtenerIdAcademia(req) {
 }
 
 function normalizarRol(req) {
-  return String(req.usuario?.rol ?? '').trim().toLocaleLowerCase('es');
+  return normalizarTexto(req.usuario?.rol);
 }
 
 function esAdministrador(req) {
   const rol = normalizarRol(req);
-  const idPerfil = Number(req.usuario?.idPerfil);
-
-  // Mantiene compatibilidad con la regla administrativa usada por roles.middleware.js.
+  // Nunca conceder permisos elevados solo por un IdPerfil fijo; el nombre del
+  // perfil vigente es la fuente de autorización que usa roles.middleware.js.
   return (
     rol.includes('administrador') ||
     rol.includes('recursos humanos') ||
-    rol === 'rrhh' ||
-    idPerfil === 1
+    rol === 'rrhh'
   );
 }
 

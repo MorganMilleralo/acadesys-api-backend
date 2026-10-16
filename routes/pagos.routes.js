@@ -59,28 +59,54 @@ router.put(
 
     const fechaPago = Estado === "Pagado" ? new Date() : null;
 
+    const connection = await pool.getConnection();
     try {
-      const [result] = await pool.query(
-        `UPDATE PagosMensualidad p
-             INNER JOIN Usuario u ON p.IdUsuario = u.IdUsuario
-             SET p.Estado = ?, p.FechaPago = ?
-             WHERE p.IdPago = ? AND u.IdAcademia = ?`,
-        [Estado, fechaPago, id, idAcademia],
+      await connection.beginTransaction();
+      const [pagos] = await connection.query(
+        `SELECT p.IdPago, p.Estado, p.Mes
+         FROM PagosMensualidad p
+         INNER JOIN Usuario u ON p.IdUsuario = u.IdUsuario
+         WHERE p.IdPago = ? AND u.IdAcademia = ?
+         LIMIT 1 FOR UPDATE`,
+        [id, idAcademia],
       );
 
-      if (result.affectedRows === 0) {
-        return res
-          .status(404)
-          .json({ error: "Registro de pago no encontrado en tu academia." });
+      if (!pagos.length) {
+        await connection.rollback();
+        return res.status(404).json({ error: "Registro de pago no encontrado en tu academia." });
       }
 
+      const pagoActual = pagos[0];
+      const esInscripcionPendiente =
+        String(pagoActual.Mes || '').trim().toLowerCase() === 'inscripcion'
+        && String(pagoActual.Estado || '').trim().toLowerCase() === 'pendiente';
+
+      // Un registro de inscripción del checkout simulado no puede convertirse
+      // manualmente en Pagado/Moroso: falta la confirmación verificable de pago.
+      if (esInscripcionPendiente) {
+        await connection.rollback();
+        return res.status(409).json({
+          error: 'La inscripción sigue pendiente en modo demostración. No puede marcarse como pagada ni morosa sin un proceso de confirmación aprobado.'
+        });
+      }
+
+      await connection.query(
+        `UPDATE PagosMensualidad p
+         INNER JOIN Usuario u ON p.IdUsuario = u.IdUsuario
+         SET p.Estado = ?, p.FechaPago = ?
+         WHERE p.IdPago = ? AND u.IdAcademia = ?`,
+        [Estado, fechaPago, id, idAcademia],
+      );
+      await connection.commit();
       res.json({ message: `Pago actualizado a estado: ${Estado}` });
     } catch (error) {
+      try { await connection.rollback(); } catch (_) {}
       console.error("Error en PUT /pagos/:id/estado:", error.message);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: 'No se pudo actualizar el estado de pago.' });
+    } finally {
+      connection.release();
     }
   },
 );
 
 module.exports = router;
-

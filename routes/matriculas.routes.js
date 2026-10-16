@@ -1,3 +1,4 @@
+
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
@@ -505,7 +506,7 @@ router.post('/checkout', async (req, res) => {
     await connection.query(`
       INSERT INTO PagosMensualidad
         (IdUsuario, IdCiclo, Mes, Monto, Estado, FechaPago, EstadoRegistro)
-      VALUES (?, ?, 'Inscripcion', ?, 'Pagado', NOW(), 1)
+      VALUES (?, ?, 'Inscripcion', ?, 'Pendiente', NULL, 1)
     `, [idAlumnoFinal, idCiclo, precioReal]);
 
     const [nuevoConteo] = await connection.query(`
@@ -546,8 +547,9 @@ router.post('/checkout', async (req, res) => {
       totalAlumnos: totalFinal,
       vacantesDisponibles: Math.max(capacidad - totalFinal, 0),
       mensaje: esReinscripcion
-        ? 'Reinscripción procesada correctamente usando la cuenta existente.'
-        : 'Inscripción procesada correctamente. Se generó una cuenta de alumno.',
+        ? 'Reinscripción registrada. El pago está pendiente de confirmación.'
+        : 'Matrícula registrada. El pago está pendiente de confirmación.',
+      pago: { modo: 'simulado', estado: 'Pendiente', monto: precioReal, confirmadoPorPasarela: false },
     });
   } catch (error) {
     try { await connection.rollback(); } catch (_) {}
@@ -592,7 +594,8 @@ router.post('/checkout', async (req, res) => {
         <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px; max-width: 600px;">
           <h2 style="color: #2563eb;">¡Hola, ${datosCorreo.nombre}!</h2>
           <p>Tu ${datosCorreo.esReinscripcion ? 'reinscripción' : 'inscripción'} al <strong>${datosCorreo.cicloNombre}</strong> fue procesada correctamente.</p>
-          <p><strong>Monto registrado:</strong> S/ ${Number(datosCorreo.precio || 0).toFixed(2)}</p>
+          <p><strong>Monto de inscripción:</strong> S/ ${Number(datosCorreo.precio || 0).toFixed(2)}</p>
+          <p><strong>Estado del pago:</strong> Pendiente (modo demostración; no se ha confirmado ni realizado un cobro real).</p>
           <p><strong>Código de usuario:</strong> <span style="font-family: monospace;">${datosCorreo.codigoUsuario}</span></p>
           ${bloqueClave}
           <p>Gracias por confiar en AcadeSys.</p>
@@ -720,5 +723,3 @@ router.post('/restablecer-clave', async (req, res) => {
 });
 
 module.exports = router;
-
-

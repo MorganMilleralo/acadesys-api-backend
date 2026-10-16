@@ -1,3 +1,4 @@
+
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
@@ -525,7 +526,7 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
 
     if (idPerfilNuevo) {
       const [existePerfil] = await connection.query(
-        "SELECT IdUsuarioPerfil FROM Usuario_Perfiles WHERE IdUsuario = ?",
+        "SELECT IdUsuario FROM Usuario_Perfiles WHERE IdUsuario = ?",
         [idUsuarioObjetivo],
       );
       if (existePerfil.length > 0) {
