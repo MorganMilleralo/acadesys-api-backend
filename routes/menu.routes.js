@@ -146,10 +146,10 @@ router.post("/menus/asignar", requiereRol('Administrador'), async (req, res) => 
     if (!perfiles.length) return res.status(404).json({ error: 'El perfil no existe o no está activo.' });
     // Reintentar la misma asignación confirmada no crea otra fila.
     const [existentes] = await pool.query(
-      'SELECT IdMenuPerfil FROM OpcionesMenu_Perfiles WHERE IdOpcionMenu = ? AND IdPerfil = ? AND EstadoRegistro = ? ORDER BY IdMenuPerfil LIMIT 1',
+      'SELECT IdOpcionMenu FROM OpcionesMenu_Perfiles WHERE IdOpcionMenu = ? AND IdPerfil = ? AND EstadoRegistro = ? ORDER BY Orden LIMIT 1',
       [idMenu, idPerfil, EstadoRegistro],
     );
-    if (existentes.length) return res.json({ message: 'La asignación ya existe', id: existentes[0].IdMenuPerfil });
+    if (existentes.length) return res.json({ message: 'La asignación ya existe', id: existentes[0].IdOpcionMenu });
 
     const [result] = await pool.query(
       "INSERT INTO OpcionesMenu_Perfiles (IdOpcionMenu, IdPerfil, Orden, EstadoRegistro) VALUES (?, ?, ?, ?)",

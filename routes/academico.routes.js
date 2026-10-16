@@ -329,6 +329,14 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
       await connection.rollback();
       return res.status(400).json({ error: 'El ciclo o el curso no existe, estÃ¡ inactivo o no pertenece a esta academia.' });
     }
+    const [[cicloCurso]] = await connection.query(
+      'SELECT IdCiclo FROM CicloCurso WHERE IdCiclo = ? AND IdCurso = ? AND EstadoRegistro = 1 LIMIT 1',
+      [idCiclo, idCurso],
+    );
+    if (!cicloCurso) {
+      await connection.rollback();
+      return res.status(400).json({ error: 'El curso seleccionado no pertenece al ciclo indicado.' });
+    }
 
     // Aula interna de compatibilidad. En pantalla la organización es por ciclo,
     // pero Asignacion_Aula conserva IdAula como campo obligatorio.

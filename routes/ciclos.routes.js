@@ -329,9 +329,28 @@ router.get('/:id/cursos', async (req, res) => {
         cc.Orden,
         cu.Nombre,
         cu.Codigo,
-        cu.Descripcion
+        cu.Descripcion,
+        doc.Docentes
       FROM CicloCurso cc
       INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
+      LEFT JOIN (
+        SELECT
+          aa.IdCiclo,
+          aa.IdCurso,
+          GROUP_CONCAT(
+            DISTINCT TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno))
+            ORDER BY TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno)) ASC
+            SEPARATOR ', '
+          ) AS Docentes
+        FROM Asignacion_Aula aa
+        INNER JOIN Usuario u
+          ON u.IdUsuario = aa.IdUsuario
+         AND u.EstadoRegistro = 1
+        WHERE aa.EstadoRegistro = 1
+        GROUP BY aa.IdCiclo, aa.IdCurso
+      ) doc
+        ON doc.IdCiclo = cc.IdCiclo
+       AND doc.IdCurso = cc.IdCurso
       WHERE cc.IdCiclo = ?
         AND cc.EstadoRegistro = 1
         AND cu.EstadoRegistro = 1
