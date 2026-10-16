@@ -1,5 +1,17 @@
 // middlewares/roles.middleware.js
 // Middleware dinámico de autorización por rol (Reemplaza a admin.middleware y docente.middleware)
+//
+// El rol y el IdPerfil provistos en req.usuario ya vienen refrescados desde la
+// base de datos por auth.middleware (no desde el JWT), por lo que un cambio o
+// desactivación de perfil surte efecto de inmediato.
+
+const normalizar = (valor) =>
+  String(valor ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
 
 const requiereRol = (...rolesPermitidos) => {
   return (req, res, next) => {
@@ -12,15 +24,18 @@ const requiereRol = (...rolesPermitidos) => {
       });
     }
 
-    // Validación por nombre de rol o por ID directo (Administrador = 1)
-    const rolNormalizado = String(rolUsuario || '').toLowerCase();
+    // El perfil administrativo se reconoce por nombre normalizado (incluye
+    // Recursos Humanos, que opera como Administrador), nunca por un IdPerfil fijo.
+    const rolNormalizado = normalizar(rolUsuario);
+    const permitidos = rolesPermitidos.map(normalizar);
+
     const esAdmin =
-      rolesPermitidos.includes("Administrador") &&
+      permitidos.includes("administrador") &&
       (rolNormalizado.includes("administrador") ||
-       rolNormalizado.includes("recursos humanos") ||
-       rolNormalizado === "rrhh" ||
-       idPerfil === 1);
-    const tieneRolValido = rolesPermitidos.includes(rolUsuario);
+        rolNormalizado.includes("recursos humanos") ||
+        rolNormalizado === "rrhh");
+
+    const tieneRolValido = permitidos.includes(rolNormalizado);
 
     if (!tieneRolValido && !esAdmin) {
       return res.status(403).json({

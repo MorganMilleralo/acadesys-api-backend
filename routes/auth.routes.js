@@ -224,6 +224,7 @@ const loginHandler = async (req, res) => {
        AND up.EstadoRegistro = 1
       LEFT JOIN perfil p
         ON up.IdPerfil = p.IdPerfil
+       AND p.EstadoRegistro = 1
       LEFT JOIN Academia a
         ON u.IdAcademia = a.IdAcademia
       WHERE u.EstadoRegistro = 1
@@ -246,7 +247,9 @@ const loginHandler = async (req, res) => {
         WHEN LOWER(TRIM(u.CodigoUsuario)) = ? THEN 2
         WHEN TRIM(COALESCE(u.DNI, '')) = ? THEN 3
         ELSE 4
-      END
+      END,
+      CASE WHEN p.IdPerfil IS NULL THEN 1 ELSE 0 END ASC,
+      up.IdUsuarioPerfil ASC
       LIMIT 1`,
       [
         termLower,
@@ -280,6 +283,16 @@ const loginHandler = async (req, res) => {
 
     if (!claveValida) {
       return res.status(401).json({ error: "Contraseña incorrecta." });
+    }
+
+    // No emitir sesión si el usuario no tiene un perfil ACTIVO vigente.
+    // (El LEFT JOIN exige p.EstadoRegistro = 1, por lo que un perfil inactivo
+    // o eliminado lógicamente deja Rol = 'Sin Rol').
+    if (user.IdPerfil == null || !user.Rol || user.Rol === "Sin Rol") {
+      return res.status(403).json({
+        error:
+          "Tu cuenta no tiene un perfil activo asignado. Contacta al administrador.",
+      });
     }
 
     const rol = user.Rol || "Sin Rol";
