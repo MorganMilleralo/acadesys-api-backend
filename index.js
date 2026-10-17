@@ -46,21 +46,12 @@ if (String(process.env.JWT_SECRET || '').length < 32) {
 
 app.set("trust proxy", 1);
 
-const origenesPermitidos = new Set(
-  String(process.env.CORS_ORIGINS || 'http://localhost:5173,https://acadesys-web-frontend.vercel.app')
-    .split(',')
-    .map((origen) => origen.trim())
-    .filter(Boolean),
-);
+// Whitelist CORS explícita y centralizada (ver config/cors.js).
+// Incluye el frontend local (5173/5174), el frontend de producción y los
+// orígenes extra de la variable de entorno CORS_ORIGINS. Nunca usa "*".
+const { corsOptions } = require('./config/cors');
 
-app.use(cors({
-  origin(origen, callback) {
-    // Permite herramientas servidor-a-servidor sin Origin y únicamente
-    // los frontends explícitamente configurados cuando sí viene Origin.
-    if (!origen || origenesPermitidos.has(origen)) return callback(null, true);
-    return callback(new Error('Origen no permitido por la política CORS.'));
-  },
-}));
+app.use(cors(corsOptions));
 
 app.use(
   express.json({
