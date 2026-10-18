@@ -48,7 +48,7 @@ El lanzador precarga `tests/aislamiento.js` en cada proceso: no permite cargar
 mysql2 ni dotenv. Los servidores de prueba escuchan solo en 127.0.0.1 con puerto
 aleatorio y las identidades son ficticias.
 
-Resultados de la ejecución final: **71 casos aprobados**: 41 pruebas node:test y
+Resultados antes de integrar main: **71 casos aprobados**: 41 pruebas node:test y
 30 casos en los tres scripts existentes (4 de autenticación, 5 de cierre y 21 de
 notas/actas). Incluyen permisos, sesión vigente, SQL parametrizado,
 alcance por academia, cierres, validación de lotes, rollback solicitado, respuestas
@@ -79,5 +79,63 @@ exclusión entre conexiones; su rollback no sustituye el rollback real de MySQL.
   ese flujo público. Requiere una solución de autenticación/verificación antes de
   considerar segura la publicación completa del sistema.
 - Login conserva la compatibilidad existente con contraseñas antiguas en texto
-  plano. No se ejecutó `scripts/migrar-claves.js`; la retirada de esa compatibilidad
-  necesita un plan separado y verificado.
+  plano. La integración incorpora su conversión a bcrypt después de un login
+  válido, sin sobrescribir una recuperación concurrente. No se ejecutó
+  `scripts/migrar-claves.js`; la retirada de esa compatibilidad necesita un plan
+  separado y verificado.
+
+## Integración local de origin/main
+
+Rama: `david/consolidacion-backend`. Los 29 archivos originales quedaron guardados
+en `f7f379a` (`Consolidar seguridad notas y actas`). Se integra el snapshot remoto
+`23a891eac1ea1a98b049dd96fe26f524bd4868b3`: **13 commits** que no estaban en nuestra
+rama. `main` local permanece en `a1a9c0c`; no se ejecutó push ni despliegue.
+`.vscode/extensions.json` permanece fuera de los commits y `.env` continúa ignorado.
+
+Hubo conflictos de contenido en 11 archivos: los middlewares auth, roles y cierre;
+package.json; y las rutas academico, actas, auth, menu, notas, perfil y usuario.
+Se resolvieron por bloques, conservando las reglas expresamente autorizadas:
+
+| Área | Resultado de la combinación |
+| --- | --- |
+| Autenticación | JWT HS256, identidad/academia válidas, perfil activo único y secreto mínimo de 32 caracteres; conversión remota de claves legadas a bcrypt con comparación del valor anterior. Los tokens de recuperación no sirven como sesión. |
+| Roles y usuarios | Administrador y Recursos Humanos equivalentes por nombre exacto normalizado. Se conservan autoservicio `/usuarios/me`, actualizaciones parciales y protecciones remotas del último administrador. El cambio de perfil mantiene una sola relación activa y su historial. |
+| Perfiles y menús | Validaciones remotas, protección de perfiles con usuarios y nueva consulta de menús por perfil. Administración reservada a ambos perfiles administrativos. POST de creación usa el 201 de main. |
+| Notas y actas | Evaluacion.IdCurso y auditoría RegistrosAfectados. Se incorpora el tipo `Evaluacion` sin eliminar los tipos locales, alias IdCiclo/IdCurso y ambos formatos de respuesta del cierre. La escala 0–20 entera sigue provisional. |
+| Docentes y tutores | No se adopta acceso a notas por simple rol/academia. El directorio devuelve solo su propia entrada y los pagos requieren rol administrativo mientras no exista alcance verificable. Asistencias siguen respondiendo 409. |
+| Gestión académica | Se conservan horarios CRUD, capacidad hasta 500 y docentes derivados de Asignacion_Aula. Se restaura horaValida, que el CRUD nuevo necesitaba. La creación remota de un aula interna para asignaciones de personal no acredita pertenencia de alumnos ni habilita asistencia. |
+| Tutor IA | Se conserva el servicio remoto; su contexto usa Evaluacion.IdCurso, incluye notas cerradas y separa cursos, simulacros e históricos. promedioGeneral/ranking corresponden solo a simulacros; no se inventa una escala desconocida. No se hicieron llamadas a Gemini. |
+| Matrícula | Se conservan recuperación por correo, generación criptográfica de claves y pagos Pendiente del checkout simulado. La recuperación de contraseña no verifica la identidad antes de reinscribir. |
+
+También se incorporan CORS para frontend local, documentación/pruebas remotas y la
+eliminación remota de `database/MIGRACION_PREU.sql`. El SQL compatible permanece.
+El script remoto `scripts/aplicar-avance.js` se conserva como antecedente: el
+middleware ya está integrado y no debe volver a aplicarse.
+
+Validación de la integración: **114 casos** (84 node:test + 30 de scripts locales).
+El lanzador descubre todas las suites y conserva el bloqueo de mysql2/dotenv;
+HTTP solo en loopback, datos ficticios y SDK de IA sustituido. Se verifican
+dependencias instaladas, sintaxis y diferencias de Git. El inventario estático
+conserva las **71 rutas** declaradas de main (10 nuevas respecto a f7f379a), sin
+eliminar ninguna URL. Esto no sustituye las pruebas de las pantallas React.
+
+Pendientes antes de considerar main/despliegue:
+
+- Aplicar y probar el esquema únicamente cuando exista MySQL aislado. IdCurso
+  sigue sin ejecutarse. Periodo, Auditoria_Cierres y RegistrosAfectados necesitan
+  verificación; también PagosMensualidad.Estado = Pendiente. Los documentos remotos
+  mencionan tres migraciones que no están como archivos en este repositorio.
+- Sin IdCurso fallan notas, actas, alumno/dashboard y ahora el contexto académico
+  de Tutor IA; las rutas manejadas devuelven 503 de esquema pendiente.
+- Morgan debe confirmar escala de cursos, alcance docente/alumno–aula, periodos,
+  cierre por tipo, históricos y ranking. No se modificaron esas decisiones.
+- React debe enviar IdCurso para notas de curso y manejar 403/409/503, null en
+  promedios no comparables y el directorio limitado de docentes/tutores.
+- Sigue pendiente verificar identidad antes de la reinscripción pública y limitar
+  la exposición de `/matriculas/verificar`. El enlace de recuperación no lo resuelve.
+- Faltan pruebas SQL reales (FK, CHECK, collation, rollback y concurrencia),
+  recuperación/correo/pagos completos e integración real con el proveedor de IA.
+  Las protecciones remotas del último administrador/perfil también requieren
+  validar carreras entre solicitudes; los mocks no demuestran exclusión real.
+- No se ha confirmado qué rama despliega Render. No se autoriza ni recomienda
+  publicar basándose únicamente en esta integración y sus pruebas simuladas.

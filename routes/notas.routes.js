@@ -4,18 +4,18 @@ const router = express.Router();
 const pool = require("../config/db");
 const requiereRol = require("../middlewares/roles.middleware");
 const verificarPeriodoAbierto = require("../middlewares/cierre.middleware");
+const { requiereGestionNotas, autorizarHistorialAlumno } = require("../middlewares/notas-acceso.middleware");
 
 const { MAX_NOTA_CURSO, obtenerMaximoPermitido, normalizarTipo, enteroPositivo,
   calificacionValida, promedio, esNotaCurso, esSimulacro, periodoValido,
   responderErrorEsquema } = require("../utils/evaluaciones");
-const { normalizarRol, esAdministrativo } = requiereRol;
 
 // ============================================================
 // GET /api/notas
 // ============================================================
 router.get(
   "/",
-  requiereRol("Administrador"),
+  requiereGestionNotas,
   async (req, res) => {
     try {
       const [rows] = await pool.query(
@@ -69,7 +69,7 @@ router.get(
 // ============================================================
 router.get(
   "/contexto/:idCiclo",
-  requiereRol("Administrador"),
+  requiereGestionNotas,
   async (req, res) => {
     const idCiclo = Number(req.params.idCiclo);
 
@@ -123,7 +123,7 @@ router.get(
 // ============================================================
 router.get(
   "/matriculas/:idCiclo",
-  requiereRol("Administrador"),
+  requiereGestionNotas,
   async (req, res) => {
     const idCiclo = Number(req.params.idCiclo);
 
@@ -193,26 +193,12 @@ router.get(
 // ============================================================
 // GET /api/notas/alumno/:id
 // ============================================================
-router.get("/alumno/:id", async (req, res) => {
+router.get("/alumno/:id", autorizarHistorialAlumno, async (req, res) => {
   const idAlumno = Number(req.params.id);
 
   if (!enteroPositivo(idAlumno)) {
     return res.status(400).json({
       error: "Alumno invalido.",
-    });
-  }
-
-  const rol = normalizarRol(req.usuario?.rol);
-
-  const esAdmin = esAdministrativo(rol);
-
-  const esAlumnoPropio =
-    ["alumno", "estudiante"].includes(rol) &&
-    Number(req.usuario.id) === idAlumno;
-
-  if (!esAdmin && !esAlumnoPropio) {
-    return res.status(403).json({
-      error: "No autorizado para consultar estas notas.",
     });
   }
 
@@ -293,7 +279,7 @@ router.post(
   requiereRol("Administrador"),
   verificarPeriodoAbierto,
   async (req, res) => {
-    const idCiclo = req.body?.idCiclo;
+    const idCiclo = req.body?.idCiclo ?? req.body?.IdCiclo;
 
     const periodoEntrada = (
       req.body?.periodo ??

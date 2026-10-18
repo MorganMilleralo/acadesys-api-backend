@@ -5,9 +5,9 @@ const { enteroPositivo } = require("../utils/evaluaciones");
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
-if (!JWT_SECRET || !JWT_SECRET.trim()) {
+if (!JWT_SECRET || JWT_SECRET.trim().length < 32) {
   throw new Error(
-    "JWT_SECRET es obligatorio para iniciar AcadeSys."
+    "JWT_SECRET debe tener al menos 32 caracteres para iniciar AcadeSys."
   );
 }
 
@@ -33,6 +33,7 @@ const verificarToken = async (req, res, next) => {
     if (
       !decoded ||
       typeof decoded !== "object" ||
+      decoded.proposito !== undefined ||
       !enteroPositivo(decoded.id) ||
       !enteroPositivo(decoded.idAcademia)
     ) {
@@ -110,6 +111,7 @@ const verificarToken = async (req, res, next) => {
       error: "Token inválido o expirado. Inicie sesión nuevamente.",
     });
   }
+
 };
 
 module.exports = verificarToken;

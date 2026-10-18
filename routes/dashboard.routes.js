@@ -242,7 +242,7 @@ router.get("/dashboard/overview", async (req, res) => {
 
           AVG(
             CASE
-              WHEN e.IdCurso IS NOT NULL AND e.TipoEvaluacion IN ('Practica', 'Examen', 'Oral', 'Tarea', 'Participacion')
+              WHEN e.IdCurso IS NOT NULL AND e.TipoEvaluacion IN ('Practica', 'Evaluacion', 'Examen', 'Oral', 'Tarea', 'Participacion')
               THEN e.Calificacion
               ELSE NULL
             END
@@ -259,7 +259,7 @@ router.get("/dashboard/overview", async (req, res) => {
 
           SUM(
             CASE
-              WHEN e.IdCurso IS NOT NULL AND e.TipoEvaluacion IN ('Practica', 'Examen', 'Oral', 'Tarea', 'Participacion')
+              WHEN e.IdCurso IS NOT NULL AND e.TipoEvaluacion IN ('Practica', 'Evaluacion', 'Examen', 'Oral', 'Tarea', 'Participacion')
               THEN 1
               ELSE 0
             END

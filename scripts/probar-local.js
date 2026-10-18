@@ -1,8 +1,11 @@
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
+const { readdirSync } = require('node:fs');
 const root = path.resolve(__dirname, '..');
+const suites = readdirSync(path.join(root, 'tests')).filter((file) => file.endsWith('.test.js'))
+  .sort().map((file) => 'tests/' + file);
 const casos = [
-  ['--test', '--test-concurrency=1', 'tests/seguridad.test.js', 'tests/notas.test.js'],
+  ['--test', '--test-concurrency=1', ...suites],
   ['prueba-auth-local.js'],
   ['prueba-cierre-local.js'],
   ['prueba-notas-actas-local.js'],

@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const express = require("express");
@@ -34,17 +35,23 @@ if (faltantes.length > 0) {
   process.exit(1);
 }
 
+if (String(process.env.JWT_SECRET || '').length < 32) {
+  console.error('❌ JWT_SECRET debe tener al menos 32 caracteres. Configura un secreto largo y único en el entorno.');
+  process.exit(1);
+}
+
 // ============================================================
 // 2. CONFIGURACIÓN GENERAL DE EXPRESS
 // ============================================================
 
 app.set("trust proxy", 1);
 
-app.use(
-  cors({
-    origin: true,
-  }),
-);
+// Whitelist CORS explícita y centralizada (ver config/cors.js).
+// Incluye el frontend local (5173/5174), el frontend de producción y los
+// orígenes extra de la variable de entorno CORS_ORIGINS. Nunca usa "*".
+const { corsOptions } = require('./config/cors');
+
+app.use(cors(corsOptions));
 
 app.use(
   express.json({

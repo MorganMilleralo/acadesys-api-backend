@@ -113,6 +113,8 @@ function generarPrefijo(nombre, universidad) {
 
 function normalizarSalida(ciclo) {
   const horario = ciclo.Horario || horarioDesdeTurno(ciclo.Turno);
+  // Capacidad real configurada por el administrador (hasta MAX_CAPACIDAD).
+  // Una capacidad 0/null se interpreta como "sin límite definido".
   const capacidad = Number(ciclo.Capacidad || 0);
   const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
 
@@ -266,11 +268,29 @@ router.get('/publicos/:id/detalle', async (req, res) => {
         h.DiaSemana,
         TIME_FORMAT(h.HoraInicio, '%H:%i') AS HoraInicio,
         TIME_FORMAT(h.HoraFin, '%H:%i') AS HoraFin,
-        h.Docente,
+        COALESCE(doc.Docentes, 'Por asignar') AS Docente,
         h.Orden,
         cu.Nombre AS Curso
       FROM HorarioCurso h
       INNER JOIN Curso cu ON cu.IdCurso = h.IdCurso
+      LEFT JOIN (
+        SELECT
+          aa.IdCiclo,
+          aa.IdCurso,
+          GROUP_CONCAT(
+            DISTINCT TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno))
+            ORDER BY TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno)) ASC
+            SEPARATOR ', '
+          ) AS Docentes
+        FROM Asignacion_Aula aa
+        INNER JOIN Usuario u
+          ON u.IdUsuario = aa.IdUsuario
+         AND u.EstadoRegistro = 1
+        WHERE aa.EstadoRegistro = 1
+        GROUP BY aa.IdCiclo, aa.IdCurso
+      ) doc
+        ON doc.IdCiclo = h.IdCiclo
+       AND doc.IdCurso = h.IdCurso
       WHERE h.IdCiclo = ?
         AND h.EstadoRegistro = 1
         AND cu.EstadoRegistro = 1
@@ -326,9 +346,28 @@ router.get('/:id/cursos', async (req, res) => {
         cc.Orden,
         cu.Nombre,
         cu.Codigo,
-        cu.Descripcion
+        cu.Descripcion,
+        doc.Docentes
       FROM CicloCurso cc
       INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
+      LEFT JOIN (
+        SELECT
+          aa.IdCiclo,
+          aa.IdCurso,
+          GROUP_CONCAT(
+            DISTINCT TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno))
+            ORDER BY TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno)) ASC
+            SEPARATOR ', '
+          ) AS Docentes
+        FROM Asignacion_Aula aa
+        INNER JOIN Usuario u
+          ON u.IdUsuario = aa.IdUsuario
+         AND u.EstadoRegistro = 1
+        WHERE aa.EstadoRegistro = 1
+        GROUP BY aa.IdCiclo, aa.IdCurso
+      ) doc
+        ON doc.IdCiclo = cc.IdCiclo
+       AND doc.IdCurso = cc.IdCurso
       WHERE cc.IdCiclo = ?
         AND cc.EstadoRegistro = 1
         AND cu.EstadoRegistro = 1

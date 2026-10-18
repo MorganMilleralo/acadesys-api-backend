@@ -215,6 +215,36 @@ test('cierre conserva identificadores numericos cuando React envia cadenas', asy
   assert.equal(r.body.notasBloqueadas, 2); fin();
 });
 
+test('tipo Evaluacion remoto y alias IdCiclo funcionan usando Evaluacion.IdCurso', async t => {
+  const fin = secuencia([
+    { sql: /FROM Ciclo.*FOR UPDATE/, params: ['7', 1], rows: [ciclo] },
+    { sql: /FROM Matricula m/, rows: [{ IdMatricula: 100, IdCurso: null }] },
+    { sql: /FROM CicloCurso/, rows: [{ IdCurso: 3 }] },
+    { sql: /FROM Auditoria_Cierres/, params: ['7', 3, 'General', 'Evaluacion'], rows: [] },
+    { sql: /INSERT INTO Evaluacion/, params: [100, 3, 'General', 'Evaluacion', 16, 10], rows: { affectedRows: 1 } },
+  ]);
+  const pedir = await servir(t, rutas);
+  const r = await pedir('POST', '/api/notas', { IdCiclo: '7', notas: [{ ...nota, TipoEvaluacion: 'Evaluación' }] });
+  assert.equal(r.status, 201); fin();
+});
+
+test('cierre acepta nombres remotos y devuelve los dos contratos de respuesta', async t => {
+  const fin = secuencia([
+    { sql: /FROM Ciclo/, params: [7, 1], rows: [ciclo] },
+    { sql: /FROM CicloCurso/, rows: [{ IdCurso: 3 }] },
+    { sql: /FROM Auditoria_Cierres/, params: [7, 3, 'General', 'Evaluacion'], rows: [] },
+    { sql: /UPDATE Evaluacion.*e.IdCurso <=> \?/, rows: { affectedRows: 2 } },
+    { sql: /INSERT INTO Auditoria_Cierres.*RegistrosAfectados/, params: [10, 7, 3, 'General', 'Evaluacion', 2], rows: { insertId: 1 } },
+  ]);
+  const pedir = await servir(t, rutas);
+  const r = await pedir('PUT', '/api/actas/cierre', { IdCiclo: '7', IdCurso: '3', Periodo: 'General', TipoEvaluacion: 'Evaluación' });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.evaluacionesSelladas, r.body.notasBloqueadas);
+  assert.equal(r.body.mensaje, r.body.message);
+  assert.deepEqual(r.body.alcance, { idCiclo: 7, idCurso: 3, periodo: 'General', tipoEvaluacion: 'Evaluacion', alcanceCurso: 'Curso específico' });
+  fin();
+});
+
 test('esquema pendiente devuelve 503 sin exponer SQL ni datos internos', async t => {
   simular(() => { throw Object.assign(new Error('detalle SQL privado ficticio'), { code: 'ER_BAD_FIELD_ERROR' }); });
   const pedir = await servir(t, rutas);
@@ -230,7 +260,9 @@ test('dashboard conserva estructura y separa notas de cursos y simulacros', asyn
     { sql: /TotalAlumnos/, rows: [] },
     { sql: /TotalMorosos/, rows: [] },
     { sql: /TotalPagos/, rows: [] },
-    { sql: /PromedioBruto/, rows: [
+    { sql: /PromedioBruto/, verificar(q) {
+      assert.equal((q.match(/TipoEvaluacion IN \('Practica', 'Evaluacion',/g) || []).length, 2);
+    }, rows: [
       { ...ciclo, PromedioBruto: 1500, PromedioCursos: 18, TotalSimulacros: 1, TotalNotasCurso: 1, Evaluaciones: 2 },
       { ...ciclo, IdCiclo: 8, UniversidadObjetivo: 'Desconocida', PromedioBruto: 900, TotalSimulacros: 1 },
     ] },

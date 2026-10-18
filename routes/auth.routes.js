@@ -1,3 +1,4 @@
+
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
@@ -269,12 +270,15 @@ const loginHandler = async (req, res) => {
     const user = rows[0];
     const claveEnBD = String(user.Clave || "");
     let claveValida = false;
+    let claveLegadaEnTextoPlano = false;
 
     if (/^\$2[aby]\$/.test(claveEnBD)) {
       claveValida = await bcrypt.compare(clave, claveEnBD);
     } else {
-      // Compatibilidad temporal con cuentas antiguas. Se recomienda migrarlas a bcrypt.
+      // Migración gradual: si una contraseña antigua coincide, se convierte a
+      // bcrypt inmediatamente después de validar las credenciales.
       claveValida = clave === claveEnBD;
+      claveLegadaEnTextoPlano = claveValida;
     }
 
     if (!claveValida) {
@@ -287,6 +291,25 @@ const loginHandler = async (req, res) => {
 
     const rol = user.Rol || "Sin Rol";
 
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret || jwtSecret.trim().length < 32) {
+      console.error('[Auth] JWT_SECRET no está configurado o es demasiado corto.');
+      return res.status(503).json({ error: 'La autenticación no está configurada correctamente.' });
+    }
+
+    if (claveLegadaEnTextoPlano) {
+      const claveHash = await bcrypt.hash(clave, 10);
+      // No sobrescribir una clave cambiada por recuperacion mientras se calcula
+      // el hash. La comparacion binaria evita la collation insensible a mayusculas.
+      const [actualizacion] = await pool.query(
+        'UPDATE Usuario SET Clave = ? WHERE IdUsuario = ? AND BINARY Clave = BINARY ? AND EstadoRegistro = 1',
+        [claveHash, user.IdUsuario, claveEnBD],
+      );
+      if (actualizacion.affectedRows !== 1) {
+        return res.status(401).json({ error: 'Las credenciales cambiaron. Inicia sesion nuevamente.' });
+      }
+    }
+
     const token = jwt.sign(
       {
         id: user.IdUsuario,
@@ -295,7 +318,7 @@ const loginHandler = async (req, res) => {
         idPerfil: user.IdPerfil,
         idAcademia: user.IdAcademia,
       },
-      process.env.JWT_SECRET,
+      jwtSecret,
       { expiresIn: "8h" },
     );
 

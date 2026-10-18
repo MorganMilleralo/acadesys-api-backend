@@ -1,3 +1,4 @@
+
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
@@ -13,6 +14,66 @@ async function perfilActivo(connection, idPerfil) {
   );
   return perfiles.length === 1;
 }
+
+const idPerfilValido = (valor) => {
+  if (!["string", "number"].includes(typeof valor)) return null;
+  if (!/^\d+$/.test(String(valor))) return null;
+  const id = Number(valor);
+  return Number.isSafeInteger(id) && id > 0 && id <= 2147483647 ? id : null;
+};
+
+// Un perfil es administrativo por su NOMBRE (igual criterio que roles.middleware).
+// Nunca por un IdPerfil/IdUsuario fijo.
+const esPerfilAdministrativo = requiereRol.esAdministrativo;
+
+// ¿Existe OTRO usuario administrativo ACTIVO (con perfil activo) en la academia?
+const existeOtroAdminActivo = async (
+  connection,
+  idAcademia,
+  idUsuarioExcluido,
+) => {
+  const [rows] = await connection.query(
+    `SELECT u.IdUsuario, p.Nombre AS NombrePerfil
+       FROM Usuario u
+       INNER JOIN Usuario_Perfiles up
+         ON up.IdUsuario = u.IdUsuario AND up.EstadoRegistro = 1
+       INNER JOIN perfil p
+         ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
+      WHERE u.IdAcademia = ? AND u.EstadoRegistro = 1 AND u.IdUsuario <> ?`,
+    [idAcademia, idUsuarioExcluido],
+  );
+  const administradores = new Set();
+  for (const fila of rows) {
+    if (esPerfilAdministrativo(fila.NombrePerfil)) {
+      administradores.add(Number(fila.IdUsuario));
+    }
+  }
+  return administradores.size > 0;
+};
+
+// Respuesta de error homogénea. Nunca expone detalles de SQL al cliente.
+const responderError = (res, error, contexto) => {
+  if (error && error.code === "ER_DUP_ENTRY") {
+    return res.status(409).json({
+      error: "Ya existe un usuario con ese DNI o correo electrónico.",
+    });
+  }
+  console.error(`Error en ${contexto}:`, error.message);
+  return res
+    .status(500)
+    .json({ error: "No se pudo completar la operación de usuarios." });
+};
+
+// Proyección común del usuario con su perfil ACTIVO (si existe).
+const SELECT_USUARIO = `
+  SELECT
+    u.IdUsuario, u.DNI, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno,
+    CONCAT(u.Nombres, ' ', COALESCE(u.ApellidoPaterno, ''), ' ', COALESCE(u.ApellidoMaterno, '')) AS NombreCompleto,
+    u.CorreoElectronico, u.CorreoElectronico AS Correo, u.Celular, u.CodigoUsuario, u.EstadoRegistro,
+    up.IdPerfil, p.Nombre AS NombrePerfil, p.Nombre AS Perfil, p.EstadoRegistro AS EstadoPerfil
+  FROM Usuario u
+  LEFT JOIN Usuario_Perfiles up ON u.IdUsuario = up.IdUsuario AND up.EstadoRegistro = 1
+  LEFT JOIN perfil p ON up.IdPerfil = p.IdPerfil`;
 
 // 1. CREAR USUARIO STAFF (Docente / Tutor de Aula)
 router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
@@ -34,8 +95,15 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
     });
   }
 
+  const idPerfilSolicitado = idPerfilValido(IdPerfil);
+  if (!idPerfilSolicitado) {
+    return res
+      .status(400)
+      .json({ error: "El IdPerfil enviado no es un identificador válido." });
+  }
+
   const idAcademia = req.usuario.idAcademia;
-  const claveHasheada = await bcrypt.hash(Clave, 10);
+  const claveHasheada = await bcrypt.hash(String(Clave), 10);
 
   const connection = await pool.getConnection();
   try {
@@ -93,7 +161,7 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
 
     await connection.query(
       "INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)",
-      [idGenerado, Number(IdPerfil)],
+      [idGenerado, idPerfilSolicitado],
     );
 
     await connection.commit();
@@ -104,25 +172,17 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
     });
   } catch (error) {
     await connection.rollback();
-    console.error("Error en POST /usuarios:", error.message);
-    res.status(500).json({ error: error.message });
+    responderError(res, error, "POST /usuarios");
   } finally {
     connection.release();
   }
 });
 
-// 2. LISTAR USUARIOS (Filtrado por academia, sin exponer hashes de contraseña)
+// 2. LISTAR USUARIOS (SOLO Administrador; filtra por academia; sin hashes)
 router.get("/usuarios", requiereRol("Administrador"), async (req, res) => {
   try {
     const [rows] = await pool.query(
-      `SELECT
-                u.IdUsuario, u.DNI, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno,
-                CONCAT(u.Nombres, ' ', COALESCE(u.ApellidoPaterno, ''), ' ', COALESCE(u.ApellidoMaterno, '')) AS NombreCompleto,
-                u.CorreoElectronico, u.CorreoElectronico AS Correo, u.Celular, u.CodigoUsuario, u.EstadoRegistro,
-                up.IdPerfil, p.Nombre AS NombrePerfil, p.Nombre AS Perfil
-             FROM Usuario u
-             LEFT JOIN Usuario_Perfiles up ON u.IdUsuario = up.IdUsuario AND up.EstadoRegistro = 1
-             LEFT JOIN perfil p ON up.IdPerfil = p.IdPerfil
+      `${SELECT_USUARIO}
              WHERE u.EstadoRegistro IN (0, 1) AND u.IdAcademia = ?
              ORDER BY u.IdUsuario DESC`,
       [req.usuario.idAcademia],
@@ -130,16 +190,168 @@ router.get("/usuarios", requiereRol("Administrador"), async (req, res) => {
     res.json(rows);
   } catch (error) {
     console.error("Error en GET /usuarios:", error.message);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: "No se pudieron obtener los usuarios." });
   }
 });
 
-// 3. MODIFICAR USUARIO
+// 2a. DIRECTORIO MÍNIMO NO SENSIBLE.
+// Los administradores consultan su academia. Docente/tutor solo ven su propia
+// entrada hasta acreditar una relacion verificable con los demas usuarios.
+// No expone DNI, correo, celular ni hashes; conserva la URL y el array de React.
+router.get(
+  "/usuarios/directorio",
+  requiereRol("Administrador", "Docente", "Tutor de Aula", "Tutor"),
+  async (req, res) => {
+    try {
+      const [rows] = await pool.query(
+        `SELECT
+             u.IdUsuario,
+             CONCAT(u.Nombres, ' ', COALESCE(u.ApellidoPaterno, ''), ' ', COALESCE(u.ApellidoMaterno, '')) AS NombreCompleto,
+             p.Nombre AS Perfil
+           FROM Usuario u
+           INNER JOIN Usuario_Perfiles up
+             ON up.IdUsuario = u.IdUsuario AND up.EstadoRegistro = 1
+           INNER JOIN perfil p
+             ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
+           WHERE u.EstadoRegistro = 1 AND u.IdAcademia = ?
+             AND (? = 1 OR u.IdUsuario = ?)
+           ORDER BY u.Nombres ASC, u.ApellidoPaterno ASC`,
+        [req.usuario.idAcademia, esPerfilAdministrativo(req.usuario.rol) ? 1 : 0, req.usuario.id],
+      );
+      res.json(rows);
+    } catch (error) {
+      console.error("Error en GET /usuarios/directorio:", error.message);
+      res.status(500).json({ error: "No se pudo obtener el directorio." });
+    }
+  },
+);
+
+// 2b. DATOS DEL USUARIO AUTENTICADO (Mi Perfil).
+// Nunca acepta un IdUsuario arbitrario: siempre usa el de la sesión.
+router.get("/usuarios/me", async (req, res) => {
+  try {
+    const idUsuario = Number(req.usuario?.idUsuario ?? req.usuario?.id);
+    if (!Number.isSafeInteger(idUsuario) || idUsuario <= 0) {
+      return res
+        .status(401)
+        .json({ error: "Sesión inválida. Inicia sesión nuevamente." });
+    }
+
+    const [rows] = await pool.query(
+      `${SELECT_USUARIO}
+             WHERE u.IdUsuario = ? AND u.EstadoRegistro = 1
+             LIMIT 1`,
+      [idUsuario],
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: "No se encontró tu usuario." });
+    }
+
+    res.json(rows[0]);
+  } catch (error) {
+    console.error("Error en GET /usuarios/me:", error.message);
+    res.status(500).json({ error: "No se pudieron obtener tus datos." });
+  }
+});
+
+// 2c. AUTOSERVICIO DE DATOS PERSONALES (Mi Perfil).
+// Allowlist ESTRICTA: solo Nombres, DNI, CorreoElectronico y Celular.
+// Ignora por completo cualquier intento de tocar IdPerfil, rol, EstadoRegistro,
+// IdAcademia, CodigoUsuario, Clave, permisos u otro IdUsuario: la identidad
+// siempre se toma de req.usuario (sesión validada contra BD).
+router.put("/usuarios/me", async (req, res) => {
+  try {
+    const idUsuario = Number(req.usuario?.idUsuario ?? req.usuario?.id);
+    if (!Number.isSafeInteger(idUsuario) || idUsuario <= 0) {
+      return res
+        .status(401)
+        .json({ error: "Sesión inválida. Inicia sesión nuevamente." });
+    }
+
+    const { Nombres, DNI, CorreoElectronico, Celular } = req.body;
+
+    const campos = [];
+    const params = [];
+    const asignar = (columna, valor) => {
+      campos.push(`${columna}=?`);
+      params.push(valor);
+    };
+
+    if (Nombres !== undefined) {
+      const nombresLimpios = String(Nombres).trim();
+      if (!nombresLimpios) {
+        return res
+          .status(400)
+          .json({ error: "El nombre no puede quedar vacío." });
+      }
+      asignar("Nombres", nombresLimpios);
+    }
+    if (DNI !== undefined) {
+      const dniLimpio = String(DNI ?? "").trim();
+      if (dniLimpio && !/^\d{8}$/.test(dniLimpio)) {
+        return res.status(400).json({ error: "El DNI debe tener 8 dígitos." });
+      }
+      asignar("DNI", dniLimpio || null);
+    }
+    if (CorreoElectronico !== undefined) {
+      const correoLimpio = String(CorreoElectronico ?? "").trim();
+      if (correoLimpio && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correoLimpio)) {
+        return res
+          .status(400)
+          .json({ error: "El correo electrónico no es válido." });
+      }
+      asignar("CorreoElectronico", correoLimpio || null);
+    }
+    if (Celular !== undefined) {
+      asignar("Celular", String(Celular ?? "").trim());
+    }
+
+    if (campos.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "No se enviaron cambios para tu perfil." });
+    }
+
+    params.push(idUsuario);
+    await pool.query(
+      `UPDATE Usuario SET ${campos.join(", ")} WHERE IdUsuario = ? AND EstadoRegistro = 1`,
+      params,
+    );
+
+    const [rows] = await pool.query(
+      `${SELECT_USUARIO}
+             WHERE u.IdUsuario = ? AND u.EstadoRegistro = 1
+             LIMIT 1`,
+      [idUsuario],
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: "No se encontró tu usuario." });
+    }
+
+    res.json({
+      message: "Tus datos se actualizaron con éxito.",
+      usuario: rows[0],
+    });
+  } catch (error) {
+    return responderError(res, error, "PUT /usuarios/me");
+  }
+});
+
+// 3. MODIFICAR USUARIO (actualización PARCIAL; protege al último administrador)
 router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    const { id } = req.params;
+
+    const idUsuarioObjetivo = Number(req.params.id);
+    if (!Number.isSafeInteger(idUsuarioObjetivo) || idUsuarioObjetivo <= 0) {
+      await connection.rollback();
+      return res
+        .status(400)
+        .json({ error: "El identificador de usuario no es válido." });
+    }
+
     const {
       DNI,
       Nombres,
@@ -152,58 +364,176 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
       IdPerfil,
     } = req.body;
 
-    let queryUpdate =
-      "UPDATE Usuario SET DNI=?, Nombres=?, ApellidoPaterno=?, ApellidoMaterno=?, Celular=?, CorreoElectronico=?";
-    const paramsUpdate = [
-      DNI || null,
-      Nombres,
-      ApellidoPaterno,
-      ApellidoMaterno || "",
-      Celular || "",
-      CorreoElectronico || null,
-    ];
-
-    if (Clave && String(Clave).trim() !== "") {
-      const claveHasheada = await bcrypt.hash(String(Clave).trim(), 10);
-      queryUpdate += ", Clave=?";
-      paramsUpdate.push(claveHasheada);
-    }
-
-    if (EstadoRegistro !== undefined && EstadoRegistro !== null) {
-      queryUpdate += ", EstadoRegistro=?";
-      paramsUpdate.push(Number(EstadoRegistro));
-    }
-
-    queryUpdate += " WHERE IdUsuario=? AND IdAcademia=?";
-    paramsUpdate.push(id, req.usuario.idAcademia);
-
-    const [result] = await connection.query(queryUpdate, paramsUpdate);
-
-    if (result.affectedRows === 0) {
+    // El usuario objetivo debe pertenecer a la academia del administrador.
+    const [objetivoRows] = await connection.query(
+      "SELECT IdUsuario, EstadoRegistro FROM Usuario WHERE IdUsuario = ? AND IdAcademia = ? FOR UPDATE",
+      [idUsuarioObjetivo, req.usuario.idAcademia],
+    );
+    if (!objetivoRows.length) {
       await connection.rollback();
       return res
         .status(404)
         .json({ error: "Usuario no encontrado en tu academia." });
     }
+    const estadoActual = Number(objetivoRows[0].EstadoRegistro);
 
+    // ¿El usuario objetivo es administrador ACTIVO actualmente?
+    const [perfilActualRows] = await connection.query(
+      `SELECT p.Nombre AS NombrePerfil
+         FROM Usuario_Perfiles up
+         INNER JOIN perfil p ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
+        WHERE up.IdUsuario = ? AND up.EstadoRegistro = 1
+        FOR SHARE`,
+      [idUsuarioObjetivo],
+    );
+    const esAdminActual = perfilActualRows.some((perfil) => esPerfilAdministrativo(perfil.NombrePerfil));
+
+    // Validar IdPerfil (existente y activo) antes de tocar al usuario.
+    let idPerfilNuevo = null;
     if (IdPerfil !== undefined) {
-      if (!await perfilActivo(connection, IdPerfil)) {
+      idPerfilNuevo = idPerfilValido(IdPerfil);
+      if (!idPerfilNuevo) {
         await connection.rollback();
-        return res.status(400).json({ error: "El perfil debe existir y estar activo." });
+        return res
+          .status(400)
+          .json({ error: "El IdPerfil enviado no es un identificador válido." });
       }
-      // UPDATE Usuario ya bloqueo al usuario: cambios concurrentes se serializan.
+      const [perfilValido] = await connection.query(
+        "SELECT IdPerfil, Nombre FROM perfil WHERE IdPerfil = ? AND EstadoRegistro = 1 LIMIT 1 FOR SHARE",
+        [idPerfilNuevo],
+      );
+      if (!perfilValido.length) {
+        await connection.rollback();
+        return res
+          .status(400)
+          .json({ error: "El perfil seleccionado no existe o está inactivo." });
+      }
+
+      // No dejar al sistema sin administrador: si el usuario era admin y el
+      // nuevo perfil NO es administrativo, debe quedar otro admin activo.
+      if (esAdminActual && !esPerfilAdministrativo(perfilValido[0].Nombre)) {
+        const hayOtro = await existeOtroAdminActivo(
+          connection,
+          req.usuario.idAcademia,
+          idUsuarioObjetivo,
+        );
+        if (!hayOtro) {
+          await connection.rollback();
+          return res.status(409).json({
+            error:
+              "No puedes quitar el perfil administrativo al último administrador activo.",
+          });
+        }
+      }
+    }
+
+    // Validar el estado de acceso (solo 0/1).
+    let estadoNum;
+    if (EstadoRegistro !== undefined && EstadoRegistro !== null) {
+      estadoNum = Number(EstadoRegistro);
+      if (![0, 1].includes(estadoNum)) {
+        await connection.rollback();
+        return res.status(400).json({
+          error: "El estado del usuario debe ser 0 (inactivo) o 1 (activo).",
+        });
+      }
+
+      // No desactivar al último administrador activo.
+      if (esAdminActual && estadoActual === 1 && estadoNum === 0) {
+        const hayOtro = await existeOtroAdminActivo(
+          connection,
+          req.usuario.idAcademia,
+          idUsuarioObjetivo,
+        );
+        if (!hayOtro) {
+          await connection.rollback();
+          return res.status(409).json({
+            error: "No puedes desactivar al último administrador activo.",
+          });
+        }
+      }
+    }
+
+    // UPDATE PARCIAL: solo se modifican los campos realmente enviados.
+    const campos = [];
+    const params = [];
+    const asignar = (columna, valor) => {
+      campos.push(`${columna}=?`);
+      params.push(valor);
+    };
+
+    if (DNI !== undefined) {
+      const dniLimpio = String(DNI ?? "").trim();
+      asignar("DNI", dniLimpio ? dniLimpio.slice(0, 8) : null);
+    }
+    if (Nombres !== undefined) {
+      const nombresLimpios = String(Nombres).trim();
+      if (!nombresLimpios) {
+        await connection.rollback();
+        return res
+          .status(400)
+          .json({ error: "El nombre no puede quedar vacío." });
+      }
+      asignar("Nombres", nombresLimpios);
+    }
+    if (ApellidoPaterno !== undefined) {
+      asignar("ApellidoPaterno", String(ApellidoPaterno ?? "").trim());
+    }
+    if (ApellidoMaterno !== undefined) {
+      asignar("ApellidoMaterno", String(ApellidoMaterno ?? ""));
+    }
+    if (Celular !== undefined) {
+      asignar("Celular", String(Celular ?? ""));
+    }
+    if (CorreoElectronico !== undefined) {
+      const correoLimpio = String(CorreoElectronico ?? "").trim();
+      asignar("CorreoElectronico", correoLimpio || null);
+    }
+    if (Clave !== undefined && String(Clave).trim() !== "") {
+      asignar("Clave", await bcrypt.hash(String(Clave).trim(), 10));
+    }
+    if (estadoNum !== undefined) {
+      asignar("EstadoRegistro", estadoNum);
+    }
+
+    if (campos.length === 0 && !idPerfilNuevo) {
+      await connection.rollback();
+      return res
+        .status(400)
+        .json({ error: "No se enviaron cambios para el usuario." });
+    }
+
+    if (campos.length > 0) {
+      params.push(idUsuarioObjetivo, req.usuario.idAcademia);
+      // La existencia ya fue verificada; affectedRows=0 solo significa que los
+      // valores enviados eran idénticos (no es un error).
+      await connection.query(
+        `UPDATE Usuario SET ${campos.join(", ")} WHERE IdUsuario = ? AND IdAcademia = ?`,
+        params,
+      );
+    }
+
+    if (idPerfilNuevo) {
       const [existentes] = await connection.query(
         "SELECT IdUsuarioPerfil FROM Usuario_Perfiles WHERE IdUsuario = ? AND IdPerfil = ? ORDER BY IdUsuarioPerfil LIMIT 1 FOR UPDATE",
-        [id, Number(IdPerfil)]
+        [idUsuarioObjetivo, idPerfilNuevo],
       );
+      // El usuario esta bloqueado desde el inicio de la transaccion. Se conserva
+      // el historial y se reactiva una sola relacion, nunca todas las anteriores.
       await connection.query(
         "UPDATE Usuario_Perfiles SET EstadoRegistro = 0 WHERE IdUsuario = ?",
-        [id]
+        [idUsuarioObjetivo],
       );
-      if (existentes.length) {
-        await connection.query("UPDATE Usuario_Perfiles SET EstadoRegistro = 1 WHERE IdUsuarioPerfil = ?", [existentes[0].IdUsuarioPerfil]);
+      if (existentes.length > 0) {
+        await connection.query(
+          "UPDATE Usuario_Perfiles SET EstadoRegistro = 1 WHERE IdUsuarioPerfil = ?",
+          [existentes[0].IdUsuarioPerfil],
+        );
       } else {
-        await connection.query("INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)", [id, Number(IdPerfil)]);
+        await connection.query(
+          "INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)",
+          [idUsuarioObjetivo, idPerfilNuevo],
+        );
       }
     }
 
@@ -211,46 +541,81 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
     res.json({ message: "Usuario y perfil actualizados con éxito" });
   } catch (error) {
     await connection.rollback();
-    console.error("Error en PUT /usuarios/:id:", error.message);
-    res.status(500).json({ error: error.message });
+    responderError(res, error, "PUT /usuarios/:id");
   } finally {
     connection.release();
   }
 });
 
-// 4. ELIMINACIÓN LÓGICA
+// 4. ELIMINACIÓN LÓGICA (protege al último administrador)
 router.delete(
   "/usuarios/:id",
   requiereRol("Administrador"),
   async (req, res) => {
     const connection = await pool.getConnection();
     try {
-      const { id } = req.params;
+      const idUsuarioObjetivo = Number(req.params.id);
+      if (!Number.isSafeInteger(idUsuarioObjetivo) || idUsuarioObjetivo <= 0) {
+        return res
+          .status(400)
+          .json({ error: "El identificador de usuario no es válido." });
+      }
+
       await connection.beginTransaction();
 
-      const [result] = await connection.query(
-        "UPDATE Usuario SET EstadoRegistro = -1 WHERE IdUsuario = ? AND IdAcademia = ?",
-        [id, req.usuario.idAcademia],
+      const [objetivoRows] = await connection.query(
+        `SELECT u.IdUsuario, u.EstadoRegistro, p.Nombre AS NombrePerfil
+           FROM Usuario u
+           LEFT JOIN Usuario_Perfiles up ON up.IdUsuario = u.IdUsuario AND up.EstadoRegistro = 1
+           LEFT JOIN perfil p ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
+          WHERE u.IdUsuario = ? AND u.IdAcademia = ?
+          LIMIT 1`,
+        [idUsuarioObjetivo, req.usuario.idAcademia],
       );
-
-      if (result.affectedRows === 0) {
+      if (!objetivoRows.length) {
         await connection.rollback();
         return res
           .status(404)
           .json({ error: "Usuario no encontrado en tu academia." });
       }
 
+      // No eliminar al último administrador activo.
+      if (
+        esPerfilAdministrativo(objetivoRows[0].NombrePerfil) &&
+        !(await existeOtroAdminActivo(
+          connection,
+          req.usuario.idAcademia,
+          idUsuarioObjetivo,
+        ))
+      ) {
+        await connection.rollback();
+        return res
+          .status(409)
+          .json({ error: "No puedes eliminar al último administrador activo." });
+      }
+
+      const [result] = await connection.query(
+        "UPDATE Usuario SET EstadoRegistro = -1 WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro IN (0, 1)",
+        [idUsuarioObjetivo, req.usuario.idAcademia],
+      );
+
+      if (result.affectedRows === 0) {
+        await connection.rollback();
+        return res
+          .status(404)
+          .json({ error: "Usuario no encontrado o ya eliminado." });
+      }
+
       await connection.query(
         "UPDATE Usuario_Perfiles SET EstadoRegistro = -1 WHERE IdUsuario = ?",
-        [id],
+        [idUsuarioObjetivo],
       );
 
       await connection.commit();
       res.json({ message: "Usuario eliminado lógicamente con éxito (-1)" });
     } catch (error) {
       await connection.rollback();
-      console.error("Error en DELETE /usuarios/:id:", error.message);
-      res.status(500).json({ error: error.message });
+      responderError(res, error, "DELETE /usuarios/:id");
     } finally {
       connection.release();
     }

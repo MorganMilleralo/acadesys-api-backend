@@ -1,8 +1,8 @@
 
 const express = require("express");
 const router = express.Router();
-const pool = require("../config/db");
-const requiereRol = require("../middlewares/roles.middleware");
+const pool = require('../config/db');
+const requiereRol = require('../middlewares/roles.middleware');
 
 const { normalizarTipo, enteroPositivo: valido, periodoValido,
   responderErrorEsquema } = require("../utils/evaluaciones");
@@ -11,12 +11,12 @@ router.put(
   "/actas/cierre",
   requiereRol("Administrador"),
   async (req, res) => {
-    let idCiclo = req.body?.idCiclo;
-
-    let idCurso =
-      req.body?.idCurso == null
-        ? null
-        : req.body.idCurso;
+    let idCiclo = req.body?.idCiclo ?? req.body?.IdCiclo;
+    // Conservar ambos nombres utilizados por los clientes, incluido null
+    // explicito para el simulacro general.
+    const entradaCurso = Object.hasOwn(req.body || {}, 'idCurso')
+      ? req.body.idCurso : req.body?.IdCurso;
+    let idCurso = entradaCurso == null ? null : entradaCurso;
 
     const periodoEntrada = (
       req.body?.periodo ??
@@ -187,11 +187,15 @@ router.put(
 
       return res.json({
         message: "Acta cerrada correctamente.",
+        mensaje: "Acta cerrada correctamente.",
         idCiclo,
         idCurso,
         periodo,
         tipoEvaluacion: tipo,
         notasBloqueadas: resultado.affectedRows,
+        evaluacionesSelladas: resultado.affectedRows,
+        alcance: { idCiclo, idCurso, periodo, tipoEvaluacion: tipo,
+          alcanceCurso: idCurso === null ? 'Simulacro General' : 'Curso específico' },
       });
     } catch (error) {
       if (connection) {

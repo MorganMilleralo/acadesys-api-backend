@@ -6,7 +6,7 @@ const ESCALAS = Object.freeze({
   UNAC: 100, UNT: 300, PREUNIVERSITARIO: 20,
 });
 const TIPOS = Object.freeze({
-  practica: 'Practica', examen: 'Examen', simulacro: 'Simulacro',
+  practica: 'Practica', evaluacion: 'Evaluacion', examen: 'Examen', simulacro: 'Simulacro',
   oral: 'Oral', tarea: 'Tarea', participacion: 'Participacion',
 });
 const normalizarTipo = (valor) => {
