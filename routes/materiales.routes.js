@@ -25,8 +25,8 @@ function limpiarNombreArchivo(nombre = 'material.pdf') {
 router.get('/admin', requiereRol('Administrador'), async (req, res) => {
   try {
     const { idCiclo } = req.query;
-    const params = [];
-    let where = 'ma.EstadoRegistro = 1';
+    const params = [req.usuario.idAcademia];
+    let where = 'ma.EstadoRegistro = 1 AND c.IdAcademia = ?';
 
     if (idCiclo) {
       where += ' AND ma.IdCiclo = ?';
@@ -96,8 +96,9 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
         AND cc.EstadoRegistro = 1
         AND c.EstadoRegistro = 1
         AND cu.EstadoRegistro = 1
+        AND c.IdAcademia = ?
       LIMIT 1
-    `, [Number(idCiclo), Number(idCurso)]);
+    `, [Number(idCiclo), Number(idCurso), req.usuario.idAcademia]);
 
     if (relacion.length === 0) {
       return res.status(400).json({
@@ -164,19 +165,21 @@ router.delete('/:id', requiereRol('Administrador'), async (req, res) => {
     const { id } = req.params;
 
     const [rows] = await pool.query(`
-      SELECT IdMaterial, UrlArchivo
-      FROM MaterialAcademico
-      WHERE IdMaterial = ? AND EstadoRegistro = 1
+      SELECT ma.IdMaterial, ma.UrlArchivo
+      FROM MaterialAcademico ma
+      INNER JOIN Ciclo c ON c.IdCiclo = ma.IdCiclo
+      WHERE ma.IdMaterial = ? AND ma.EstadoRegistro = 1 AND c.IdAcademia = ?
       LIMIT 1
-    `, [Number(id)]);
+    `, [Number(id), req.usuario.idAcademia]);
 
     if (rows.length === 0) {
       return res.status(404).json({ error: 'Material no encontrado.' });
     }
 
     await pool.query(
-      'UPDATE MaterialAcademico SET EstadoRegistro = -1 WHERE IdMaterial = ?',
-      [Number(id)]
+      `UPDATE MaterialAcademico ma INNER JOIN Ciclo c ON c.IdCiclo = ma.IdCiclo
+       SET ma.EstadoRegistro = -1 WHERE ma.IdMaterial = ? AND c.IdAcademia = ?`,
+      [Number(id), req.usuario.idAcademia]
     );
 
     const url = String(rows[0].UrlArchivo || '');

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
+const { esNotaCurso, esSimulacro, responderErrorEsquema } = require('../utils/evaluaciones');
 
 const universidadDesdeNombre = (nombre = '') => {
   const n = String(nombre).toLowerCase();
@@ -70,11 +71,12 @@ router.get('/me', async (req, res) => {
       FROM Matricula m
       INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo
       WHERE m.IdUsuario = ?
+        AND c.IdAcademia = ?
         AND m.EstadoRegistro = 1
         AND c.EstadoRegistro = 1
       ORDER BY m.IdMatricula DESC
       LIMIT 1
-    `, [idUsuario]);
+    `, [idUsuario, idAcademia]);
 
     let ciclo = null;
     let matriculaId = null;
@@ -150,25 +152,51 @@ router.get('/me', async (req, res) => {
     const [notas] = await pool.query(`
       SELECT
         e.IdEvaluacion,
-        COALESCE(cu.Nombre, 'Simulacro general') AS Curso,
+        e.IdCurso,
+        e.Periodo,
+        e.EstadoRegistro,
+        CASE WHEN e.IdCurso IS NULL AND e.TipoEvaluacion = 'Simulacro'
+          THEN 'Simulacro general' ELSE COALESCE(cu.Nombre, 'Curso pendiente de clasificar') END AS Curso,
         e.TipoEvaluacion,
         e.Calificacion,
         e.FechaCreacion
       FROM Evaluacion e
-      INNER JOIN Matricula m ON m.IdMatricula = e.IdMatricula
-      LEFT JOIN Curso cu ON cu.IdCurso = m.IdCurso
+      INNER JOIN Matricula m
+        ON m.IdMatricula = e.IdMatricula
+      LEFT JOIN Curso cu
+        ON cu.IdCurso = e.IdCurso
       WHERE m.IdUsuario = ?
         AND m.IdCiclo = ?
-        AND e.EstadoRegistro = 1
+        AND m.EstadoRegistro = 1
+        AND e.EstadoRegistro IN (1, 2)
       ORDER BY e.FechaCreacion DESC, e.IdEvaluacion DESC
     `, [idUsuario, ciclo.idCiclo]);
 
-    const promedio = notas.length
-      ? Number((notas.reduce((sum, n) => sum + Number(n.Calificacion || 0), 0) / notas.length).toFixed(2))
-      : 0;
+    // Las notas de curso y los puntajes de simulacros
+    // tienen escalas distintas: no deben promediarse juntos.
+    const notasCursos = notas.filter(esNotaCurso);
 
+    const notasSimulacros = notas.filter(esSimulacro);
+
+    const calcularPromedio = (registros) =>
+      registros.length
+        ? Number((
+            registros.reduce(
+              (suma, nota) =>
+                suma + Number(nota.Calificacion),
+              0
+            ) / registros.length
+          ).toFixed(2))
+        : 0;
+
+    const promedio = calcularPromedio(notasSimulacros);
+    const promedioCursos = calcularPromedio(notasCursos);
+
+    // Ranking provisional basado solo en simulacros
+    // del mismo ciclo, comparables en una misma escala.
     let puestoRanking = null;
-    if (promedio > 0) {
+
+    if (notasSimulacros.length > 0) {
       const [rankingRows] = await pool.query(`
         SELECT COUNT(*) + 1 AS Puesto
         FROM (
@@ -176,17 +204,31 @@ router.get('/me', async (req, res) => {
             m2.IdUsuario,
             AVG(e2.Calificacion) AS Promedio
           FROM Matricula m2
-          INNER JOIN Evaluacion e2 ON e2.IdMatricula = m2.IdMatricula
+          INNER JOIN Evaluacion e2
+            ON e2.IdMatricula = m2.IdMatricula
+          INNER JOIN Usuario u2
+            ON u2.IdUsuario = m2.IdUsuario
           WHERE m2.IdCiclo = ?
             AND m2.EstadoRegistro = 1
-            AND e2.EstadoRegistro = 1
+            AND u2.IdAcademia = ?
+            AND u2.EstadoRegistro = 1
+            AND e2.EstadoRegistro IN (1, 2)
+            AND e2.IdCurso IS NULL
+            AND e2.TipoEvaluacion = 'Simulacro'
           GROUP BY m2.IdUsuario
           HAVING AVG(e2.Calificacion) > ?
         ) r
-      `, [ciclo.idCiclo, promedio]);
+      `, [
+        ciclo.idCiclo,
+        idAcademia,
+        promedio
+      ]);
 
-      puestoRanking = Number(rankingRows[0]?.Puesto || 1);
+      puestoRanking = Number(
+        rankingRows[0]?.Puesto || 1
+      );
     }
+
 
     const [materiales] = await pool.query(`
       SELECT
@@ -236,16 +278,23 @@ router.get('/me', async (req, res) => {
       })),
       notas: {
         promedioGeneral: promedio,
+        promedioSimulacros: promedio,
+        promedioCursos,
+        evaluacionesPendientesClasificar: notas.length - notasCursos.length - notasSimulacros.length,
         puestoRanking,
         totalEvaluaciones: notas.length,
         historial: notas.map((n) => ({
           idEvaluacion: n.IdEvaluacion,
+          idCurso: n.IdCurso,
           curso: n.Curso,
+          periodo: n.Periodo,
           tipoEvaluacion: n.TipoEvaluacion,
-          calificacion: Number(n.Calificacion || 0),
+          calificacion: Number(n.Calificacion),
+          estadoRegistro: n.EstadoRegistro,
           fechaCreacion: n.FechaCreacion
         }))
       },
+
       materiales: materiales.map((m) => ({
         idMaterial: m.IdMaterial,
         titulo: m.Titulo,
@@ -258,6 +307,7 @@ router.get('/me', async (req, res) => {
       }))
     });
   } catch (error) {
+    if (responderErrorEsquema(res, error)) return;
     console.error('Error en GET /api/alumno/me:', error.message);
     res.status(500).json({ error: 'No se pudo cargar el expediente del alumno.' });
   }

@@ -1,8 +1,8 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
-const verificarToken = require("../middlewares/auth.middleware");
-router.use(verificarToken);
+// index.js autentica estas rutas antes de montarlas.
+const requiereRol = require("../middlewares/roles.middleware");
 // 1. Listar los menús principales activos (GET)
 router.get("/menus", async (req, res) => {
   try {
@@ -29,7 +29,7 @@ router.get("/menus/:idPadre/submenus", async (req, res) => {
   }
 });
 
-router.post("/menus", async (req, res) => {
+router.post("/menus", requiereRol("Administrador"), async (req, res) => {
   try {
     const { Nombre, UrlMenu, Descripcion, IdPadre, EstadoRegistro } = req.body;
     const padre = IdPadre ? IdPadre : null;
@@ -47,7 +47,7 @@ router.post("/menus", async (req, res) => {
 });
 
 // 4. Asignar un Menú a un Perfil (POST)
-router.post("/menus/asignar", async (req, res) => {
+router.post("/menus/asignar", requiereRol("Administrador"), async (req, res) => {
   try {
     const { IdOpcionMenu, IdPerfil, Orden, EstadoRegistro } = req.body;
 

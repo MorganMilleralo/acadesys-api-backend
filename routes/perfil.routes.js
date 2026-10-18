@@ -1,9 +1,10 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
+const requiereRol = require("../middlewares/roles.middleware");
 
 // 1. LISTAR PERFILES (GET)
-router.get("/perfiles", async (req, res) => {
+router.get("/perfiles", requiereRol("Administrador"), async (req, res) => {
   try {
     // Traemos los Activos (1) e Inactivos (0), pero ocultamos los Eliminados (-1)
     const [rows] = await pool.query(
@@ -16,7 +17,7 @@ router.get("/perfiles", async (req, res) => {
 });
 
 // 2. INSERTAR PERFIL (POST)
-router.post("/perfiles", async (req, res) => {
+router.post("/perfiles", requiereRol("Administrador"), async (req, res) => {
   try {
     const { NombrePerfil, Descripcion, EstadoRegistro } = req.body;
 
@@ -33,7 +34,7 @@ router.post("/perfiles", async (req, res) => {
 });
 
 // 3. MODIFICAR PERFIL (PUT)
-router.put("/perfiles/:id", async (req, res) => {
+router.put("/perfiles/:id", requiereRol("Administrador"), async (req, res) => {
   try {
     const { id } = req.params;
     const { NombrePerfil, Descripcion } = req.body;
@@ -48,7 +49,7 @@ router.put("/perfiles/:id", async (req, res) => {
 });
 
 // 4. ELIMINACIÓN LÓGICA (DELETE)
-router.delete("/perfiles/:id", async (req, res) => {
+router.delete("/perfiles/:id", requiereRol("Administrador"), async (req, res) => {
   try {
     const { id } = req.params;
     // El borrado lógico real pasa el estado a -1 (Eliminado)

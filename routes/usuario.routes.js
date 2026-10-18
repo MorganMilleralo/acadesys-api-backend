@@ -3,6 +3,16 @@ const router = express.Router();
 const pool = require("../config/db");
 const bcrypt = require("bcrypt");
 const requiereRol = require("../middlewares/roles.middleware");
+const { enteroPositivo } = require("../utils/evaluaciones");
+
+async function perfilActivo(connection, idPerfil) {
+  if (!enteroPositivo(idPerfil)) return false;
+  const [perfiles] = await connection.query(
+    "SELECT IdPerfil FROM perfil WHERE IdPerfil = ? AND EstadoRegistro = 1 LIMIT 1 FOR SHARE",
+    [Number(idPerfil)]
+  );
+  return perfiles.length === 1;
+}
 
 // 1. CREAR USUARIO STAFF (Docente / Tutor de Aula)
 router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
@@ -30,6 +40,11 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
+
+    if (!await perfilActivo(connection, IdPerfil)) {
+      await connection.rollback();
+      return res.status(400).json({ error: "El perfil debe existir y estar activo." });
+    }
 
     const baseCodigo = String(
       req.body.CodigoUsuario ||
@@ -97,7 +112,7 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
 });
 
 // 2. LISTAR USUARIOS (Filtrado por academia, sin exponer hashes de contraseña)
-router.get("/usuarios", async (req, res) => {
+router.get("/usuarios", requiereRol("Administrador"), async (req, res) => {
   try {
     const [rows] = await pool.query(
       `SELECT
@@ -171,21 +186,24 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
         .json({ error: "Usuario no encontrado en tu academia." });
     }
 
-    if (IdPerfil) {
-      const [existePerfil] = await connection.query(
-        "SELECT * FROM Usuario_Perfiles WHERE IdUsuario = ?",
-        [id],
+    if (IdPerfil !== undefined) {
+      if (!await perfilActivo(connection, IdPerfil)) {
+        await connection.rollback();
+        return res.status(400).json({ error: "El perfil debe existir y estar activo." });
+      }
+      // UPDATE Usuario ya bloqueo al usuario: cambios concurrentes se serializan.
+      const [existentes] = await connection.query(
+        "SELECT IdUsuarioPerfil FROM Usuario_Perfiles WHERE IdUsuario = ? AND IdPerfil = ? ORDER BY IdUsuarioPerfil LIMIT 1 FOR UPDATE",
+        [id, Number(IdPerfil)]
       );
-      if (existePerfil.length > 0) {
-        await connection.query(
-          "UPDATE Usuario_Perfiles SET IdPerfil = ?, EstadoRegistro = 1 WHERE IdUsuario = ?",
-          [Number(IdPerfil), id],
-        );
+      await connection.query(
+        "UPDATE Usuario_Perfiles SET EstadoRegistro = 0 WHERE IdUsuario = ?",
+        [id]
+      );
+      if (existentes.length) {
+        await connection.query("UPDATE Usuario_Perfiles SET EstadoRegistro = 1 WHERE IdUsuarioPerfil = ?", [existentes[0].IdUsuarioPerfil]);
       } else {
-        await connection.query(
-          "INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)",
-          [id, Number(IdPerfil)],
-        );
+        await connection.query("INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)", [id, Number(IdPerfil)]);
       }
     }
 

@@ -1,10 +1,10 @@
 const express = require('express');
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
+const { esAdministrativo } = requiereRol;
 
 const router = express.Router();
 const ROLES_GESTION = ['Administrador', 'Docente', 'Tutor de Aula'];
-const ESTADOS_ASISTENCIA = new Set(['presente', 'tardanza', 'falta', 'justificado']);
 
 function academiaDelUsuario(req, res) {
   const idAcademia = Number(req.usuario?.idAcademia);
@@ -22,18 +22,6 @@ function idPositivo(valor) {
 
 function normalizarTexto(valor, max = 120) {
   return String(valor ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
-}
-
-function fechaISOValida(valor) {
-  if (typeof valor !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(valor)) return false;
-  const d = new Date(`${valor}T00:00:00Z`);
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === valor;
-}
-
-function horaValida(valor) {
-  if (valor === null || valor === undefined || valor === '') return null;
-  const texto = String(valor).trim();
-  return /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(texto) ? texto.slice(0, 8) : undefined;
 }
 
 // ============================================================
@@ -273,11 +261,15 @@ router.get('/asignaciones', requiereRol(...ROLES_GESTION), async (req, res) => {
        INNER JOIN Aula a ON a.IdAula = aa.IdAula
        INNER JOIN Curso cu ON cu.IdCurso = aa.IdCurso
        INNER JOIN Ciclo c ON c.IdCiclo = aa.IdCiclo
+       INNER JOIN CicloCurso cc ON cc.IdCiclo = aa.IdCiclo AND cc.IdCurso = aa.IdCurso
        WHERE aa.IdAcademia = ? AND aa.EstadoRegistro = 1
+         AND u.IdAcademia = aa.IdAcademia AND a.IdAcademia = aa.IdAcademia
+         AND c.IdAcademia = aa.IdAcademia AND cc.EstadoRegistro = 1
+         AND (? = 1 OR aa.IdUsuario = ?)
          AND u.EstadoRegistro = 1 AND a.EstadoRegistro = 1
          AND cu.EstadoRegistro = 1 AND c.EstadoRegistro = 1
        ORDER BY c.Nombre, a.Nombre, cu.Nombre, docente`,
-      [idAcademia],
+      [idAcademia, esAdministrativo(req.usuario.rol) ? 1 : 0, req.usuario.id],
     );
     res.json(rows);
   } catch (error) {
@@ -308,7 +300,7 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
        INNER JOIN Usuario_Perfiles up ON up.IdUsuario = u.IdUsuario AND up.EstadoRegistro = 1
        INNER JOIN perfil p ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
        WHERE u.IdUsuario = ? AND u.IdAcademia = ? AND u.EstadoRegistro = 1
-         AND (LOWER(p.Nombre) LIKE '%docente%' OR LOWER(p.Nombre) LIKE '%tutor%')
+         AND LOWER(TRIM(p.Nombre)) IN ('docente', 'tutor de aula')
        LIMIT 1`,
       [idUsuario, idAcademia],
     );
@@ -325,8 +317,11 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
       [idAula, idAcademia],
     );
     const [[curso]] = await connection.query(
-      'SELECT IdCurso FROM Curso WHERE IdCurso = ? AND EstadoRegistro = 1 LIMIT 1',
-      [idCurso],
+      `SELECT cu.IdCurso FROM Curso cu
+       INNER JOIN CicloCurso cc ON cc.IdCurso = cu.IdCurso
+       WHERE cu.IdCurso = ? AND cc.IdCiclo = ?
+         AND cu.EstadoRegistro = 1 AND cc.EstadoRegistro = 1 LIMIT 1`,
+      [idCurso, idCiclo],
     );
     if (!ciclo || !aula || !curso) {
       await connection.rollback();
@@ -377,125 +372,15 @@ router.delete('/asignaciones/:id', requiereRol('Administrador'), async (req, res
 });
 
 // ============================================================
-// ASISTENCIAS (Sin modificaciones estructurales requeridas)
+// ASISTENCIAS: requiere una relacion explicita entre matricula y aula.
+// Asignacion_Aula vincula personal, ciclo y curso; no acredita alumnos del aula.
+// Se conservan las URLs, pero se impide consultar o guardar una lista inferida.
 // ============================================================
-router.get('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
-  const idAcademia = academiaDelUsuario(req, res);
-  if (!idAcademia) return;
-  const idAula = idPositivo(req.query.idAula);
-  const fecha = String(req.query.fecha ?? '');
-  if (!idAula || !fechaISOValida(fecha)) return res.status(400).json({ error: 'Debes indicar un idAula válido y una fecha en formato YYYY-MM-DD.' });
-  try {
-    const [[aula]] = await pool.query(
-      'SELECT IdAula FROM Aula WHERE IdAula = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
-      [idAula, idAcademia],
-    );
-    if (!aula) return res.status(404).json({ error: 'Aula no encontrada en esta academia.' });
-    const [rows] = await pool.query(
-      `SELECT DISTINCT
-              m.IdMatricula AS idMatricula,
-              m.IdMatricula AS idAlumno,
-              u.IdUsuario AS idUsuario,
-              CONCAT(u.Nombres, ' ', u.ApellidoPaterno, ' ', COALESCE(u.ApellidoMaterno, '')) AS nombre,
-              COALESCE(DATE_FORMAT(ast.HoraLlegada, '%H:%i'), '--') AS horaLlegada,
-              COALESCE(ast.Estado, 'pendiente') AS estado
-       FROM Asignacion_Aula aa
-       INNER JOIN Ciclo c ON c.IdCiclo = aa.IdCiclo AND c.IdAcademia = aa.IdAcademia
-       INNER JOIN Matricula m ON m.IdCiclo = aa.IdCiclo
-         AND (aa.IdCurso IS NULL OR m.IdCurso IS NULL OR m.IdCurso = aa.IdCurso)
-       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario AND u.IdAcademia = aa.IdAcademia
-       LEFT JOIN Asistencia ast ON ast.IdMatricula = m.IdMatricula
-         AND ast.IdAula = aa.IdAula AND ast.Fecha = ? AND ast.EstadoRegistro = 1
-       WHERE aa.IdAula = ? AND aa.IdAcademia = ? AND aa.EstadoRegistro = 1
-         AND c.EstadoRegistro = 1 AND m.EstadoRegistro = 1 AND u.EstadoRegistro = 1
-         AND aa.IdAula IS NOT NULL
-       ORDER BY nombre ASC`,
-      [fecha, idAula, idAcademia],
-    );
-    res.json(rows);
-  } catch (error) {
-    console.error('GET /api/asistencias:', error);
-    res.status(500).json({ error: 'No se pudo consultar la asistencia. Verifica que la migración esté aplicada.' });
-  }
+const asistenciaSinRelacion = (_req, res) => res.status(409).json({
+  codigo: 'RELACION_ALUMNO_AULA_PENDIENTE',
+  error: 'La asistencia por aula requiere una asignacion verificable de alumnos.',
 });
-
-router.post('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
-  const idAcademia = academiaDelUsuario(req, res);
-  if (!idAcademia) return;
-  const idAula = idPositivo(req.body?.idAula);
-  const fecha = String(req.body?.fecha ?? '');
-  const lista = req.body?.listaAlumnos;
-  if (!idAula || !fechaISOValida(fecha) || !Array.isArray(lista) || lista.length === 0) {
-    return res.status(400).json({ error: 'Envía un aula válida, una fecha YYYY-MM-DD y una lista de alumnos.' });
-  }
-  if (lista.length > 500) return res.status(413).json({ error: 'La lista de asistencia supera el límite de 500 alumnos.' });
-
-  const registros = [];
-  const idsVistos = new Set();
-  for (const alumno of lista) {
-    const idMatricula = idPositivo(alumno?.idMatricula);
-    const estado = String(alumno?.estado ?? '').toLowerCase();
-    const hora = horaValida(alumno?.horaLlegada);
-    if (!idMatricula || idsVistos.has(idMatricula)) return res.status(400).json({ error: 'La lista contiene una matrícula inválida o duplicada.' });
-    if (!ESTADOS_ASISTENCIA.has(estado)) return res.status(400).json({ error: 'Todos los alumnos deben tener un estado válido: presente, tardanza, falta o justificado.' });
-    if (hora === undefined) return res.status(400).json({ error: 'La hora de llegada debe tener formato HH:mm.' });
-    idsVistos.add(idMatricula);
-    registros.push({ idMatricula, estado, hora: ['presente', 'tardanza'].includes(estado) ? hora : null });
-  }
-
-  const connection = await pool.getConnection();
-  try {
-    await connection.beginTransaction();
-    const [[aula]] = await connection.query(
-      'SELECT IdAula FROM Aula WHERE IdAula = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
-      [idAula, idAcademia],
-    );
-    if (!aula) {
-      await connection.rollback();
-      return res.status(404).json({ error: 'Aula no encontrada en esta academia.' });
-    }
-    const placeholders = registros.map(() => '?').join(',');
-    const params = [idAula, idAcademia, ...registros.map((r) => r.idMatricula)];
-    const [permitidas] = await connection.query(
-      `SELECT DISTINCT m.IdMatricula
-       FROM Asignacion_Aula aa
-       INNER JOIN Matricula m ON m.IdCiclo = aa.IdCiclo
-         AND (aa.IdCurso IS NULL OR m.IdCurso IS NULL OR m.IdCurso = aa.IdCurso)
-       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario AND u.IdAcademia = aa.IdAcademia
-       INNER JOIN Ciclo c ON c.IdCiclo = aa.IdCiclo AND c.IdAcademia = aa.IdAcademia
-       WHERE aa.IdAula = ? AND aa.IdAcademia = ? AND aa.EstadoRegistro = 1
-         AND m.EstadoRegistro = 1 AND u.EstadoRegistro = 1 AND c.EstadoRegistro = 1
-         AND m.IdMatricula IN (${placeholders})`,
-      params,
-    );
-    const permitidasSet = new Set(permitidas.map((r) => Number(r.IdMatricula)));
-    if (permitidasSet.size !== registros.length) {
-      await connection.rollback();
-      return res.status(400).json({ error: 'Una o más matrículas no corresponden a alumnos asignados al aula seleccionada.' });
-    }
-
-    const idUsuarioRegistro = idPositivo(req.usuario?.idUsuario ?? req.usuario?.id) || null;
-    for (const registro of registros) {
-      await connection.query(
-        `INSERT INTO Asistencia
-           (IdMatricula, IdAula, Fecha, Estado, HoraLlegada, UsuarioRegistro, EstadoRegistro)
-         VALUES (?, ?, ?, ?, ?, ?, 1)
-         ON DUPLICATE KEY UPDATE
-           Estado = VALUES(Estado), HoraLlegada = VALUES(HoraLlegada),
-           UsuarioRegistro = VALUES(UsuarioRegistro), EstadoRegistro = 1,
-           FechaModificacion = CURRENT_TIMESTAMP`,
-        [registro.idMatricula, idAula, fecha, registro.estado, registro.hora, idUsuarioRegistro],
-      );
-    }
-    await connection.commit();
-    res.json({ message: 'Asistencia guardada correctamente.', registrosGuardados: registros.length });
-  } catch (error) {
-    await connection.rollback();
-    console.error('POST /api/asistencias:', error);
-    res.status(500).json({ error: 'No se pudo guardar la asistencia. Verifica que la migración esté aplicada.' });
-  } finally {
-    connection.release();
-  }
-});
+router.get('/asistencias', requiereRol(...ROLES_GESTION), asistenciaSinRelacion);
+router.post('/asistencias', requiereRol(...ROLES_GESTION), asistenciaSinRelacion);
 
 module.exports = router;

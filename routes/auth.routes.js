@@ -219,11 +219,11 @@ const loginHandler = async (req, res) => {
         a.ColorTema,
         a.LogoUrl
       FROM Usuario u
-      LEFT JOIN Usuario_Perfiles up
+      INNER JOIN Usuario_Perfiles up
         ON u.IdUsuario = up.IdUsuario
        AND up.EstadoRegistro = 1
-      LEFT JOIN perfil p
-        ON up.IdPerfil = p.IdPerfil
+      INNER JOIN perfil p
+        ON up.IdPerfil = p.IdPerfil AND p.EstadoRegistro = 1
       LEFT JOIN Academia a
         ON u.IdAcademia = a.IdAcademia
       WHERE u.EstadoRegistro = 1
@@ -247,12 +247,11 @@ const loginHandler = async (req, res) => {
         WHEN TRIM(COALESCE(u.DNI, '')) = ? THEN 3
         ELSE 4
       END
-      LIMIT 1`,
+      LIMIT 2`,
       [
         termLower,
         termLower,
         termino,
-        termLower,
         termLower,
         termLower,
         termLower,
@@ -282,6 +281,10 @@ const loginHandler = async (req, res) => {
       return res.status(401).json({ error: "Contraseña incorrecta." });
     }
 
+    if (rows.length !== 1) {
+      return res.status(403).json({ error: "Identidad ambigua o multiples perfiles activos." });
+    }
+
     const rol = user.Rol || "Sin Rol";
 
     const token = jwt.sign(
@@ -292,16 +295,14 @@ const loginHandler = async (req, res) => {
         idPerfil: user.IdPerfil,
         idAcademia: user.IdAcademia,
       },
-      process.env.JWT_SECRET || "super_secreto_seguro_acadesys_2026",
+      process.env.JWT_SECRET,
       { expiresIn: "8h" },
     );
 
     let matricula = null;
 
     const esAlumno =
-      String(rol).toLowerCase().includes("alumno") ||
-      String(rol).toLowerCase().includes("estudiante");
-
+    String(rol).trim().toLowerCase() === "alumno";
     if (esAlumno) {
       const [matriculas] = await pool.query(
         `SELECT
@@ -323,11 +324,12 @@ const loginHandler = async (req, res) => {
         FROM Matricula m
         INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo
         WHERE m.IdUsuario = ?
+          AND c.IdAcademia = ?
           AND m.EstadoRegistro = 1
           AND c.EstadoRegistro = 1
         ORDER BY m.IdMatricula DESC
         LIMIT 1`,
-        [user.IdUsuario],
+        [user.IdUsuario, user.IdAcademia],
       );
 
       if (matriculas.length > 0) {
