@@ -189,8 +189,7 @@ router.post('/verificar', async (req, res) => {
       });
     }
 
-    const capacidadEfectiva = Math.min(100, Number(ciclo.Capacidad || 100) > 0 ? Number(ciclo.Capacidad || 100) : 100);
-    if (Number(ciclo.TotalAlumnos || 0) >= capacidadEfectiva) {
+    if (Number(ciclo.Capacidad || 0) > 0 && Number(ciclo.TotalAlumnos || 0) >= Number(ciclo.Capacidad)) {
       return res.status(409).json({ existe: false, error: 'El ciclo seleccionado ya alcanzó su capacidad máxima.' });
     }
 
@@ -334,9 +333,9 @@ router.post('/checkout', async (req, res) => {
       [idCiclo],
     );
     const totalAlumnos = matriculasActivasCiclo.length;
-    const capacidadConfigurada = Number(ciclo.Capacidad || 100);
-    const capacidad = Math.min(100, capacidadConfigurada > 0 ? capacidadConfigurada : 100);
-    if (totalAlumnos >= capacidad) {
+    // Capacidad real del ciclo (0/null => sin límite definido).
+    const capacidad = Number(ciclo.Capacidad || 0);
+    if (capacidad > 0 && totalAlumnos >= capacidad) {
       await connection.rollback();
       return res.status(409).json({ error: 'El ciclo seleccionado ya alcanzó su capacidad máxima.' });
     }
@@ -545,7 +544,7 @@ router.post('/checkout', async (req, res) => {
       ciclo: ciclo.Nombre,
       precio: precioReal,
       totalAlumnos: totalFinal,
-      vacantesDisponibles: Math.max(capacidad - totalFinal, 0),
+      vacantesDisponibles: capacidad > 0 ? Math.max(capacidad - totalFinal, 0) : null,
       mensaje: esReinscripcion
         ? 'Reinscripción registrada. El pago está pendiente de confirmación.'
         : 'Matrícula registrada. El pago está pendiente de confirmación.',

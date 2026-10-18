@@ -219,11 +219,12 @@ router.get('/', async (req, res) => {
 
     res.json(rows.map((c) => ({
       ...c,
-      Capacidad: Math.min(100, Number(c.Capacidad || 100) > 0 ? Number(c.Capacidad || 100) : 100),
+      // Capacidad real configurada (0/null => sin límite definido).
+      Capacidad: Number(c.Capacidad || 0),
       Precio: Number(c.Precio || 0),
       TotalAlumnos: Number(c.TotalAlumnos || 0),
       TotalCursos: Number(c.TotalCursos || 0),
-      VacantesDisponibles: Math.max(Math.min(100, Number(c.Capacidad || 100) > 0 ? Number(c.Capacidad || 100) : 100) - Number(c.TotalAlumnos || 0), 0),
+      VacantesDisponibles: Number(c.Capacidad || 0) > 0 ? Math.max(Number(c.Capacidad) - Number(c.TotalAlumnos || 0), 0) : null,
       Estado: Number(c.EstadoRegistro) === 1 ? 'Activo / Visible' : 'Cerrado / Oculto',
     })));
   } catch (error) {
@@ -268,11 +269,29 @@ router.get('/:id', async (req, res) => {
         h.DiaSemana,
         TIME_FORMAT(h.HoraInicio, '%H:%i') AS HoraInicio,
         TIME_FORMAT(h.HoraFin, '%H:%i') AS HoraFin,
-        h.Docente,
+        COALESCE(doc.Docentes, 'Por asignar') AS Docente,
         h.Orden,
         cu.Nombre AS Curso
       FROM HorarioCurso h
       INNER JOIN Curso cu ON cu.IdCurso = h.IdCurso
+      LEFT JOIN (
+        SELECT
+          aa.IdCiclo,
+          aa.IdCurso,
+          GROUP_CONCAT(
+            DISTINCT TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno))
+            ORDER BY TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno)) ASC
+            SEPARATOR ', '
+          ) AS Docentes
+        FROM Asignacion_Aula aa
+        INNER JOIN Usuario u
+          ON u.IdUsuario = aa.IdUsuario
+         AND u.EstadoRegistro = 1
+        WHERE aa.EstadoRegistro = 1
+        GROUP BY aa.IdCiclo, aa.IdCurso
+      ) doc
+        ON doc.IdCiclo = h.IdCiclo
+       AND doc.IdCurso = h.IdCurso
       WHERE h.IdCiclo = ?
         AND h.EstadoRegistro = 1
         AND cu.EstadoRegistro = 1
@@ -280,7 +299,7 @@ router.get('/:id', async (req, res) => {
     `, [idCiclo]);
 
     res.json({
-      ciclo: { ...ciclo, Capacidad: Math.min(100, Number(ciclo.Capacidad || 100) > 0 ? Number(ciclo.Capacidad || 100) : 100) },
+      ciclo,
       cursos,
       horarios,
     });
