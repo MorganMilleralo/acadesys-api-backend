@@ -1,6 +1,7 @@
 const express = require('express');
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
+const { rollbackSeguro, idPositivo } = require('../utils/validaciones');
 
 const router = express.Router();
 const ROLES_GESTION = ['Administrador', 'Docente', 'Tutor de Aula'];
@@ -15,13 +16,10 @@ function academiaDelUsuario(req, res) {
   return idAcademia;
 }
 
-function idPositivo(valor) {
-  const n = Number(valor);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
-
 function normalizarTexto(valor, max = 120) {
-  return String(valor ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
+  if (typeof valor !== 'string') return '';
+  const texto = valor.trim().replace(/\s+/g, ' ');
+  return texto.length <= max ? texto : '';
 }
 
 function fechaISOValida(valor) {
@@ -63,7 +61,8 @@ router.post('/aulas', requiereRol('Administrador'), async (req, res) => {
   const idAcademia = academiaDelUsuario(req, res);
   if (!idAcademia) return;
   const nombre = normalizarTexto(req.body?.nombre ?? req.body?.Nombre);
-  const nivel = normalizarTexto(req.body?.nivel ?? req.body?.Nivel ?? 'General', 80) || 'General';
+  const nivel = normalizarTexto(req.body?.nivel ?? req.body?.Nivel ?? 'General', 80);
+  if (!nivel) return res.status(400).json({ error: 'El nivel debe contener texto de hasta 80 caracteres.' });
   const capacidad = Number(req.body?.capacidad ?? req.body?.Capacidad ?? 35);
   if (nombre.length < 2) return res.status(400).json({ error: 'El nombre del aula debe tener al menos 2 caracteres.' });
   if (!Number.isInteger(capacidad) || capacidad < 1 || capacidad > 500) {
@@ -99,6 +98,9 @@ router.post('/aulas', requiereRol('Administrador'), async (req, res) => {
     );
     res.status(201).json({ message: 'Aula creada correctamente.', idAula: result.insertId });
   } catch (error) {
+    // Aula tiene UNIQUE (IdAcademia, Nombre): una alta concurrente se reporta
+    // como conflicto, no como error interno.
+    if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Ya existe un aula con ese nombre en esta academia.' });
     console.error('POST /api/aulas:', error);
     res.status(500).json({ error: 'No se pudo crear el aula.' });
   }
@@ -110,13 +112,16 @@ router.put('/aulas/:id', requiereRol('Administrador'), async (req, res) => {
   const idAula = idPositivo(req.params.id);
   if (!idAula) return res.status(400).json({ error: 'El identificador del aula no es vÃ¡lido.' });
   const nombre = normalizarTexto(req.body?.nombre ?? req.body?.Nombre);
-  const nivel = normalizarTexto(req.body?.nivel ?? req.body?.Nivel ?? 'General', 80) || 'General';
+  const nivel = normalizarTexto(req.body?.nivel ?? req.body?.Nivel ?? 'General', 80);
+  if (!nivel) return res.status(400).json({ error: 'El nivel debe contener texto de hasta 80 caracteres.' });
   const capacidad = Number(req.body?.capacidad ?? req.body?.Capacidad ?? 35);
   if (nombre.length < 2) return res.status(400).json({ error: 'El nombre del aula debe tener al menos 2 caracteres.' });
   if (!Number.isInteger(capacidad) || capacidad < 1 || capacidad > 500) {
     return res.status(400).json({ error: 'La capacidad debe ser un entero entre 1 y 500.' });
   }
   try {
+    const [duplicados] = await pool.query('SELECT IdAula FROM Aula WHERE IdAcademia = ? AND Nombre = ? AND IdAula <> ? AND EstadoRegistro = 1 LIMIT 1', [idAcademia, nombre, idAula]);
+    if (duplicados.length) return res.status(409).json({ error: 'Ya existe un aula activa con ese nombre.' });
     const [result] = await pool.query(
       `UPDATE Aula SET Nombre = ?, Nivel = ?, Capacidad = ?
        WHERE IdAula = ? AND IdAcademia = ? AND EstadoRegistro = 1`,
@@ -137,6 +142,11 @@ router.delete('/aulas/:id', requiereRol('Administrador'), async (req, res) => {
   const idAula = idPositivo(req.params.id);
   if (!idAula) return res.status(400).json({ error: 'El identificador del aula no es vÃ¡lido.' });
   try {
+    const [relaciones] = await pool.query(`SELECT aa.IdAula FROM Asignacion_Aula aa INNER JOIN Aula a ON a.IdAula = aa.IdAula
+      WHERE aa.IdAula = ? AND a.IdAcademia = ? AND aa.EstadoRegistro = 1
+      UNION ALL SELECT ast.IdAula FROM Asistencia ast INNER JOIN Aula a ON a.IdAula = ast.IdAula
+      WHERE ast.IdAula = ? AND a.IdAcademia = ? AND ast.EstadoRegistro = 1 LIMIT 1`, [idAula, idAcademia, idAula, idAcademia]);
+    if (relaciones.length) return res.status(409).json({ error: 'El aula tiene asignaciones o asistencias vigentes; no se puede desactivar.' });
     const [result] = await pool.query(
       'UPDATE Aula SET EstadoRegistro = 0 WHERE IdAula = ? AND IdAcademia = ? AND EstadoRegistro = 1',
       [idAula, idAcademia],
@@ -173,8 +183,10 @@ router.get('/cursos', async (_req, res) => {
 router.post('/cursos', requiereRol('Administrador'), async (req, res) => {
   const nombre = normalizarTexto(req.body?.nombre ?? req.body?.Nombre, 100);
   const codigo = normalizarTexto(req.body?.codigo ?? req.body?.Codigo, 20).toUpperCase();
-  const descripcion = String(req.body?.descripcion ?? req.body?.Descripcion ?? '').trim().slice(0, 500);
-  const universidad = normalizarTexto(req.body?.universidadObjetivo ?? req.body?.UniversidadObjetivo ?? 'Preuniversitario', 60) || 'Preuniversitario';
+  const descripcion = req.body?.descripcion ?? req.body?.Descripcion ?? '';
+  if (typeof descripcion !== 'string' || descripcion.length > 255) return res.status(400).json({ error: 'La descripción debe tener hasta 255 caracteres.' });
+  const universidad = normalizarTexto(req.body?.universidadObjetivo ?? req.body?.UniversidadObjetivo ?? 'Preuniversitario', 50);
+  if (!universidad) return res.status(400).json({ error: 'La universidad objetivo debe ser texto de hasta 50 caracteres.' });
   if (nombre.length < 2) return res.status(400).json({ error: 'El nombre del curso debe tener al menos 2 caracteres.' });
   if (!/^[A-Z0-9-]{2,20}$/.test(codigo)) return res.status(400).json({ error: 'El cÃ³digo debe tener entre 2 y 20 letras mayÃºsculas, nÃºmeros o guiones.' });
   try {
@@ -207,6 +219,7 @@ router.post('/cursos', requiereRol('Administrador'), async (req, res) => {
     );
     res.status(201).json({ message: 'Curso creado correctamente.', idCurso: result.insertId });
   } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Ya existe un curso con ese código.' });
     console.error('POST /api/cursos:', error);
     res.status(500).json({ error: 'No se pudo crear el curso.' });
   }
@@ -217,7 +230,8 @@ router.put('/cursos/:id', requiereRol('Administrador'), async (req, res) => {
   if (!idCurso) return res.status(400).json({ error: 'El identificador del curso no es vÃ¡lido.' });
   const nombre = normalizarTexto(req.body?.nombre ?? req.body?.Nombre, 100);
   const codigo = normalizarTexto(req.body?.codigo ?? req.body?.Codigo, 20).toUpperCase();
-  const descripcion = String(req.body?.descripcion ?? req.body?.Descripcion ?? '').trim().slice(0, 500);
+  const descripcion = req.body?.descripcion ?? req.body?.Descripcion ?? '';
+  if (typeof descripcion !== 'string' || descripcion.length > 255) return res.status(400).json({ error: 'La descripción debe tener hasta 255 caracteres.' });
   const universidadSolicitada = req.body?.universidadObjetivo ?? req.body?.UniversidadObjetivo;
   if (nombre.length < 2) return res.status(400).json({ error: 'El nombre del curso debe tener al menos 2 caracteres.' });
   if (!/^[A-Z0-9-]{2,20}$/.test(codigo)) return res.status(400).json({ error: 'El cÃ³digo debe tener entre 2 y 20 letras mayÃºsculas, nÃºmeros o guiones.' });
@@ -227,7 +241,10 @@ router.put('/cursos/:id', requiereRol('Administrador'), async (req, res) => {
       [idCurso],
     );
     if (!cursoExistente) return res.status(404).json({ error: 'Curso no encontrado o inactivo.' });
-    const universidad = normalizarTexto(universidadSolicitada ?? cursoExistente.UniversidadObjetivo ?? 'Preuniversitario', 60) || 'Preuniversitario';
+    const [duplicados] = await pool.query('SELECT IdCurso FROM Curso WHERE Codigo = ? AND IdCurso <> ? AND EstadoRegistro = 1 LIMIT 1', [codigo, idCurso]);
+    if (duplicados.length) return res.status(409).json({ error: 'Ya existe un curso activo con ese código.' });
+    const universidad = normalizarTexto(universidadSolicitada ?? cursoExistente.UniversidadObjetivo ?? 'Preuniversitario', 50);
+    if (!universidad) return res.status(400).json({ error: 'La universidad objetivo debe ser texto de hasta 50 caracteres.' });
     const [result] = await pool.query(
       `UPDATE Curso SET Nombre = ?, Codigo = ?, Descripcion = ?, UniversidadObjetivo = ?
        WHERE IdCurso = ? AND EstadoRegistro = 1`,
@@ -246,6 +263,15 @@ router.delete('/cursos/:id', requiereRol('Administrador'), async (req, res) => {
   const idCurso = idPositivo(req.params.id);
   if (!idCurso) return res.status(400).json({ error: 'El identificador del curso no es vÃ¡lido.' });
   try {
+    // Curso es un catálogo compartido: no tiene IdAcademia, pero sí puede estar
+    // vinculado a ciclos de varias academias. Se bloquean las relaciones activas.
+
+    const [relaciones] = await pool.query(`SELECT IdCurso FROM CicloCurso WHERE IdCurso = ? AND EstadoRegistro = 1
+      UNION ALL SELECT IdCurso FROM HorarioCurso WHERE IdCurso = ? AND EstadoRegistro = 1
+      UNION ALL SELECT IdCurso FROM Asignacion_Aula WHERE IdCurso = ? AND EstadoRegistro = 1
+      UNION ALL SELECT IdCurso FROM MaterialAcademico WHERE IdCurso = ? AND EstadoRegistro = 1
+      UNION ALL SELECT IdCurso FROM Matricula WHERE IdCurso = ? AND EstadoRegistro = 1 LIMIT 1`, [idCurso, idCurso, idCurso, idCurso, idCurso]);
+    if (relaciones.length) return res.status(409).json({ error: 'El curso tiene relaciones académicas activas; desvincúlalas antes de darlo de baja.' });
     const [result] = await pool.query('UPDATE Curso SET EstadoRegistro = 0 WHERE IdCurso = ? AND EstadoRegistro = 1', [idCurso]);
     if (!result.affectedRows) return res.status(404).json({ error: 'Curso no encontrado o ya inactivo.' });
     res.json({ message: 'Curso desactivado correctamente.' });
@@ -282,7 +308,7 @@ router.get('/asignaciones', requiereRol(...ROLES_GESTION), async (req, res) => {
     res.json(rows);
   } catch (error) {
     console.error('GET /api/asignaciones:', error);
-    res.status(500).json({ error: 'No se pudieron consultar las asignaciones. Verifica que la migraciÃ³n acadÃ©mica estÃ© aplicada.' });
+    res.status(500).json({ error: 'No se pudieron consultar las asignaciones.' });
   }
 });
 
@@ -293,6 +319,8 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
   const idCiclo = idPositivo(req.body?.idCiclo ?? req.body?.IdCiclo);
   const idCurso = idPositivo(req.body?.idCurso ?? req.body?.IdCurso);
   const idAulaSolicitada = idPositivo(req.body?.idAula ?? req.body?.IdAula);
+  const aulaRaw = req.body?.idAula ?? req.body?.IdAula;
+  if (aulaRaw != null && aulaRaw !== '' && !idAulaSolicitada) return res.status(400).json({ error: 'El aula indicada no es válida.' });
   let idAula = idAulaSolicitada;
   const horas = Number(req.body?.horas ?? req.body?.Horas ?? 4);
   if (!idUsuario || !idCiclo || !idCurso) {
@@ -300,8 +328,9 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
   }
   if (!Number.isInteger(horas) || horas < 1 || horas > 30) return res.status(400).json({ error: 'Las horas semanales deben estar entre 1 y 30.' });
 
-  const connection = await pool.getConnection();
+  let connection;
   try {
+    connection = await pool.getConnection();
     await connection.beginTransaction();
     const [[docente]] = await connection.query(
       `SELECT u.IdUsuario
@@ -309,7 +338,7 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
        INNER JOIN Usuario_Perfiles up ON up.IdUsuario = u.IdUsuario AND up.EstadoRegistro = 1
        INNER JOIN perfil p ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
        WHERE u.IdUsuario = ? AND u.IdAcademia = ? AND u.EstadoRegistro = 1
-         AND (LOWER(p.Nombre) LIKE '%docente%' OR LOWER(p.Nombre) LIKE '%tutor%')
+          AND (LOWER(p.Nombre) LIKE '%docente%' OR LOWER(p.Nombre) LIKE '%tutor%')
        LIMIT 1`,
       [idUsuario, idAcademia],
     );
@@ -318,11 +347,11 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
       return res.status(400).json({ error: 'El usuario seleccionado no es un docente/tutor activo de esta academia.' });
     }
     const [[ciclo]] = await connection.query(
-      'SELECT IdCiclo, Nombre FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
+      'SELECT IdCiclo, Nombre FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1 FOR UPDATE',
       [idCiclo, idAcademia],
     );
     const [[curso]] = await connection.query(
-      'SELECT IdCurso FROM Curso WHERE IdCurso = ? AND EstadoRegistro = 1 LIMIT 1',
+      'SELECT IdCurso FROM Curso WHERE IdCurso = ? AND EstadoRegistro = 1 LIMIT 1 FOR UPDATE',
       [idCurso],
     );
     if (!ciclo || !curso) {
@@ -330,7 +359,7 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
       return res.status(400).json({ error: 'El ciclo o el curso no existe, estÃ¡ inactivo o no pertenece a esta academia.' });
     }
     const [[cicloCurso]] = await connection.query(
-      'SELECT IdCiclo FROM CicloCurso WHERE IdCiclo = ? AND IdCurso = ? AND EstadoRegistro = 1 LIMIT 1',
+      'SELECT IdCiclo FROM CicloCurso WHERE IdCiclo = ? AND IdCurso = ? AND EstadoRegistro = 1 LIMIT 1 FOR UPDATE',
       [idCiclo, idCurso],
     );
     if (!cicloCurso) {
@@ -372,7 +401,7 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
     const [duplicados] = await connection.query(
       `SELECT IdAsignacion FROM Asignacion_Aula
        WHERE IdAcademia = ? AND IdUsuario = ? AND IdCiclo = ? AND IdCurso = ? AND IdAula = ? AND EstadoRegistro = 1
-       LIMIT 1`,
+       LIMIT 1 FOR UPDATE`,
       [idAcademia, idUsuario, idCiclo, idCurso, idAula],
     );
     if (duplicados.length) {
@@ -387,11 +416,14 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
     await connection.commit();
     res.status(201).json({ message: 'AsignaciÃ³n creada correctamente.', idAsignacion: result.insertId });
   } catch (error) {
-    await connection.rollback();
+    await rollbackSeguro(connection);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'Esta asignación ya existe.' });
+    }
     console.error('POST /api/asignaciones:', error);
-    res.status(500).json({ error: 'No se pudo crear la asignaciÃ³n. Verifica que la migraciÃ³n acadÃ©mica estÃ© aplicada.' });
+    res.status(500).json({ error: 'No se pudo crear la asignación.' });
   } finally {
-    connection.release();
+    if (connection) connection.release();
   }
 });
 
@@ -451,9 +483,11 @@ router.get('/horarios', requiereRol(...ROLES_GESTION), async (req, res) => {
   }
 });
 
-router.post('/horarios', requiereRol('Administrador'), async (req, res) => {
+async function guardarHorario(req, res, editar = false) {
   const idAcademia = academiaDelUsuario(req, res);
   if (!idAcademia) return;
+  const idHorario = editar ? idPositivo(req.params.id) : 0;
+  if (editar && !idHorario) return res.status(400).json({ error: 'El identificador del horario no es válido.' });
   const idCiclo = idPositivo(req.body?.idCiclo ?? req.body?.IdCiclo);
   const idCurso = idPositivo(req.body?.idCurso ?? req.body?.IdCurso);
   const diaNumero = Number(req.body?.diaNumero ?? req.body?.DiaNumero);
@@ -465,74 +499,76 @@ router.post('/horarios', requiereRol('Administrador'), async (req, res) => {
   if (!Number.isInteger(diaNumero) || diaNumero < 1 || diaNumero > 7) return res.status(400).json({ error: 'El día debe estar entre 1 y 7.' });
   if (!diaSemana) return res.status(400).json({ error: 'Indica el nombre del día.' });
   if (!horaInicio || horaInicio === undefined || !horaFin || horaFin === undefined) return res.status(400).json({ error: 'Las horas deben tener formato HH:mm.' });
-  if (horaInicio >= horaFin) return res.status(400).json({ error: 'La hora de inicio debe ser anterior a la hora de fin.' });
+  const inicio = horaInicio.length === 5 ? `${horaInicio}:00` : horaInicio;
+  const fin = horaFin.length === 5 ? `${horaFin}:00` : horaFin;
+  if (inicio >= fin) return res.status(400).json({ error: 'La hora de inicio debe ser anterior a la hora de fin.' });
   if (!Number.isInteger(orden) || orden < 1 || orden > 100) return res.status(400).json({ error: 'El orden debe ser un entero entre 1 y 100.' });
+  const dias = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
+  const normalizarDia = (s) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  if (normalizarDia(diaSemana) !== normalizarDia(dias[diaNumero - 1])) return res.status(400).json({ error: 'El nombre del día no coincide con DiaNumero.' });
+  let connection;
   try {
-    const [[ciclo]] = await pool.query(
-      'SELECT IdCiclo FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    // Serializa también cambios de ciclo para que dos altas concurrentes no se solapen.
+    await connection.query('SELECT IdAcademia FROM Academia WHERE IdAcademia = ? FOR UPDATE', [idAcademia]);
+    const [[ciclo]] = await connection.query(
+      'SELECT IdCiclo FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1 FOR UPDATE',
       [idCiclo, idAcademia],
     );
-    const [[curso]] = await pool.query(
-      'SELECT IdCurso FROM Curso WHERE IdCurso = ? AND EstadoRegistro = 1 LIMIT 1',
-      [idCurso],
+    const [[curso]] = await connection.query(
+      `SELECT cu.IdCurso FROM Curso cu INNER JOIN CicloCurso cc ON cc.IdCurso = cu.IdCurso
+       WHERE cu.IdCurso = ? AND cc.IdCiclo = ? AND cu.EstadoRegistro = 1 AND cc.EstadoRegistro = 1 LIMIT 1 FOR UPDATE`,
+      [idCurso, idCiclo],
     );
-    if (!ciclo || !curso) return res.status(400).json({ error: 'El ciclo o curso no existe, está inactivo o no pertenece a esta academia.' });
-    const [result] = await pool.query(
+    if (!ciclo || !curso) {
+      await connection.rollback();
+      return res.status(400).json({ error: 'El ciclo no pertenece a tu academia o el curso no está activo y vinculado mediante CicloCurso.' });
+    }
+    if (editar) {
+      const [[actual]] = await connection.query(
+        `SELECT h.IdHorario FROM HorarioCurso h INNER JOIN Ciclo c ON c.IdCiclo = h.IdCiclo
+         WHERE h.IdHorario = ? AND c.IdAcademia = ? AND h.EstadoRegistro = 1 FOR UPDATE`, [idHorario, idAcademia],
+      );
+      if (!actual) { await connection.rollback(); return res.status(404).json({ error: 'Horario no encontrado en esta academia.' }); }
+    }
+    const [solapados] = await connection.query(
+      `SELECT IdHorario FROM HorarioCurso WHERE IdCiclo = ? AND DiaNumero = ? AND EstadoRegistro = 1
+       AND IdHorario <> ? AND HoraInicio < ? AND HoraFin > ? LIMIT 1 FOR UPDATE`,
+      [idCiclo, diaNumero, idHorario, fin, inicio],
+    );
+    if (solapados.length) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'El horario se solapa con otro del mismo ciclo y día.' });
+    }
+    let result;
+    if (editar) {
+      [result] = await connection.query(
+        `UPDATE HorarioCurso SET IdCiclo = ?, IdCurso = ?, DiaNumero = ?, DiaSemana = ?, HoraInicio = ?, HoraFin = ?, Orden = ?
+         WHERE IdHorario = ? AND EstadoRegistro = 1`,
+        [idCiclo, idCurso, diaNumero, dias[diaNumero - 1], inicio, fin, orden, idHorario],
+      );
+    } else {
+      [result] = await connection.query(
       `INSERT INTO HorarioCurso
-         (IdCiclo, IdCurso, DiaNumero, DiaSemana, HoraInicio, HoraFin, Orden, EstadoRegistro)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
-      [idCiclo, idCurso, diaNumero, diaSemana, horaInicio, horaFin, orden],
+          (IdCiclo, IdCurso, DiaNumero, DiaSemana, HoraInicio, HoraFin, Orden, EstadoRegistro)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+      [idCiclo, idCurso, diaNumero, dias[diaNumero - 1], inicio, fin, orden],
     );
-    res.status(201).json({ message: 'Horario creado correctamente.', idHorario: result.insertId });
+    }
+    await connection.commit();
+    res.status(editar ? 200 : 201).json({ message: editar ? 'Horario actualizado correctamente.' : 'Horario creado correctamente.', idHorario: editar ? idHorario : result.insertId });
   } catch (error) {
-    console.error('POST /api/horarios:', error);
-    res.status(500).json({ error: 'No se pudo crear el horario.' });
+    await rollbackSeguro(connection);
+    console.error('Guardar horario:', error);
+    res.status(500).json({ error: 'No se pudo guardar el horario.' });
+  } finally {
+    if (connection) connection.release();
   }
-});
+}
+router.post('/horarios', requiereRol('Administrador'), (req, res) => guardarHorario(req, res));
 
-router.put('/horarios/:id', requiereRol('Administrador'), async (req, res) => {
-  const idAcademia = academiaDelUsuario(req, res);
-  if (!idAcademia) return;
-  const idHorario = idPositivo(req.params.id);
-  const idCiclo = idPositivo(req.body?.idCiclo ?? req.body?.IdCiclo);
-  const idCurso = idPositivo(req.body?.idCurso ?? req.body?.IdCurso);
-  const diaNumero = Number(req.body?.diaNumero ?? req.body?.DiaNumero);
-  const diaSemana = normalizarTexto(req.body?.diaSemana ?? req.body?.DiaSemana, 20);
-  const horaInicio = horaValida(req.body?.horaInicio ?? req.body?.HoraInicio);
-  const horaFin = horaValida(req.body?.horaFin ?? req.body?.HoraFin);
-  const orden = Number(req.body?.orden ?? req.body?.Orden ?? 1);
-  if (!idHorario) return res.status(400).json({ error: 'El identificador del horario no es válido.' });
-  if (!idCiclo || !idCurso) return res.status(400).json({ error: 'Selecciona un ciclo y curso válidos.' });
-  if (!Number.isInteger(diaNumero) || diaNumero < 1 || diaNumero > 7) return res.status(400).json({ error: 'El día debe estar entre 1 y 7.' });
-  if (!diaSemana) return res.status(400).json({ error: 'Indica el nombre del día.' });
-  if (!horaInicio || horaInicio === undefined || !horaFin || horaFin === undefined) return res.status(400).json({ error: 'Las horas deben tener formato HH:mm.' });
-  if (horaInicio >= horaFin) return res.status(400).json({ error: 'La hora de inicio debe ser anterior a la hora de fin.' });
-  if (!Number.isInteger(orden) || orden < 1 || orden > 100) return res.status(400).json({ error: 'El orden debe ser un entero entre 1 y 100.' });
-  try {
-    const [[ciclo]] = await pool.query(
-      'SELECT IdCiclo FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1',
-      [idCiclo, idAcademia],
-    );
-    const [[curso]] = await pool.query(
-      'SELECT IdCurso FROM Curso WHERE IdCurso = ? AND EstadoRegistro = 1 LIMIT 1',
-      [idCurso],
-    );
-    if (!ciclo || !curso) return res.status(400).json({ error: 'El ciclo o curso no existe, está inactivo o no pertenece a esta academia.' });
-    const [result] = await pool.query(
-      `UPDATE HorarioCurso h
-       INNER JOIN Ciclo c ON c.IdCiclo = h.IdCiclo
-       SET h.IdCiclo = ?, h.IdCurso = ?, h.DiaNumero = ?, h.DiaSemana = ?,
-           h.HoraInicio = ?, h.HoraFin = ?, h.Orden = ?
-       WHERE h.IdHorario = ? AND c.IdAcademia = ? AND h.EstadoRegistro = 1`,
-      [idCiclo, idCurso, diaNumero, diaSemana, horaInicio, horaFin, orden, idHorario, idAcademia],
-    );
-    if (!result.affectedRows) return res.status(404).json({ error: 'Horario no encontrado en esta academia.' });
-    res.json({ message: 'Horario actualizado correctamente.', idHorario });
-  } catch (error) {
-    console.error('PUT /api/horarios/:id:', error);
-    res.status(500).json({ error: 'No se pudo actualizar el horario.' });
-  }
-});
+router.put('/horarios/:id', requiereRol('Administrador'), (req, res) => guardarHorario(req, res, true));
 
 router.delete('/horarios/:id', requiereRol('Administrador'), async (req, res) => {
   const idAcademia = academiaDelUsuario(req, res);
@@ -619,7 +655,7 @@ router.get('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
     res.json(rows);
   } catch (error) {
     console.error('GET /api/asistencias:', error);
-    res.status(500).json({ error: 'No se pudo consultar la asistencia. Verifica la estructura de la tabla Asistencia.' });
+    res.status(500).json({ error: 'No se pudo consultar la asistencia.' });
   }
 });
 
@@ -648,8 +684,9 @@ router.post('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
     registros.push({ idMatricula, estado, hora: ['presente', 'tardanza'].includes(estado) ? hora : null });
   }
 
-  const connection = await pool.getConnection();
+  let connection;
   try {
+    connection = await pool.getConnection();
     await connection.beginTransaction();
     let idAula = idAulaSolicitada;
     if (idCiclo) {
@@ -698,6 +735,10 @@ router.post('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
     const placeholders = registros.map(() => '?').join(',');
     const parametrosMatriculas = [idAcademia, ...(idCiclo ? [idCiclo] : []), ...registros.map((r) => r.idMatricula)];
     const whereCiclo = idCiclo ? 'AND m.IdCiclo = ?' : '';
+    const whereAula = !idCiclo && idAulaSolicitada ? `AND EXISTS (SELECT 1 FROM Asignacion_Aula aa
+      WHERE aa.IdCiclo = m.IdCiclo AND aa.IdAula = ? AND aa.IdAcademia = u.IdAcademia
+        AND aa.EstadoRegistro = 1 AND (aa.IdCurso IS NULL OR m.IdCurso IS NULL OR m.IdCurso = aa.IdCurso))` : '';
+    if (whereAula) parametrosMatriculas.push(idAulaSolicitada);
     const [permitidas] = await connection.query(
       `SELECT DISTINCT m.IdMatricula
        FROM Matricula m
@@ -705,7 +746,7 @@ router.post('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
        INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo AND c.IdAcademia = u.IdAcademia
        WHERE u.IdAcademia = ? AND u.EstadoRegistro = 1 AND m.EstadoRegistro = 1
          AND c.EstadoRegistro = 1 ${whereCiclo}
-         AND m.IdMatricula IN (${placeholders})`,
+          AND m.IdMatricula IN (${placeholders}) ${whereAula}`,
       parametrosMatriculas,
     );
     const permitidasSet = new Set(permitidas.map((r) => Number(r.IdMatricula)));
@@ -730,11 +771,11 @@ router.post('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
     await connection.commit();
     res.json({ message: 'Asistencia del ciclo guardada correctamente.', registrosGuardados: registros.length, idCiclo: idCiclo || null });
   } catch (error) {
-    await connection.rollback();
+    await rollbackSeguro(connection);
     console.error('POST /api/asistencias:', error);
-    res.status(500).json({ error: 'No se pudo guardar la asistencia. Verifica la estructura de la tabla Asistencia.' });
+    res.status(500).json({ error: 'No se pudo guardar la asistencia.' });
   } finally {
-    connection.release();
+    if (connection) connection.release();
   }
 });
 module.exports = router;

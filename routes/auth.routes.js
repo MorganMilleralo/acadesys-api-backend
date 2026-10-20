@@ -4,6 +4,7 @@ const router = express.Router();
 const pool = require("../config/db");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
+const { validarDatosUsuario, usuarioDuplicado, bloquearIdentidades, rollbackSeguro, idPositivo } = require('../utils/validaciones');
 
 const universidadDesdeNombre = (nombre = "") => {
   const n = String(nombre).toLowerCase();
@@ -42,7 +43,8 @@ const obtenerPerfilPorNombre = async (connection, nombre) => {
 // REGISTRO PÚBLICO: SOLO ALUMNO
 // ==========================================
 const registerHandler = async (req, res) => {
-  const connection = await pool.getConnection();
+  let connection;
+  let enTransaccion = false;
 
   try {
     const {
@@ -63,35 +65,22 @@ const registerHandler = async (req, res) => {
       password,
     } = req.body || {};
 
-    const docIdentidad =
-      String(DNI || dni || "")
-        .trim()
-        .slice(0, 8) || null;
-    const nom = String(Nombres || nombre || "").trim();
-    const apeP = String(ApellidoPaterno || apellido || "").trim();
-    const apeM = String(ApellidoMaterno || apellidoMaterno || "").trim();
-    const tel = String(Celular || celular || "").trim();
-    const email = String(CorreoElectronico || correo || "")
-      .trim()
-      .toLowerCase();
-    const rawClave = String(Clave || contrasena || password || "").trim();
+    const validado = validarDatosUsuario({ DNI: DNI ?? dni, Nombres: Nombres ?? nombre,
+      ApellidoPaterno: ApellidoPaterno ?? apellido, ApellidoMaterno: ApellidoMaterno ?? apellidoMaterno,
+      Celular: Celular ?? celular, CorreoElectronico: CorreoElectronico ?? correo, Clave: Clave ?? contrasena ?? password }, { crear: true });
+    if (validado.error) return res.status(400).json({ error: validado.error });
+    const { DNI: docIdentidad, Nombres: nom, ApellidoPaterno: apeP, ApellidoMaterno: apeM,
+      Celular: tel, CorreoElectronico: email, Clave: rawClave } = validado.datos;
+    const idAcademia = idPositivo(process.env.PUBLIC_REGISTRATION_ACADEMY_ID || 1);
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    enTransaccion = true;
+    await bloquearIdentidades(connection);
+    const [[academia]] = await connection.query('SELECT IdAcademia FROM Academia WHERE IdAcademia = ?', [idAcademia]);
+    if (!academia) { await connection.rollback(); return res.status(503).json({ error: 'El registro no está disponible temporalmente.' }); }
 
-    if (!nom || !apeP || !email || !rawClave) {
-      return res.status(400).json({
-        error: "Nombres, apellido, correo y contraseña son obligatorios.",
-      });
-    }
-
-    const [existentes] = await connection.query(
-      `SELECT IdUsuario
-         FROM Usuario
-        WHERE LOWER(CorreoElectronico) = ?
-           OR (? IS NOT NULL AND DNI = ?)
-        LIMIT 1`,
-      [email, docIdentidad, docIdentidad],
-    );
-
-    if (existentes.length > 0) {
+    if (await usuarioDuplicado(connection, validado.datos)) {
+      await connection.rollback();
       return res.status(409).json({
         error: "El correo electrónico o DNI ya se encuentra registrado.",
       });
@@ -99,9 +88,9 @@ const registerHandler = async (req, res) => {
 
     const idPerfilAlumno = await obtenerPerfilPorNombre(connection, "Alumno");
     if (!idPerfilAlumno) {
-      return res.status(500).json({
-        error: "No existe el perfil Alumno en la base de datos.",
-      });
+      await connection.rollback();
+      console.error('Registro público: perfil Alumno no configurado.');
+      return res.status(503).json({ error: 'El registro no está disponible temporalmente.' });
     }
 
     const claveHasheada = await bcrypt.hash(rawClave, 10);
@@ -111,8 +100,6 @@ const registerHandler = async (req, res) => {
         .replace(/[\u0300-\u036f]/g, "")
         .replace(/[^A-Za-z0-9]/g, "")
         .slice(0, 28) || "ALUMNO";
-
-    await connection.beginTransaction();
 
     let codigoUsuario = "";
     for (let intento = 0; intento < 10; intento += 1) {
@@ -139,8 +126,8 @@ const registerHandler = async (req, res) => {
       `INSERT INTO Usuario
         (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular,
          CorreoElectronico, Clave, FechaCreacion, EstadoRegistro, IdAcademia)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1, 1)`,
-      [codigoUsuario, docIdentidad, nom, apeP, apeM, tel, email, claveHasheada],
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1, ?)`,
+      [codigoUsuario, docIdentidad, nom, apeP, apeM, tel, email, claveHasheada, idAcademia],
     );
 
     const nuevoIdUsuario = resUser.insertId;
@@ -152,6 +139,7 @@ const registerHandler = async (req, res) => {
     );
 
     await connection.commit();
+    enTransaccion = false;
 
     res.status(201).json({
       mensaje: "Alumno registrado exitosamente.",
@@ -162,13 +150,13 @@ const registerHandler = async (req, res) => {
       usuario: `${nom} ${apeP}`,
     });
   } catch (error) {
-    await connection.rollback();
+    if (enTransaccion) await rollbackSeguro(connection);
     console.error("Error en registro público:", error.message);
     res
       .status(500)
-      .json({ error: "Error al registrar el alumno: " + error.message });
+      .json({ error: 'No se pudo registrar el alumno.' });
   } finally {
-    connection.release();
+    if (connection) connection.release();
   }
 };
 
@@ -191,14 +179,14 @@ const loginHandler = async (req, res) => {
       req.body?.clave ||
       req.body?.contrasena;
 
-    if (!usuarioInput || !passwordInput) {
+    if (!usuarioInput || !passwordInput || typeof passwordInput !== 'string' || !['string', 'number'].includes(typeof usuarioInput)) {
       return res.status(400).json({
         error: "Debes enviar usuario/código/correo/DNI y contraseña.",
       });
     }
 
     const termino = String(usuarioInput).trim();
-    const clave = String(passwordInput).trim();
+    const clave = String(passwordInput);
     const termLower = termino.toLowerCase();
 
     const [rows] = await pool.query(
@@ -260,14 +248,13 @@ const loginHandler = async (req, res) => {
         termLower,
         termLower,
         termLower,
-        termLower,
         termino,
       ],
     );
 
     if (rows.length === 0) {
       return res.status(401).json({
-        error: "Usuario, código, correo o DNI no encontrado.",
+        error: "Credenciales incorrectas.",
       });
     }
 
@@ -286,7 +273,7 @@ const loginHandler = async (req, res) => {
     }
 
     if (!claveValida) {
-      return res.status(401).json({ error: "Contraseña incorrecta." });
+      return res.status(401).json({ error: "Credenciales incorrectas." });
     }
 
     // No emitir sesión si el usuario no tiene un perfil ACTIVO vigente.

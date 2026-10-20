@@ -5,6 +5,7 @@ const pool = require("../config/db");
 const requiereRol = require("../middlewares/roles.middleware");
 const verificarPeriodoAbierto = require("../middlewares/cierre.middleware");
 const { requiereGestionNotas, autorizarHistorialAlumno } = require("../middlewares/notas-acceso.middleware");
+const { calificacionEntera, idPositivo, rollbackSeguro } = require('../utils/validaciones');
 
 /* ============================================================
    🛡️ MAPA DE ESCALAS POR UNIVERSIDAD OBJETIVO (Backend, no se toca)
@@ -44,6 +45,7 @@ router.get("/", requiereGestionNotas, async (req, res) => {
   try {
     const [rows] = await pool.query(
       `SELECT e.IdEvaluacion, e.IdMatricula, e.TipoEvaluacion, e.Periodo, e.Calificacion, e.FechaCreacion,
+              e.EstadoRegistro AS EstadoRegistro,
               u.CodigoUsuario, CONCAT(u.Nombres, ' ', u.ApellidoPaterno) AS Alumno,
               COALESCE(c.Nombre, 'Simulacro General') AS Curso,
               ci.Nombre AS Ciclo,
@@ -52,14 +54,14 @@ router.get("/", requiereGestionNotas, async (req, res) => {
        INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
        INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
        LEFT JOIN Curso c ON m.IdCurso = c.IdCurso
-       LEFT JOIN Ciclo ci ON m.IdCiclo = ci.IdCiclo
-       WHERE e.EstadoRegistro = 1 AND u.IdAcademia = ?`,
+       INNER JOIN Ciclo ci ON ci.IdCiclo = m.IdCiclo AND ci.IdAcademia = u.IdAcademia
+        WHERE e.EstadoRegistro IN (1, 2) AND u.IdAcademia = ?`,
       [req.usuario.idAcademia],
     );
     res.json(rows);
   } catch (error) {
     console.error("Error en GET /notas:", error.message);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'No se pudieron consultar las notas.' });
   }
 });
 
@@ -107,7 +109,7 @@ router.get("/contexto/:idCiclo", requiereGestionNotas, async (req, res) => {
     });
   } catch (error) {
     console.error("Error en GET /notas/contexto/:idCiclo:", error.message);
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: 'No se pudo consultar el contexto de notas.' });
   }
 });
 
@@ -153,7 +155,7 @@ router.get("/matriculas/:idCiclo", requiereGestionNotas, async (req, res) => {
     );
   } catch (error) {
     console.error("Error en GET /notas/matriculas/:idCiclo:", error.message);
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: 'No se pudieron consultar las matrículas.' });
   }
 });
 
@@ -167,13 +169,16 @@ router.get("/alumno/:id", autorizarHistorialAlumno, async (req, res) => {
     const [notas] = await pool.query(
       `SELECT COALESCE(c.Nombre, 'Simulacro General') AS Curso,
               e.TipoEvaluacion, e.Periodo, e.Calificacion, e.FechaCreacion,
+              e.EstadoRegistro AS EstadoRegistro,
               ci.UniversidadObjetivo, ci.Nombre AS Ciclo
        FROM Evaluacion e
        INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
-       LEFT JOIN Curso c ON m.IdCurso = c.IdCurso
-       LEFT JOIN Ciclo ci ON m.IdCiclo = ci.IdCiclo
        INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
-       WHERE u.IdUsuario = ? AND u.IdAcademia = ? AND e.EstadoRegistro = 1`,
+       LEFT JOIN Curso c ON m.IdCurso = c.IdCurso
+       INNER JOIN Ciclo ci ON ci.IdCiclo = m.IdCiclo AND ci.IdAcademia = u.IdAcademia
+        WHERE u.IdUsuario = ? AND u.IdAcademia = ?
+          AND e.EstadoRegistro IN (1, 2)
+        ORDER BY e.FechaCreacion DESC, e.IdEvaluacion DESC`,
       [id, req.usuario.idAcademia],
     );
 
@@ -198,7 +203,7 @@ router.get("/alumno/:id", autorizarHistorialAlumno, async (req, res) => {
     });
   } catch (error) {
     console.error("Error en GET /notas/alumno/:id:", error.message);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'No se pudo consultar el historial de notas.' });
   }
 });
 
@@ -210,9 +215,10 @@ router.post(
   requiereRol("Docente", "Tutor de Aula", "Administrador"),
   verificarPeriodoAbierto,
   async (req, res) => {
-    const idCiclo = Number(req.body?.idCiclo ?? req.body?.IdCiclo);
+    const idCiclo = idPositivo(req.body?.idCiclo ?? req.body?.IdCiclo);
     const { notas } = req.body || {};
-    const periodo = String(req.body?.periodo ?? req.body?.Periodo ?? 'General').trim().replace(/\s+/g, ' ');
+    const periodoRaw = req.body?.periodo !== undefined ? req.body.periodo : req.body?.Periodo !== undefined ? req.body.Periodo : 'General';
+    const periodo = typeof periodoRaw === 'string' ? periodoRaw.trim().replace(/\s+/g, ' ') : '';
     const idUsuario = req.usuario.idUsuario ?? req.usuario.id;
     const idAcademia = Number(req.usuario.idAcademia);
 
@@ -231,9 +237,11 @@ router.post(
         .status(400)
         .json({ error: 'Debes enviar un arreglo "notas" con al menos un registro.' });
     }
+    if (notas.length > 500) return res.status(413).json({ error: 'El lote de notas supera 500 registros.' });
 
-    const connection = await pool.getConnection();
+    let connection;
     try {
+      connection = await pool.getConnection();
       await connection.beginTransaction();
 
       /* ---------- 1. Universidad objetivo del ciclo ---------- */
@@ -257,21 +265,17 @@ router.post(
       const maxPermitido = obtenerMaximoPermitido(uniObjetivo);
 
       /* ---------- 2. Validación estricta + verificación de matrículas ---------- */
+      const claves = new Set();
       for (const nota of notas) {
-        const califRaw = nota.Calificacion;
-        const calif = Number(califRaw);
+        const calif = calificacionEntera(nota?.Calificacion);
 
         // 2.1 Bloqueo de NaN, null, vacío, infinito
         if (
-          califRaw === null ||
-          califRaw === undefined ||
-          califRaw === "" ||
-          Number.isNaN(calif) ||
-          !Number.isFinite(calif)
+          calif === null
         ) {
           await connection.rollback();
           return res.status(400).json({
-            error: `Registro rechazado. La calificación (${califRaw}) no es un número válido.`,
+            error: 'La calificación debe ser un número entero no negativo; no se admiten vacíos ni decimales.',
           });
         }
 
@@ -284,7 +288,7 @@ router.post(
         }
 
         // 2.3 IdMatricula obligatorio
-        const idMat = Number(nota.IdMatricula);
+        const idMat = idPositivo(nota.IdMatricula);
         if (!Number.isInteger(idMat) || idMat <= 0) {
           await connection.rollback();
           return res.status(400).json({
@@ -324,6 +328,20 @@ router.post(
             error: `La matrícula ${idMat} no pertenece al ciclo ${idCiclo} o a tu academia.`,
           });
         }
+
+        const clave = `${idMat}:${tipo}`;
+        // COALESCE(Periodo,'General') cubre notas antiguas con Periodo NULL.
+        const [duplicadas] = await connection.query(
+          `SELECT IdEvaluacion FROM Evaluacion
+           WHERE IdMatricula = ? AND COALESCE(Periodo, 'General') = ? AND TipoEvaluacion = ?
+             AND EstadoRegistro IN (1, 2) LIMIT 1 FOR UPDATE`,
+          [idMat, periodo, tipo],
+        );
+        if (claves.has(clave) || duplicadas.length) {
+          await connection.rollback();
+          return res.status(409).json({ error: 'Ya existe una evaluación registrada para este alumno, periodo y tipo.' });
+        }
+        claves.add(clave);
 
         // Un cierre se aplica por ciclo + curso + periodo + tipo. La fila de
         // Ciclo ya está bloqueada en esta transacción, igual que en actas.routes.
@@ -367,11 +385,11 @@ router.post(
         periodo,
       });
     } catch (error) {
-      await connection.rollback();
+      await rollbackSeguro(connection);
       console.error("Error en POST /notas:", error.message);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: 'No se pudieron registrar las notas.' });
     } finally {
-      connection.release();
+      if (connection) connection.release();
     }
   },
 );
@@ -384,28 +402,23 @@ router.put(
   requiereRol("Docente", "Tutor de Aula", "Administrador"),
   verificarPeriodoAbierto,
   async (req, res) => {
-    const { id } = req.params;
-    const califRaw = req.body.Calificacion;
-    const calif = Number(califRaw);
-    const idUsuario = req.usuario.id;
+    const id = idPositivo(req.params.id);
+    const calif = calificacionEntera(req.body?.Calificacion);
+    const idUsuario = req.usuario.idUsuario ?? req.usuario.id;
     const idAcademia = req.usuario.idAcademia;
 
     // Validación numérica básica antes de tocar la BD
     if (
-      califRaw === null ||
-      califRaw === undefined ||
-      califRaw === "" ||
-      Number.isNaN(calif) ||
-      !Number.isFinite(calif) ||
-      calif < 0
+      !id || calif === null
     ) {
       return res.status(400).json({
-        error: `Registro rechazado. La calificación (${califRaw}) no es un número válido.`,
+        error: 'Indica una evaluación válida y una calificación entera no negativa; no se admiten vacíos ni decimales.',
       });
     }
 
-    const connection = await pool.getConnection();
+    let connection;
     try {
+      connection = await pool.getConnection();
       await connection.beginTransaction();
 
       /* ---------- 1. Obtener la universidad objetivo del ciclo de esa evaluación ---------- */
@@ -418,7 +431,9 @@ router.put(
          INNER JOIN Ciclo ci ON m.IdCiclo = ci.IdCiclo
          WHERE e.IdEvaluacion = ?
            AND u.IdAcademia = ?
-           AND e.EstadoRegistro = 1
+            AND ci.IdAcademia = u.IdAcademia
+            AND m.EstadoRegistro = 1 AND u.EstadoRegistro = 1
+            AND e.EstadoRegistro IN (1, 2)
          LIMIT 1`,
         [id, idAcademia],
       );
@@ -444,6 +459,14 @@ router.put(
         return res.status(404).json({ error: 'El ciclo de la evaluación no está disponible para esta academia.' });
       }
 
+      // Lectura bloqueante actual: el cierre pudo terminar mientras esperábamos al ciclo.
+      const [[estadoActual]] = await connection.query(
+        'SELECT EstadoRegistro FROM Evaluacion WHERE IdEvaluacion = ? FOR UPDATE', [id],
+      );
+      if (!estadoActual || Number(estadoActual.EstadoRegistro) !== 1) {
+        await connection.rollback();
+        return res.status(403).json({ error: 'Esta evaluación está cerrada o no admite modificaciones.' });
+      }
       const [cierres] = await connection.query(
         `SELECT IdCierre FROM Auditoria_Cierres
          WHERE IdCiclo = ? AND IdCurso <=> ? AND Periodo = ? AND TipoEvaluacion = ?
@@ -472,7 +495,7 @@ router.put(
          INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
          INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
          SET e.Calificacion = ?, e.UsuarioModificacion = ?, e.FechaModificacion = NOW()
-         WHERE e.IdEvaluacion = ? AND u.IdAcademia = ?`,
+          WHERE e.IdEvaluacion = ? AND u.IdAcademia = ? AND e.EstadoRegistro = 1`,
         [calif, idUsuario, id, idAcademia],
       );
 
@@ -490,11 +513,11 @@ router.put(
         escalaMaxima: maxPermitido,
       });
     } catch (error) {
-      await connection.rollback();
+      await rollbackSeguro(connection);
       console.error("Error en PUT /notas/:id:", error.message);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: 'No se pudo actualizar la nota.' });
     } finally {
-      connection.release();
+      if (connection) connection.release();
     }
   },
 );

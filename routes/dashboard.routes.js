@@ -86,7 +86,7 @@ router.get('/dashboard/overview', async (req, res) => {
           INNER JOIN Usuario u2 ON u2.IdUsuario = m2.IdUsuario
           WHERE m2.IdCiclo = c.IdCiclo
             AND m2.EstadoRegistro = 1
-            AND e.EstadoRegistro = 1
+            AND e.EstadoRegistro IN (1, 2)
             AND u2.IdAcademia = ?
         ) AS TotalEvaluaciones
       FROM Ciclo c
@@ -131,7 +131,7 @@ router.get('/dashboard/overview', async (req, res) => {
         AND m.EstadoRegistro = 1
         AND c.IdAcademia = ?
         AND c.EstadoRegistro = 1
-        AND e.EstadoRegistro = 1
+        AND e.EstadoRegistro IN (1, 2)
       GROUP BY c.IdCiclo, c.Nombre, c.UniversidadObjetivo
       ORDER BY c.Nombre ASC
     `, [idAcademia, idAcademia]);

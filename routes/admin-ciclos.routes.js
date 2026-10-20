@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
+const { rollbackSeguro, bloquearIdentidades } = require('../utils/validaciones');
 
 const {
   validarNombreCiclo,
@@ -104,8 +105,10 @@ function validarDatosCiclo(data, { esCreacion = true } = {}) {
   const hoy = new Date();
   hoy.setHours(0, 0, 0, 0);
   if (esCreacion && data.fechaInicio) {
-    const inicio = new Date(`${data.fechaInicio}T00:00:00`);
-    if (inicio < hoy) {
+    // Comparación en UTC para no desplazar el día por la zona horaria del servidor.
+    const inicio = new Date(`${data.fechaInicio}T00:00:00Z`);
+    const hoyUtc = new Date(`${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}-${String(hoy.getDate()).padStart(2, '0')}T00:00:00Z`);
+    if (inicio < hoyUtc) {
       return 'No se puede crear un ciclo con fecha de inicio anterior a la fecha actual.';
     }
   }
@@ -320,6 +323,19 @@ function obtenerCursosSeleccionados(body = {}) {
 
 async function reemplazarCursosCiclo(connection, idCiclo, ids) {
   if (ids === null) return;
+  const condicion = ids.length ? ` AND IdCurso NOT IN (${ids.map(() => '?').join(',')})` : '';
+  const parametros = [];
+  const tablas = ['HorarioCurso', 'Asignacion_Aula', 'MaterialAcademico', 'Matricula'];
+  const union = tablas.map((tabla) => {
+    parametros.push(idCiclo, ...ids);
+    return `SELECT IdCurso FROM ${tabla} WHERE IdCiclo = ? AND EstadoRegistro = 1 AND IdCurso IS NOT NULL${condicion}`;
+  }).join(' UNION ALL ');
+  const [dependencias] = await connection.query(`${union} LIMIT 1`, parametros);
+  if (dependencias.length) {
+    const error = new Error('No se puede retirar un curso con horarios, asignaciones, materiales o matrículas activas.');
+    error.code = 'CICLO_CURSO_EN_USO';
+    throw error;
+  }
   if (ids.length) {
     const placeholders = ids.map(() => '?').join(',');
     const [cursosValidos] = await connection.query(
@@ -350,9 +366,11 @@ router.post('/', async (req, res) => {
   if (cursosParseados?.error) return res.status(400).json({ error: cursosParseados.error });
   const cursosSeleccionados = cursosParseados?.ids ?? [];
 
-  const connection = await pool.getConnection();
+  let connection;
   try {
+    connection = await pool.getConnection();
     await connection.beginTransaction();
+    await bloquearIdentidades(connection);
 
     const [duplicados] = await connection.query(`
       SELECT IdCiclo
@@ -401,11 +419,16 @@ router.post('/', async (req, res) => {
       estadoRegistro,
     });
   } catch (error) {
-    await connection.rollback();
+    await rollbackSeguro(connection);
     console.error('Error en POST /api/admin/ciclos:', error);
-    res.status(error.code === 'CICLO_CURSOS_INVALIDOS' ? 400 : 500).json({ error: error.code === 'CICLO_CURSOS_INVALIDOS' ? error.message : 'No se pudo crear el ciclo.', detalle: error.code === 'ER_DUP_ENTRY' ? 'Existe un registro duplicado.' : undefined });
+    // Solo los errores de dominio muestran su mensaje; el resto es genérico.
+    const esDominio = error.code === 'CICLO_CURSOS_INVALIDOS' || error.code === 'CICLO_CURSO_EN_USO';
+    const status = error.code === 'CICLO_CURSOS_INVALIDOS' ? 400 : ['CICLO_CURSO_EN_USO', 'ER_DUP_ENTRY'].includes(error.code) ? 409 : 500;
+    res.status(status).json({
+      error: esDominio ? error.message : status === 409 ? 'Ya existe un ciclo con ese nombre.' : 'No se pudo crear el ciclo.',
+    });
   } finally {
-    connection.release();
+    if (connection) connection.release();
   }
 });
 
@@ -415,9 +438,12 @@ router.put('/:id', async (req, res) => {
   const idAcademia = req.usuario.idAcademia;
   if (!Number.isInteger(idCiclo) || idCiclo <= 0) return res.status(400).json({ error: 'IdCiclo inválido.' });
 
-  const connection = await pool.getConnection();
+  let connection;
   try {
+    connection = await pool.getConnection();
     await connection.beginTransaction();
+    await bloquearIdentidades(connection);
+    await connection.query('SELECT IdCiclo FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? FOR UPDATE', [idCiclo, idAcademia]);
 
     const existente = await obtenerCicloAcademia(idCiclo, idAcademia, connection);
     if (!existente) {
@@ -505,11 +531,13 @@ router.put('/:id', async (req, res) => {
 
     res.json({ message: 'Ciclo actualizado correctamente.', idCiclo });
   } catch (error) {
-    await connection.rollback();
+    await rollbackSeguro(connection);
     console.error('Error en PUT /api/admin/ciclos/:id:', error);
-    res.status(error.code === 'CICLO_CURSOS_INVALIDOS' ? 400 : 500).json({ error: error.code === 'CICLO_CURSOS_INVALIDOS' ? error.message : 'No se pudo actualizar el ciclo.' });
+    const esDominio = error.code === 'CICLO_CURSOS_INVALIDOS' || error.code === 'CICLO_CURSO_EN_USO';
+    const status = error.code === 'CICLO_CURSOS_INVALIDOS' ? 400 : ['CICLO_CURSO_EN_USO', 'ER_DUP_ENTRY'].includes(error.code) ? 409 : 500;
+    res.status(status).json({ error: status === 500 ? 'No se pudo actualizar el ciclo.' : error.code === 'ER_DUP_ENTRY' ? 'Existe un ciclo duplicado.' : error.message });
   } finally {
-    connection.release();
+    if (connection) connection.release();
   }
 });
 

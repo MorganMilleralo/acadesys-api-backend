@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
+const { idPositivo } = require('../utils/validaciones');
 
 const UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'materiales');
 
@@ -13,7 +14,7 @@ function asegurarDirectorio() {
 }
 
 function apiBase(req) {
-  return String(process.env.PUBLIC_API_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  return String(process.env.API_PUBLIC_URL || process.env.PUBLIC_API_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
 }
 
 function limpiarNombreArchivo(nombre = 'material.pdf') {
@@ -25,8 +26,11 @@ function limpiarNombreArchivo(nombre = 'material.pdf') {
 router.get('/admin', requiereRol('Administrador'), async (req, res) => {
   try {
     const { idCiclo } = req.query;
-    const params = [];
-    let where = 'ma.EstadoRegistro = 1';
+    const idAcademia = idPositivo(req.usuario?.idAcademia);
+    if (!idAcademia) return res.status(401).json({ error: 'Academia de sesión inválida.' });
+    if (idCiclo !== undefined && !idPositivo(idCiclo)) return res.status(400).json({ error: 'IdCiclo no válido.' });
+    const params = [idAcademia];
+    let where = 'ma.EstadoRegistro = 1 AND c.IdAcademia = ?';
 
     if (idCiclo) {
       where += ' AND ma.IdCiclo = ?';
@@ -72,16 +76,23 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
     fileData
   } = req.body || {};
 
-  if (!idCiclo || !idCurso || !titulo || !fileData) {
+  const idAcademia = idPositivo(req.usuario?.idAcademia);
+  if (!idAcademia) return res.status(401).json({ error: 'Academia de sesión inválida.' });
+  if (!idPositivo(idCiclo) || !idPositivo(idCurso) || typeof titulo !== 'string' || !titulo.trim() || titulo.trim().length > 180 || (descripcion != null && (typeof descripcion !== 'string' || descripcion.length > 10000)) || !fileData) {
     return res.status(400).json({
       error: 'Ciclo, curso, título y archivo PDF son obligatorios.'
     });
   }
+  if (titulo.trim().length < 3) {
+    return res.status(400).json({ error: 'El título debe tener al menos 3 caracteres.' });
+  }
 
-  if (typeof fileData !== 'string' || fileData.length < 20) {
+  if (typeof fileData !== 'string' || fileData.length < 20 || !/^[A-Za-z0-9+/]*={0,2}$/.test(fileData) || fileData.length % 4 !== 0) {
     return res.status(400).json({ error: 'El archivo PDF recibido no es válido.' });
   }
 
+  let destino;
+  let insertado = false;
   try {
     const [relacion] = await pool.query(`
       SELECT
@@ -94,10 +105,11 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
       WHERE cc.IdCiclo = ?
         AND cc.IdCurso = ?
         AND cc.EstadoRegistro = 1
-        AND c.EstadoRegistro = 1
+         AND c.EstadoRegistro = 1
+         AND c.IdAcademia = ?
         AND cu.EstadoRegistro = 1
       LIMIT 1
-    `, [Number(idCiclo), Number(idCurso)]);
+    `, [Number(idCiclo), Number(idCurso), idAcademia]);
 
     if (relacion.length === 0) {
       return res.status(400).json({
@@ -116,12 +128,16 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
     if (buffer.subarray(0, 5).toString() !== '%PDF-') {
       return res.status(400).json({ error: 'El archivo no parece ser un PDF válido.' });
     }
+    // Defensa extra: el buffer no debe contener bytes nulos de relleno.
+    if (buffer.length < 20) {
+      return res.status(400).json({ error: 'El archivo PDF recibido está vacío o incompleto.' });
+    }
 
     asegurarDirectorio();
 
-    const nombreSeguro = limpiarNombreArchivo(nombreArchivo || 'material.pdf');
+    const nombreSeguro = limpiarNombreArchivo(nombreArchivo || 'material.pdf').slice(-180);
     const nombreFinal = `${Date.now()}-${crypto.randomBytes(5).toString('hex')}-${nombreSeguro}`;
-    const destino = path.join(UPLOAD_DIR, nombreFinal);
+    destino = path.join(UPLOAD_DIR, nombreFinal);
 
     fs.writeFileSync(destino, buffer);
 
@@ -140,6 +156,7 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
       urlArchivo,
       req.usuario.idUsuario || req.usuario.id
     ]);
+    insertado = true;
 
     res.status(201).json({
       idMaterial: insert.insertId,
@@ -154,6 +171,10 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
       curso: relacion[0].Curso
     });
   } catch (error) {
+    if (destino && !insertado) {
+      try { fs.unlinkSync(destino); }
+      catch (cleanupError) { if (cleanupError.code !== 'ENOENT') console.error('Cleanup PDF no completado:', cleanupError); }
+    }
     console.error('Error en POST /api/materiales:', error.message);
     res.status(500).json({ error: 'No se pudo guardar el material PDF.' });
   }
@@ -162,33 +183,36 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
 router.delete('/:id', requiereRol('Administrador'), async (req, res) => {
   try {
     const { id } = req.params;
+    const idAcademia = idPositivo(req.usuario?.idAcademia);
+    if (!idAcademia) return res.status(401).json({ error: 'Academia de sesión inválida.' });
+    if (!idPositivo(id)) return res.status(400).json({ error: 'IdMaterial no válido.' });
 
     const [rows] = await pool.query(`
-      SELECT IdMaterial, UrlArchivo
-      FROM MaterialAcademico
-      WHERE IdMaterial = ? AND EstadoRegistro = 1
+      SELECT ma.IdMaterial, ma.UrlArchivo
+      FROM MaterialAcademico ma INNER JOIN Ciclo c ON c.IdCiclo = ma.IdCiclo
+      WHERE ma.IdMaterial = ? AND ma.EstadoRegistro = 1 AND c.IdAcademia = ?
       LIMIT 1
-    `, [Number(id)]);
+    `, [Number(id), idAcademia]);
 
     if (rows.length === 0) {
       return res.status(404).json({ error: 'Material no encontrado.' });
     }
 
     await pool.query(
-      'UPDATE MaterialAcademico SET EstadoRegistro = -1 WHERE IdMaterial = ?',
-      [Number(id)]
+      `UPDATE MaterialAcademico ma INNER JOIN Ciclo c ON c.IdCiclo = ma.IdCiclo
+       SET ma.EstadoRegistro = -1 WHERE ma.IdMaterial = ? AND c.IdAcademia = ? AND ma.EstadoRegistro = 1`,
+      [Number(id), idAcademia]
     );
 
-    const url = String(rows[0].UrlArchivo || '');
-    const nombre = decodeURIComponent(url.split('/').pop() || '');
-    const archivo = path.join(UPLOAD_DIR, path.basename(nombre));
-
-    if (archivo.startsWith(UPLOAD_DIR) && fs.existsSync(archivo)) {
-      try {
+    try {
+      const url = String(rows[0].UrlArchivo || '');
+      const nombre = path.basename(decodeURIComponent(url.split('/').pop() || ''));
+      const archivo = path.join(UPLOAD_DIR, nombre);
+      if (nombre && path.dirname(archivo) === UPLOAD_DIR && fs.existsSync(archivo)) {
         fs.unlinkSync(archivo);
-      } catch (unlinkError) {
-        console.warn('No se pudo eliminar el archivo físico:', unlinkError.message);
       }
+    } catch (unlinkError) {
+      console.warn('No se pudo eliminar el archivo físico:', unlinkError.message);
     }
 
     res.json({ message: 'Material eliminado correctamente.' });

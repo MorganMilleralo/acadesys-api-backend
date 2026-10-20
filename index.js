@@ -245,23 +245,13 @@ app.use("/api", (req, res) => {
 // 11. MANEJO GLOBAL DE ERRORES
 // ============================================================
 
-app.use((err, req, res, next) => {
-  console.error("❌ Error no controlado:", err);
-
-  if (res.headersSent) {
-    return next(err);
-  }
-
-  res.status(err.status || 500).json({
-    error: err.message || "Error interno del servidor.",
-  });
-});
+app.use(require('./middlewares/error.middleware'));
 
 // ============================================================
 // 12. ARRANQUE DEL SERVIDOR
 // ============================================================
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`🚀 AcadeSys API corriendo en el puerto ${port}`);
 
   console.log("📚 Catálogo público:", `/api/ciclos/publicos`);
@@ -272,3 +262,5 @@ app.listen(port, () => {
 
   console.log("📊 Dashboard:", `/api/admin/dashboard/overview`);
 });
+
+module.exports = { app, server };

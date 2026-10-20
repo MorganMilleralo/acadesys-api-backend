@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
+const { idPositivo } = require('../utils/validaciones');
 
 const UNIVERSIDADES_VALIDAS = new Set([
   'UNMSM',
@@ -60,8 +61,8 @@ function validarFechaISO(valor, campo) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(texto)) {
     return `${campo} debe tener formato YYYY-MM-DD.`;
   }
-  const fecha = new Date(`${texto}T00:00:00`);
-  if (Number.isNaN(fecha.getTime())) return `${campo} no es una fecha válida.`;
+  const fecha = new Date(`${texto}T00:00:00Z`);
+  if (Number.isNaN(fecha.getTime()) || fecha.toISOString().slice(0, 10) !== texto) return `${campo} no es una fecha válida.`;
   return null;
 }
 
@@ -195,8 +196,8 @@ router.get('/publicos', async (req, res) => {
    Detalle público: ciclo + cursos + horarios + docentes.
    ============================================================ */
 router.get('/publicos/:id/detalle', async (req, res) => {
-  const idCiclo = Number(req.params.id);
-  if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
+  const idCiclo = idPositivo(req.params.id);
+  if (!idCiclo) {
     return res.status(400).json({ error: 'El IdCiclo no es válido.' });
   }
 
@@ -333,8 +334,8 @@ router.get('/publicos/:id/detalle', async (req, res) => {
    Mantiene compatibilidad con el frontend existente.
    ============================================================ */
 router.get('/:id/cursos', async (req, res) => {
-  const idCiclo = Number(req.params.id);
-  if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
+  const idCiclo = idPositivo(req.params.id);
+  if (!idCiclo) {
     return res.status(400).json({ error: 'El IdCiclo no es válido.' });
   }
 
