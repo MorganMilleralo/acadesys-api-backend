@@ -1,113 +1,95 @@
-# Notas y actas: contrato pendiente de integrar con MySQL
+# Simulacros semanales: contrato de produccion pendiente de confirmar
 
-Estado: **ninguna migración ejecutada**. `defaultdb` en Aiven es producción.
-No se ha conectado con esa base ni se han usado datos reales. No hay un entorno
-aislado de integración configurado en este trabajo.
+## Decisiones confirmadas por Morgan
 
-## Requisitos de esquema
+- AcadeSys evalua exclusivamente mediante **simulacros semanales generales**.
+  Los cursos siguen existiendo para gestion academica, horarios y materiales;
+  no tienen calificaciones.
+- Cada simulacro tiene fecha o semana identificable. Su puntaje maximo depende
+  de la universidad objetivo del ciclo.
+- No corresponde migrar `Evaluacion.IdCurso`. La propuesta fue retirada y su
+  archivo SQL es inerte. Tampoco corresponde una escala 0-20 para cursos.
+- Render utiliza `main` con **Auto-Deploy activado**. Aiven es la unica base y
+  DBeaver consulta esa misma produccion; no existe staging.
+- No se ejecutaron SQL, migraciones, conexiones a Aiven, push ni despliegues.
 
-La migración `MIGRACION_EVALUACION_CURSO.sql` agrega únicamente `Evaluacion.IdCurso`,
-su índice y su FK a `Curso`. No es idempotente: ejecutarla dos veces falla.
-No debe ejecutarse como parte del arranque o de las pruebas.
+## Bloqueo comprobado en el repositorio
 
-| Tabla | Contrato que usa el backend |
-| --- | --- |
-| Evaluacion | IdEvaluacion, IdMatricula, **IdCurso nullable**, **Periodo**, TipoEvaluacion, Calificacion entera, EstadoRegistro, UsuarioCreacion/Modificacion, FechaCreacion/Modificacion |
-| Auditoria_Cierres | IdCierre, IdAdministrador, **IdCiclo**, **IdCurso nullable**, **Periodo**, **TipoEvaluacion**, **RegistrosAfectados**, FechaCierre |
-| Matricula | IdMatricula, IdUsuario, IdCiclo, EstadoRegistro. Su IdCurso actual NULL no identifica cursos evaluados. |
-| CicloCurso | Relación activa IdCiclo–IdCurso. El curso también debe estar activo. |
-| Usuario_Perfiles | IdUsuarioPerfil como identificador de fila, IdUsuario, IdPerfil, EstadoRegistro. La API mantiene un solo perfil activo por usuario. |
+`database/MIGRACION_PREU_COMPATIBLE.sql` define Evaluacion con IdEvaluacion,
+IdMatricula, TipoEvaluacion, Calificacion DECIMAL(6,2), campos de auditoria de
+creacion/modificacion y EstadoRegistro. No define Periodo ni fecha/semana de
+simulacro. `MIGRACION_P1_09_ESCALA_NOTAS.sql` propone convertir Calificacion a
+INT, pero su existencia no demuestra que se haya ejecutado. No hay un DDL de
+Auditoria_Cierres versionado que acredite sus columnas, restricciones o indices.
 
-Los SQL de inicialización disponibles no crean `Evaluacion.Periodo` ni
-`Auditoria_Cierres`. Tampoco documentan completamente `Asignacion_Aula` y
-`Asistencia`. No se puede afirmar que estos elementos falten en producción:
-su esquema no se ha consultado.
+Esto no demuestra que esos elementos falten en Aiven: demuestra que **no tenemos
+su contrato real**. Las consultas de las rutas y los mocks tampoco prueban el
+esquema de produccion. Las propuestas DDL anteriores de este documento se han
+retirado; no autorizan crear Periodo, RegistrosAfectados ni ninguna otra columna.
 
-`VERIFICACION_ESQUEMA_ACADEMICO.sql` contiene exclusivamente consultas de metadatos,
-preparadas y no ejecutadas. Con un esquema confirmado se debe preparar el ALTER
-exacto y ensayarlo en una base aislada con datos ficticios. Verificar también
-`Perfil` frente a `perfil`: el script inicial y las rutas usan distinta capitalización.
+Se necesita, sin datos personales ni filas reales:
 
-## Preparación de SQL complementario, aún no ejecutable como migración definitiva
+1. `SHOW CREATE TABLE Evaluacion;` y `SHOW CREATE TABLE Auditoria_Cierres;`.
+   Si existe una tabla propia de simulacros, tambien su DDL.
+2. Nombre del campo que identifica el simulacro y su significado: fecha del
+   examen, semana con anio o identificador de otra tabla. Un ejemplo ficticio
+   del valor que envia React y del cuerpo de registro/cierre permite comprobar
+   su contrato sin usar datos reales.
+3. Tipos y restricciones de Calificacion, estados de evaluacion y claves de la
+   auditoria. Los DDL permiten comprobar si admiten decimales y como se identifica
+   un cierre; no se decidira eso a partir de una migracion sin ejecutar.
 
-Para una instalación nueva o una tabla sin periodo, la propuesta inicial es:
+`VERIFICACION_ESQUEMA_ACADEMICO.sql` contiene solo consultas de metadatos
+preparadas para revision. No ha sido ejecutado por el agente.
 
-```sql
-ALTER TABLE Evaluacion ADD COLUMN Periodo VARCHAR(50) NULL;
-```
+## Reglas para la adaptacion, una vez confirmado el esquema
 
-El NULL inicial evita atribuir un periodo inventado a datos históricos. Primero
-clasificar los registros con información comprobable, luego decidir si corresponde
-NOT NULL. No usar un DEFAULT 'General' para reclasificar automáticamente el pasado.
+- Eliminar de registro, consulta, historial, dashboard, cierre y contexto de
+  Tutor IA las referencias funcionales a Evaluacion.IdCurso. Mantener las
+  relaciones de Curso usadas legitimamente por horarios y materiales.
+- No usar `Periodo = General` como identificador semanal. No derivar la semana
+  de FechaCreacion: puede ser fecha de carga y no del examen. No inventar fechas
+  para historicos ni confundir semanas de anios diferentes.
+- Registrar y cerrar exactamente el mismo simulacro de un ciclo/academia usando
+  la clave existente comprobada. Preservar la comprobacion transaccional de
+  cierre al insertar/editar y el aislamiento de academia. No sustituir una
+  auditoria desconocida por un cierre global o solo por EstadoRegistro.
+- Usar exclusivamente las columnas reales de Auditoria_Cierres. No presuponer
+  RegistrosAfectados, IdCurso nullable, Periodo ni nuevas restricciones.
+- Conservar JWT, perfiles vigentes, coincidencia exacta normalizada y equivalencia
+  de Administrador/Recursos Humanos. No ampliar permisos docentes sin verificar
+  asignaciones legitimas.
+- Mantener las escalas universitarias existentes mientras se valida su contrato;
+  universidad desconocida no recibe un maximo inventado. La precision numerica
+  debe concordar con el DDL y la regla funcional confirmada.
 
-Si `Auditoria_Cierres` no existe, este es el contrato propuesto (revisar tipos de FK,
-collations, versión MySQL y convenciones de auditoría antes de convertirlo en DDL):
+## Impacto React y pruebas pendientes
 
-```sql
-CREATE TABLE Auditoria_Cierres (
-  IdCierre INT AUTO_INCREMENT PRIMARY KEY,
-  IdAdministrador INT NOT NULL,
-  IdCiclo INT NOT NULL,
-  IdCurso INT NULL,
-  CursoAlcance INT GENERATED ALWAYS AS (COALESCE(IdCurso, 0)) STORED,
-  Periodo VARCHAR(50) NOT NULL,
-  TipoEvaluacion VARCHAR(100) NOT NULL,
-  RegistrosAfectados INT NOT NULL,
-  FechaCierre DATETIME NOT NULL,
-  UNIQUE KEY UQ_Cierre_Alcance (IdCiclo, CursoAlcance, Periodo, TipoEvaluacion),
-  FOREIGN KEY (IdAdministrador) REFERENCES Usuario(IdUsuario),
-  FOREIGN KEY (IdCiclo) REFERENCES Ciclo(IdCiclo),
-  FOREIGN KEY (IdCurso) REFERENCES Curso(IdCurso)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
+El codigo actual sigue usando el contrato anterior. Sus 114 pruebas simuladas
+pasan, pero incluyen notas por curso y no certifican este nuevo alcance.
+No se eliminaron ni debilitaron pruebas para aparentar una adaptacion completa.
 
-Si ya existe, preservar todas sus filas y adaptar mediante ALTER según el esquema
-real. No recrearla. `IdAdministrador` registra tanto Administrador como RRHH.
-El valor 0 de `CursoAlcance` se reserva para simulacros generales; confirmar que los
-identificadores reales de curso sean positivos. Un UNIQUE con IdCurso nullable
-directamente no impediría duplicados de simulacros NULL.
+Antes de desplegar hay que revisar el payload de registro/cierre semanal y las
+respuestas de historial, alumno, dashboard y Tutor IA. Campos como promedioCursos,
+escalaMaximaCurso y clasificacion por IdCurso son heredados y requieren acordar
+su retirada o compatibilidad con React. Debe distinguirse:
 
-Revisar índices de Evaluacion por matrícula/curso/periodo/tipo/estado y de Matricula
-por ciclo antes de añadirlos. Revisar FKs y CHECK existentes: el script de escala
-anterior presupone que `CHK_Calificacion` ya existe. No ejecutarlo a ciegas.
+- 403: permisos insuficientes, sin conceder acceso por un simple nombre de rol.
+- 409: simulacro cerrado u otro conflicto de estado comprobado; revisar aparte
+  el bloqueo ya existente de asistencia por falta de relacion alumno-aula.
+- 503: actualmente puede responder por IdCurso ausente; ese requisito debe
+  desaparecer de evaluaciones. No debe recomendar una migracion por curso.
 
-## Históricos y cierre
+Actualizar las pruebas con dos simulacros de un mismo ciclo, separacion por
+academia/ciclo y anio, rechazo de un identificador ausente, puntajes y precision
+validos por universidad, aislamiento de cierres, preservacion de historicos,
+visibilidad de notas cerradas y rollback. Los mocks deben reflejar el DDL real,
+no construir uno supuesto. Probar las consultas en MySQL local aislado con datos
+ficticios cuando se disponga de ese entorno; nunca usar Aiven como banco de pruebas.
 
-- Curso: `Evaluacion.IdCurso` válido y tipo de evaluación de curso.
-- Simulacro general: IdCurso NULL y TipoEvaluacion = Simulacro.
-- Otro registro sin curso: pendiente de clasificación, visible en historial pero
-  excluido de promedios y bloqueado para edición. No completar desde Matricula.IdCurso.
-- Un periodo histórico NULL tampoco permite editar. No reasignarlo a General.
-- Estado 2 sigue visible y no permite edición. La auditoría impide inserciones
-  nuevas en el mismo alcance, incluso si alguna evaluación queda en estado 1.
-- POST notas, PUT nota y cierre bloquean primero el ciclo antes de la lectura
-  definitiva del cierre. Requiere InnoDB y pruebas de concurrencia reales.
-- El alcance actual incluye **ciclo + curso/general + periodo + tipo**. Cerrar
-  Practica no cierra Examen. Confirmar con Morgan si el cierre debe abarcar todos
-  los tipos; no se ha cambiado esa regla existente sin una decisión funcional.
-- El cierre sin evaluaciones abiertas devuelve 409 y no registra auditoría.
-- Confirmar el tratamiento de notas de matrículas inactivas al cerrar: hoy el
-  cierre afecta solo matrículas activas, pero la auditoría bloquea futuras ediciones.
+## Estado de entrega
 
-## Decisiones pendientes de Morgan
-
-1. Confirmar la escala provisional **0–20 entera** para cursos y las escalas de
-   simulacros existentes. Universidad desconocida bloquea la escritura del simulacro.
-2. Definir relación verificable alumno–aula y alcance docente/tutor. Asignacion_Aula
-   relaciona personal, ciclo, curso y aula; no prueba qué alumnos pertenecen al aula.
-3. Confirmar alcance del cierre por tipo, periodos admitidos, reapertura y política
-   de múltiples evaluaciones/reintentos dentro del mismo periodo.
-4. Determinar cómo clasificar históricos sin curso/periodo y qué ranking usar entre
-   simulacros de fechas diferentes. El ranking actual sigue siendo provisional.
-5. Coordinar con React los estados bloqueados de asistencia y los valores null para
-   escalas o promedios no comparables. Confirmar el uso de promedioGeneral como
-   alias del promedio bruto de simulacros en la consulta de historial.
-
-## Integración necesaria antes de desplegar
-
-Probar en MySQL aislado: migración con datos ficticios históricos, FK y CHECK,
-unicidad de cierre general, errores parciales, rollback real y carreras entre
-inserción/edición/cierre con dos conexiones. Verificar bajas concurrentes de cursos,
-matrículas y perfiles, y comportamiento de collation para Periodo/TipoEvaluacion.
-Probar las pantallas React con los contratos documentados. Las simulaciones de
-este repositorio no verifican el motor SQL ni sustituyen estas pruebas.
+**NO APTO PARA AUTO-DEPLOY.** Se detuvo la implementacion funcional antes de
+inventar el identificador semanal o la auditoria, conforme a la instruccion del
+usuario. La rama y sus 13 commits remotos integrados se conservan. Tambien sigue
+pendiente la verificacion de identidad antes de la reinscripcion publica.

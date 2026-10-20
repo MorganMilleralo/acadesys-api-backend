@@ -1,19 +1,8 @@
 
--- ACADESYS
--- Migracion: notas por curso y simulacros generales
--- IMPORTANTE: NO EJECUTAR EN PRODUCCION SIN RESPALDO.
--- PENDIENTE: este archivo NO ha sido ejecutado. Ver REVISION_NOTAS_ACTAS.md.
--- Solo agrega IdCurso; no resuelve Periodo, Auditoria_Cierres ni historicos.
--- Matricula.IdCurso es NULL en las matriculas actuales: NO usarlo para rellenar notas.
-
-ALTER TABLE Evaluacion
-    ADD COLUMN IdCurso INT NULL
-        AFTER IdMatricula,
-
-    ADD INDEX IX_Evaluacion_IdCurso (IdCurso),
-
-    ADD CONSTRAINT FK_Evaluacion_Curso
-        FOREIGN KEY (IdCurso)
-        REFERENCES Curso(IdCurso)
-        ON DELETE RESTRICT
-        ON UPDATE CASCADE;
+-- ACADESYS - PROPUESTA OBSOLETA. ARCHIVO SIN SENTENCIAS EJECUTABLES.
+-- Morgan confirmo que solo se registran SIMULACROS SEMANALES generales.
+-- No se necesitan calificaciones por curso ni migrar Evaluacion.IdCurso.
+-- Se retira el ALTER preparado; no fue ejecutado y no se modifica ninguna BD.
+-- El contenido anterior se conserva en Git (commit f7f379a).
+-- Ver REVISION_NOTAS_ACTAS.md: el ajuste funcional esta bloqueado hasta confirmar
+-- el identificador semanal y el DDL real de Evaluacion y Auditoria_Cierres.

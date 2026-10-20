@@ -5,6 +5,11 @@
 > pruebas y bloqueos. Ejecutar `npm.cmd test`; no volver a ejecutar el instalador
 > descrito abajo. Docente/tutor no reciben acceso a notas sin asignación verificable;
 > Administrador y Recursos Humanos comparten permisos por nombre exacto normalizado.
+>
+> Alcance confirmado por Morgan: **solo simulacros semanales, sin calificaciones
+> por curso**. El ajuste funcional está bloqueado hasta confirmar el DDL vigente y
+> el identificador semanal. La suite actual todavía prueba el contrato anterior.
+> **No apto para Auto-Deploy**: Render despliega main y Aiven es la única base.
 
 El texto siguiente conserva la descripción del avance original de main.
 

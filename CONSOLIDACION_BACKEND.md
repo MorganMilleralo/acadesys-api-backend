@@ -1,5 +1,42 @@
 # Consolidación local de seguridad, notas y actas
 
+## Estado vigente: solo simulacros semanales
+
+Morgan confirmó que AcadeSys **no registra calificaciones por curso**. Cada
+simulacro tiene una fecha o semana identificable y su nota máxima depende de la
+universidad objetivo. La propuesta de migrar `Evaluacion.IdCurso` queda retirada;
+su archivo SQL ahora es inerte. La escala provisional 0–20 para cursos deja de
+ser un requisito o una decisión pendiente.
+
+También está confirmado que Render despliega **main con Auto-Deploy activado** y
+que existe una sola base Aiven de producción, consultada también desde DBeaver.
+No hay staging. Un push a main activaría el despliegue: **NO APTO para Auto-Deploy**.
+
+La adaptación funcional está **bloqueada por falta de evidencia del esquema**.
+El SQL local no define la fecha/semana del simulacro ni `Evaluacion.Periodo`;
+el repositorio tampoco incluye el DDL de `Auditoria_Cierres`. No se puede asumir
+que `FechaCreacion` sea fecha del examen, que `General` identifique una semana,
+ni que la auditoría tenga `RegistrosAfectados`. Se solicitaron los DDL reales y
+el campo/valor semanal enviado por React, sin solicitar datos de alumnos.
+
+Se mantiene `david/consolidacion-backend` en `cafdfd1`, incluidos los 13 commits
+remotos y las mejoras de seguridad. No se modificaron las rutas ni las pruebas
+funcionales mientras falta ese contrato: **el código aún depende de IdCurso**
+en notas, actas, cierre, alumno, dashboard y contexto de Tutor IA. No debe
+desplegarse este estado. Ver [la revisión vigente](database/REVISION_NOTAS_ACTAS.md).
+
+Verificación de este estado: `npm.cmd test` aprueba 114 casos (84 node:test y 30
+casos de scripts). Esas pruebas todavía verifican el contrato anterior; **no
+demuestran compatibilidad con simulacros semanales ni con producción**. Se
+mantienen los dobles locales y el bloqueo de carga de mysql2/dotenv; no se hizo
+ninguna conexión a Aiven, migración, push ni despliegue.
+
+## Antecedentes de la consolidación e integración
+
+Lo que sigue documenta el trabajo anterior a la aclaración de Morgan. Los
+requisitos de evaluaciones por curso, sus migraciones y las dudas anteriores
+sobre la rama de Render están sustituidos por el estado vigente de arriba.
+
 Se conservaron los cambios locales previos, incluyendo `package-lock.json` y
 `.vscode/extensions.json`. No se hizo reset, clean, push, despliegue, conexión a
 Aiven ni ejecución de SQL. La migración de Evaluacion.IdCurso continúa pendiente.
