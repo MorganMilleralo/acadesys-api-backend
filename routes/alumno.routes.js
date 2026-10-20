@@ -71,10 +71,11 @@ router.get('/me', async (req, res) => {
       INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo
       WHERE m.IdUsuario = ?
         AND m.EstadoRegistro = 1
-        AND c.EstadoRegistro = 1
+         AND c.EstadoRegistro = 1
+         AND c.IdAcademia = ?
       ORDER BY m.IdMatricula DESC
       LIMIT 1
-    `, [idUsuario]);
+    `, [idUsuario, idAcademia]);
 
     let ciclo = null;
     let matriculaId = null;
@@ -123,14 +124,18 @@ router.get('/me', async (req, res) => {
     const [cursos] = await pool.query(`
       SELECT
         cu.IdCurso,
-        cu.Nombre
+        cu.Nombre, cu.Codigo, cu.Descripcion, cu.UniversidadObjetivo,
+        COALESCE((SELECT GROUP_CONCAT(DISTINCT TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno)) SEPARATOR ', ')
+          FROM Asignacion_Aula aa INNER JOIN Usuario u ON u.IdUsuario = aa.IdUsuario
+          WHERE aa.IdCiclo = cc.IdCiclo AND aa.IdCurso = cc.IdCurso AND aa.IdAcademia = ?
+            AND aa.EstadoRegistro = 1 AND u.EstadoRegistro = 1 AND u.IdAcademia = aa.IdAcademia), 'Por asignar') AS Docente
       FROM CicloCurso cc
       INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
       WHERE cc.IdCiclo = ?
         AND cc.EstadoRegistro = 1
         AND cu.EstadoRegistro = 1
       ORDER BY cc.Orden ASC, cu.Nombre ASC
-    `, [ciclo.idCiclo]);
+    `, [idAcademia, ciclo.idCiclo]);
 
     const [horarioDetalle] = await pool.query(`
       SELECT
@@ -139,13 +144,16 @@ router.get('/me', async (req, res) => {
         TIME_FORMAT(h.HoraInicio, '%H:%i') AS HoraInicio,
         TIME_FORMAT(h.HoraFin, '%H:%i') AS HoraFin,
         cu.Nombre AS Curso,
-        'Por asignar' AS Docente
+        COALESCE((SELECT GROUP_CONCAT(DISTINCT TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno)) SEPARATOR ', ')
+          FROM Asignacion_Aula aa INNER JOIN Usuario u ON u.IdUsuario = aa.IdUsuario
+          WHERE aa.IdCiclo = h.IdCiclo AND aa.IdCurso = h.IdCurso AND aa.IdAcademia = ?
+            AND aa.EstadoRegistro = 1 AND u.EstadoRegistro = 1 AND u.IdAcademia = aa.IdAcademia), 'Por asignar') AS Docente
       FROM HorarioCurso h
       INNER JOIN Curso cu ON cu.IdCurso = h.IdCurso
       WHERE h.IdCiclo = ?
         AND h.EstadoRegistro = 1
       ORDER BY h.Orden ASC, h.DiaNumero ASC, h.HoraInicio ASC
-    `, [ciclo.idCiclo]);
+    `, [idAcademia, ciclo.idCiclo]);
 
     const [notas] = await pool.query(`
       SELECT
@@ -153,22 +161,22 @@ router.get('/me', async (req, res) => {
         COALESCE(cu.Nombre, 'Simulacro general') AS Curso,
         e.TipoEvaluacion,
         e.Calificacion,
+        e.EstadoRegistro AS EstadoRegistro,
         e.FechaCreacion
       FROM Evaluacion e
       INNER JOIN Matricula m ON m.IdMatricula = e.IdMatricula
       LEFT JOIN Curso cu ON cu.IdCurso = m.IdCurso
       WHERE m.IdUsuario = ?
         AND m.IdCiclo = ?
-        AND e.EstadoRegistro = 1
+        AND e.EstadoRegistro IN (1, 2)
       ORDER BY e.FechaCreacion DESC, e.IdEvaluacion DESC
     `, [idUsuario, ciclo.idCiclo]);
 
-    const promedio = notas.length
-      ? Number((notas.reduce((sum, n) => sum + Number(n.Calificacion || 0), 0) / notas.length).toFixed(2))
-      : 0;
+    const promedioBruto = notas.length ? notas.reduce((sum, n) => sum + Number(n.Calificacion), 0) / notas.length : 0;
+    const promedio = Number(promedioBruto.toFixed(2));
 
     let puestoRanking = null;
-    if (promedio > 0) {
+    if (notas.length > 0) {
       const [rankingRows] = await pool.query(`
         SELECT COUNT(*) + 1 AS Puesto
         FROM (
@@ -177,13 +185,15 @@ router.get('/me', async (req, res) => {
             AVG(e2.Calificacion) AS Promedio
           FROM Matricula m2
           INNER JOIN Evaluacion e2 ON e2.IdMatricula = m2.IdMatricula
+          INNER JOIN Usuario u2 ON u2.IdUsuario = m2.IdUsuario AND u2.EstadoRegistro = 1
           WHERE m2.IdCiclo = ?
             AND m2.EstadoRegistro = 1
-            AND e2.EstadoRegistro = 1
+            AND e2.EstadoRegistro IN (1, 2)
+            AND u2.IdAcademia = ? AND m2.IdUsuario <> ?
           GROUP BY m2.IdUsuario
           HAVING AVG(e2.Calificacion) > ?
         ) r
-      `, [ciclo.idCiclo, promedio]);
+      `, [ciclo.idCiclo, idAcademia, idUsuario, promedioBruto]);
 
       puestoRanking = Number(rankingRows[0]?.Puesto || 1);
     }
@@ -222,9 +232,10 @@ router.get('/me', async (req, res) => {
       cursos: cursos.map((c) => ({
         idCurso: c.IdCurso,
         nombre: c.Nombre,
-        codigo: '',
-        descripcion: '',
-        universidadObjetivo: ciclo.universidadObjetivo
+        codigo: c.Codigo || '',
+        descripcion: c.Descripcion || '',
+        docente: c.Docente,
+        universidadObjetivo: c.UniversidadObjetivo || ciclo.universidadObjetivo
       })),
       horarioDetalle: horarioDetalle.map((h) => ({
         idHorario: h.IdHorario,
@@ -243,6 +254,7 @@ router.get('/me', async (req, res) => {
           curso: n.Curso,
           tipoEvaluacion: n.TipoEvaluacion,
           calificacion: Number(n.Calificacion || 0),
+          estadoRegistro: Number(n.EstadoRegistro),
           fechaCreacion: n.FechaCreacion
         }))
       },

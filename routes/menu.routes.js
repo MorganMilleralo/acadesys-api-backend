@@ -4,6 +4,7 @@ const pool = require("../config/db");
 // La autenticación ya se aplica globalmente en index.js (app.use("/api", verificarToken)),
 // por lo que este router NO debe volver a ejecutarla.
 const requiereRol = require("../middlewares/roles.middleware");
+const { bloquearIdentidades, rollbackSeguro } = require('../utils/validaciones');
 
 function idPositivo(valor) {
   if (!['string', 'number'].includes(typeof valor) || !/^\d+$/.test(String(valor))) return null;
@@ -16,7 +17,7 @@ function responderError(res, error) {
     return res.status(404).json({ error: 'El menú o perfil indicado ya no existe.' });
   }
   if (error.code === 'ER_DUP_ENTRY') {
-    return res.status(400).json({ error: 'La asignación ya existe.' });
+    return res.status(409).json({ error: 'La asignación ya existe.' });
   }
   console.error('[Menús]', error.message);
   return res.status(500).json({ error: 'No se pudo completar la operación de menús.' });
@@ -26,7 +27,7 @@ function responderError(res, error) {
 router.get("/menus", async (req, res) => {
   try {
     const [rows] = await pool.query(
-      "SELECT IdOpcionMenu, Nombre, UrlMenu, Descripcion, IdPadre, EstadoRegistro FROM OpcionesMenu WHERE IdPadre IS NULL AND EstadoRegistro = 1 ORDER BY IdOpcionMenu",
+      "SELECT IdOpcionMenu, Nombre, UrlMenu, Descripcion, IdPadre, EstadoRegistro FROM OpcionesMenu WHERE (IdPadre IS NULL OR IdPadre = 0) AND EstadoRegistro = 1 ORDER BY IdOpcionMenu",
     );
     res.json(rows);
   } catch (error) {
@@ -85,7 +86,7 @@ router.get('/menus/perfil/:idPerfil', async (req, res) => {
         if (visitados.has(id) || !padres.has(id)) return false;
         visitados.add(id);
         const padre = padres.get(id);
-        id = padre == null ? null : Number(padre);
+        id = padre == null || Number(padre) === 0 ? null : Number(padre);
       }
       return true;
     };
@@ -103,26 +104,38 @@ router.post("/menus", requiereRol('Administrador'), async (req, res) => {
       ![0, 1].includes(EstadoRegistro)) {
     return res.status(400).json({ error: 'Revisa nombre, ruta interna, descripción y estado del menú.' });
   }
-  const padre = IdPadre == null || IdPadre === '' ? null : idPositivo(IdPadre);
-  if (IdPadre != null && IdPadre !== '' && !padre) {
+  const esRaiz = IdPadre == null || IdPadre === '' || IdPadre === 0 || IdPadre === '0';
+  const padre = esRaiz ? null : idPositivo(IdPadre);
+  if (!esRaiz && !padre) {
     return res.status(400).json({ error: 'IdPadre debe ser un entero positivo válido o null.' });
   }
+  let connection;
   try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    await bloquearIdentidades(connection);
     if (padre) {
-      const [padres] = await pool.query(
+      const [padres] = await connection.query(
         'SELECT IdOpcionMenu FROM OpcionesMenu WHERE IdOpcionMenu = ? AND EstadoRegistro = 1', [padre],
       );
-      if (!padres.length) return res.status(404).json({ error: 'El menú padre no existe o no está activo.' });
+      if (!padres.length) { await connection.rollback(); return res.status(404).json({ error: 'El menú padre no existe o no está activo.' }); }
     }
+    const [duplicados] = await connection.query(`SELECT IdOpcionMenu FROM OpcionesMenu WHERE UrlMenu = ?
+      AND COALESCE(IdPadre, 0) = COALESCE(?, 0) AND EstadoRegistro IN (0, 1) LIMIT 1 FOR UPDATE`, [UrlMenu.trim(), padre]);
+    if (duplicados.length) { await connection.rollback(); return res.status(409).json({ error: 'Ya existe un menú con esa ruta y padre.' }); }
 
-    const [result] = await pool.query(
+    const [result] = await connection.query(
       "INSERT INTO OpcionesMenu (Nombre, UrlMenu, Descripcion, IdPadre, EstadoRegistro) VALUES (?, ?, ?, ?, ?)",
       [Nombre.trim(), UrlMenu.trim(), Descripcion.trim(), padre, EstadoRegistro],
     );
-    if (result.affectedRows !== 1) return res.status(500).json({ error: 'No se confirmó la creación del menú.' });
+    if (result.affectedRows !== 1) { await connection.rollback(); return res.status(500).json({ error: 'No se confirmó la creación del menú.' }); }
+    await connection.commit();
     res.status(201).json({ message: "Menú creado con éxito", id: result.insertId });
   } catch (error) {
+    await rollbackSeguro(connection);
     responderError(res, error);
+  } finally {
+    if (connection) connection.release();
   }
 });
 
@@ -135,33 +148,41 @@ router.post("/menus/asignar", requiereRol('Administrador'), async (req, res) => 
   if (!idMenu || !idPerfil || !orden || ![0, 1].includes(EstadoRegistro)) {
     return res.status(400).json({ error: 'Menú, perfil y orden deben ser enteros positivos válidos; el estado debe ser 0 o 1.' });
   }
+  let connection;
   try {
-    const [menus] = await pool.query(
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    await bloquearIdentidades(connection);
+    const [menus] = await connection.query(
       'SELECT IdOpcionMenu FROM OpcionesMenu WHERE IdOpcionMenu = ? AND EstadoRegistro = 1', [idMenu],
     );
-    if (!menus.length) return res.status(404).json({ error: 'El menú no existe o no está activo.' });
-    const [perfiles] = await pool.query(
+    if (!menus.length) { await connection.rollback(); return res.status(404).json({ error: 'El menú no existe o no está activo.' }); }
+    const [perfiles] = await connection.query(
       'SELECT IdPerfil FROM perfil WHERE IdPerfil = ? AND EstadoRegistro = 1', [idPerfil],
     );
-    if (!perfiles.length) return res.status(404).json({ error: 'El perfil no existe o no está activo.' });
+    if (!perfiles.length) { await connection.rollback(); return res.status(404).json({ error: 'El perfil no existe o no está activo.' }); }
     // Reintentar la misma asignación confirmada no crea otra fila.
-    const [existentes] = await pool.query(
+    const [existentes] = await connection.query(
       'SELECT IdOpcionMenu FROM OpcionesMenu_Perfiles WHERE IdOpcionMenu = ? AND IdPerfil = ? AND EstadoRegistro = ? ORDER BY Orden LIMIT 1',
       [idMenu, idPerfil, EstadoRegistro],
     );
-    if (existentes.length) return res.json({ message: 'La asignación ya existe', id: existentes[0].IdOpcionMenu });
+    if (existentes.length) { await connection.commit(); return res.json({ message: 'La asignación ya existe', id: existentes[0].IdOpcionMenu }); }
 
-    const [result] = await pool.query(
+    const [result] = await connection.query(
       "INSERT INTO OpcionesMenu_Perfiles (IdOpcionMenu, IdPerfil, Orden, EstadoRegistro) VALUES (?, ?, ?, ?)",
       [idMenu, idPerfil, orden, EstadoRegistro],
     );
-    if (result.affectedRows !== 1) return res.status(500).json({ error: 'No se confirmó la asignación.' });
+    if (result.affectedRows !== 1) { await connection.rollback(); return res.status(500).json({ error: 'No se confirmó la asignación.' }); }
+    await connection.commit();
     res.status(201).json({
       message: "Menú asignado al perfil correctamente",
       id: result.insertId,
     });
   } catch (error) {
+    await rollbackSeguro(connection);
     responderError(res, error);
+  } finally {
+    if (connection) connection.release();
   }
 });
 

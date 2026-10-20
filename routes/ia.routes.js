@@ -43,7 +43,6 @@ function agruparPromediosPorCurso(historial = []) {
     const curso = String(nota.curso || "Simulacro general");
     const calificacion = Number(nota.calificacion);
     if (!Number.isFinite(calificacion)) continue;
-
     if (!grupos.has(curso)) {
       grupos.set(curso, { curso, suma: 0, cantidad: 0 });
     }
@@ -136,7 +135,7 @@ async function obtenerContextoAcademico(req) {
 
   if (matricula) {
     const [cursosRows] = await pool.query(
-      `SELECT cu.IdCurso, cu.Nombre
+      `SELECT cu.IdCurso, cu.Nombre, cu.Codigo, cu.Descripcion
        FROM CicloCurso cc
        INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
        WHERE cc.IdCiclo = ?
@@ -149,6 +148,8 @@ async function obtenerContextoAcademico(req) {
     cursos = cursosRows.map((curso) => ({
       idCurso: curso.IdCurso,
       nombre: curso.Nombre,
+      codigo: curso.Codigo || '',
+      descripcion: curso.Descripcion || '',
     }));
 
     const [notasRows] = await pool.query(
@@ -157,6 +158,7 @@ async function obtenerContextoAcademico(req) {
          COALESCE(cu.Nombre, 'Simulacro general') AS Curso,
          e.TipoEvaluacion,
          e.Calificacion,
+         e.EstadoRegistro,
          e.FechaCreacion
        FROM Evaluacion e
        INNER JOIN Matricula m ON m.IdMatricula = e.IdMatricula
@@ -167,7 +169,7 @@ async function obtenerContextoAcademico(req) {
          AND u.IdAcademia = ?
          AND u.EstadoRegistro = 1
          AND m.EstadoRegistro = 1
-         AND e.EstadoRegistro = 1
+          AND e.EstadoRegistro IN (1, 2)
        ORDER BY e.FechaCreacion DESC, e.IdEvaluacion DESC`,
       [idUsuario, matricula.IdCiclo, idAcademia]
     );
@@ -177,6 +179,7 @@ async function obtenerContextoAcademico(req) {
       curso: nota.Curso,
       tipoEvaluacion: nota.TipoEvaluacion,
       calificacion: Number(nota.Calificacion),
+      estadoRegistro: Number(nota.EstadoRegistro),
       fecha: nota.FechaCreacion,
     }));
 
@@ -195,7 +198,7 @@ async function obtenerContextoAcademico(req) {
              AND m2.EstadoRegistro = 1
              AND u2.IdAcademia = ?
              AND u2.EstadoRegistro = 1
-             AND e2.EstadoRegistro = 1
+              AND e2.EstadoRegistro IN (1, 2)
            GROUP BY m2.IdUsuario
            HAVING AVG(e2.Calificacion) > ?
          ) r`,
@@ -364,11 +367,13 @@ async function tutorHandler(req, res) {
       },
     });
   } catch (error) {
-    if (error.status) {
+    // Solo se propagan errores de dominio (4xx ya previstos). Cualquier otro
+    // fallo se registra completo y se responde con un mensaje genérico.
+    if (error.status && error.status < 500) {
       return res.status(error.status).json({ error: error.message });
     }
 
-    console.error("Error en Tutor IA:", error.message);
+    console.error("Error en Tutor IA:", error);
     return res.status(500).json({ error: "No se pudo generar el diagnóstico académico." });
   }
 }

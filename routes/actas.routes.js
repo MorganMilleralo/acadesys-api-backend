@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
+const { idPositivo, rollbackSeguro } = require('../utils/validaciones');
 
 const TIPOS_VALIDOS = new Map([
   ['practica', 'Practica'],
@@ -16,7 +17,7 @@ function normalizarTipo(valor) {
 }
 
 function periodoValido(valor) {
-  const periodo = String(valor ?? '').trim().replace(/\s+/g, ' ');
+  const periodo = typeof valor === 'string' ? valor.trim().replace(/\s+/g, ' ') : '';
   return periodo.length >= 1 && periodo.length <= 50 ? periodo : null;
 }
 
@@ -24,7 +25,7 @@ function periodoValido(valor) {
 // Body: { idCiclo, idCurso, periodo, tipoEvaluacion }
 // El cierre queda acotado a una combinación. No bloquea otros cursos, periodos o ciclos.
 router.put('/actas/cierre', requiereRol('Administrador'), async (req, res) => {
-  const idCiclo = Number(req.body?.idCiclo ?? req.body?.IdCiclo);
+  const idCiclo = idPositivo(req.body?.idCiclo ?? req.body?.IdCiclo);
   const idCursoRaw = req.body?.idCurso ?? req.body?.IdCurso;
   const idCurso = idCursoRaw === null || idCursoRaw === undefined || idCursoRaw === ''
     ? null
@@ -39,6 +40,7 @@ router.put('/actas/cierre', requiereRol('Administrador'), async (req, res) => {
   if (!cursoFueIndicado) {
     return res.status(400).json({ error: 'Indica idCurso explícitamente; usa null para las evaluaciones cuya matrícula todavía no tiene un curso asignado.' });
   }
+  if (idCursoRaw != null && idCursoRaw !== '' && !idPositivo(idCursoRaw)) return res.status(400).json({ error: 'IdCurso no válido.' });
   if (!Number.isInteger(idCiclo) || idCiclo <= 0 || (idCurso !== null && (!Number.isInteger(idCurso) || idCurso <= 0))) {
     return res.status(400).json({ error: 'Debes indicar un idCiclo válido y un idCurso positivo o null.' });
   }
@@ -123,7 +125,7 @@ router.put('/actas/cierre', requiereRol('Administrador'), async (req, res) => {
     });
   } catch (error) {
     if (connection) {
-      try { await connection.rollback(); } catch (_) {}
+      await rollbackSeguro(connection);
     }
     console.error('Error en PUT /api/actas/cierre:', error.message);
     return res.status(500).json({ error: 'No se pudo cerrar el acta. La operación fue revertida.' });

@@ -5,10 +5,9 @@ const pool = require('../config/db');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const { usuarioDuplicado, bloquearIdentidades, rollbackSeguro } = require('../utils/validaciones');
 
-const URL_GOOGLE_SCRIPT =
-  process.env.GOOGLE_SCRIPT_URL ||
-  'https://script.google.com/macros/s/AKfycbwYym4iIz1mW0qjrmoVa6WI_qSY9Z3xdVx5hI8_k8tnZ7eKkSSiE7UKB6Zk0v3dw9SC/exec';
+const URL_GOOGLE_SCRIPT = process.env.GOOGLE_SCRIPT_URL || '';
 const API_PUBLIC_URL = (process.env.API_PUBLIC_URL || 'https://acadesys-api.onrender.com').replace(/\/+$/, '');
 const PROPOSITO_RESET = 'reinscripcion-password-reset';
 
@@ -19,7 +18,7 @@ function normalizarCorreo(correo = '') {
 }
 
 function correoValido(correo = '') {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo);
+  return correo.length <= 150 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo);
 }
 
 function textoNombreValido(texto = '') {
@@ -40,7 +39,9 @@ function huellaClave(claveHash) {
 }
 
 async function enviarCorreoHtml(to, subject, htmlBody) {
+  if (!URL_GOOGLE_SCRIPT) throw new Error('Servicio de correo no configurado.');
   const response = await fetch(URL_GOOGLE_SCRIPT, {
+    signal: AbortSignal.timeout(15000),
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ to, subject, htmlBody }),
@@ -208,8 +209,8 @@ router.post('/verificar', async (req, res) => {
         existe: true,
         esAlumno: false,
         puedeReinscribirse: false,
-        idUsuario: alumno.IdUsuario,
         mensaje: 'El correo pertenece a otra academia y no puede reutilizarse en este ciclo.',
+        message: 'El correo pertenece a otra academia y no puede reutilizarse en este ciclo.',
       });
     }
 
@@ -219,8 +220,9 @@ router.post('/verificar', async (req, res) => {
       return res.status(200).json({
         existe: true,
         esAlumno: false,
-        idUsuario: alumno.IdUsuario,
         mensaje: 'El correo ya pertenece a una cuenta del sistema, pero no corresponde a un alumno.',
+        // Alias en inglés: el frontend actual lee `message` en este flujo.
+        message: 'El correo ya pertenece a una cuenta del sistema, pero no corresponde a un alumno.',
         puedeReinscribirse: false,
         idCiclo,
       });
@@ -244,15 +246,16 @@ router.post('/verificar', async (req, res) => {
 
     const yaMatriculadoEnCiclo = ciclosActuales.some((c) => Number(c.IdCiclo) === idCiclo);
 
+    const mensajeUsuario = yaMatriculadoEnCiclo
+      ? `Ya estás matriculado en ${ciclo.Nombre}.`
+      : `Ya estás registrado en el sistema y actualmente tienes ${ciclosActuales.length} ciclo(s) activo(s).`;
+
     res.status(200).json({
       existe: true,
       esAlumno: true,
-      idUsuario: alumno.IdUsuario,
-      codigoUsuario: alumno.CodigoUsuario,
-      nombreCompleto: `${alumno.Nombres} ${alumno.ApellidoPaterno}`.trim(),
-      mensaje: yaMatriculadoEnCiclo
-        ? `Ya estás matriculado en ${ciclo.Nombre}.`
-        : `Ya estás registrado en el sistema y actualmente tienes ${ciclosActuales.length} ciclo(s) activo(s).`,
+      mensaje: mensajeUsuario,
+      // Alias en inglés: el frontend actual lee `message` en este flujo.
+      message: mensajeUsuario,
       puedeReinscribirse: !yaMatriculadoEnCiclo,
       yaInscritoEnCiclo: yaMatriculadoEnCiclo,
       cicloSeleccionado: {
@@ -260,12 +263,7 @@ router.post('/verificar', async (req, res) => {
         nombre: ciclo.Nombre,
       },
       ciclos: ciclosActuales.map((c) => ({
-        idCiclo: c.IdCiclo,
         nombre: c.Nombre,
-        turno: c.Turno,
-        fechaInicio: c.FechaInicio,
-        fechaFin: c.FechaFin,
-        idMatricula: c.IdMatricula,
       })),
     });
   } catch (error) {
@@ -297,12 +295,16 @@ router.post('/checkout', async (req, res) => {
     return res.status(400).json({ error: 'El IdCiclo no es válido.' });
   }
 
-  const connection = await pool.getConnection();
+  let connection;
+  let enTransaccion = false;
   let correoParaEnviar = null;
   let datosCorreo = null;
 
   try {
+    connection = await pool.getConnection();
     await connection.beginTransaction();
+    enTransaccion = true;
+    await bloquearIdentidades(connection);
 
     /* 1. Bloqueamos el ciclo para impedir sobreventa/concurrencia. */
     const ciclo = await obtenerCicloDisponible(idCiclo, connection, true);
@@ -429,13 +431,14 @@ router.post('/checkout', async (req, res) => {
         });
       }
 
-      await connection.query(`
-        UPDATE Usuario
-        SET Nombres = ?, ApellidoPaterno = ?
-        WHERE IdUsuario = ?
-          AND IdAcademia = ?
-      `, [nombre, apellidos, idAlumnoFinal, ciclo.IdAcademia]);
+      // Conocer un correo no autoriza a cambiar los datos de su propietario.
     } else {
+      if (await usuarioDuplicado(connection, { CorreoElectronico: correo })) {
+        await connection.rollback();
+        return res.status(409).json({
+          error: 'Este correo ya está registrado en el sistema. Vuelve a iniciar sesión o solicita a la administración la reactivación de tu cuenta.',
+        });
+      }
       /* 4. Alumno nuevo. */
       const [perfilesAlumno] = await connection.query(`
         SELECT IdPerfil
@@ -518,6 +521,7 @@ router.post('/checkout', async (req, res) => {
     `, [idCiclo]);
 
     await connection.commit();
+    enTransaccion = false;
 
     const totalFinal = Number(nuevoConteo[0]?.TotalAlumnos || 0);
 
@@ -551,7 +555,7 @@ router.post('/checkout', async (req, res) => {
       pago: { modo: 'simulado', estado: 'Pendiente', monto: precioReal, confirmadoPorPasarela: false },
     });
   } catch (error) {
-    try { await connection.rollback(); } catch (_) {}
+    if (enTransaccion) await rollbackSeguro(connection);
     console.error('Error en POST /api/matriculas/checkout:', error);
 
     if (error.code === 'ER_DUP_ENTRY') {
@@ -562,7 +566,7 @@ router.post('/checkout', async (req, res) => {
 
     return res.status(500).json({ error: 'Hubo un problema procesando la inscripción.' });
   } finally {
-    connection.release();
+    if (connection) connection.release();
 
     /* El correo nunca provoca rollback de una matrícula ya confirmada. */
     if (correoParaEnviar && datosCorreo && URL_GOOGLE_SCRIPT) {
@@ -679,9 +683,10 @@ router.post('/restablecer-clave', async (req, res) => {
     return res.status(400).json({ error: 'El enlace de recuperación no es válido.' });
   }
 
-  const connection = await pool.getConnection();
+  let connection;
   let claveTemporal;
   try {
+    connection = await pool.getConnection();
     await connection.beginTransaction();
     const [[usuario]] = await connection.query(`
       SELECT IdUsuario, CorreoElectronico, Clave
@@ -713,11 +718,11 @@ router.post('/restablecer-clave', async (req, res) => {
     await connection.commit();
     return res.json({ exito: true, mensaje: 'Listo: enviamos tu contraseña temporal al correo registrado. Puedes cerrar esta ventana.' });
   } catch (error) {
-    try { await connection.rollback(); } catch (_) {}
+    await rollbackSeguro(connection);
     console.error('Error en POST /api/matriculas/restablecer-clave:', error.message);
     return res.status(502).json({ error: 'No se pudo enviar el correo. No se cambió tu contraseña; vuelve a intentarlo.' });
   } finally {
-    connection.release();
+    if (connection) connection.release();
   }
 });
 

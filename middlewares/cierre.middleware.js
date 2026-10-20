@@ -22,6 +22,10 @@ const verificarPeriodoAbierto = async (req, res, next) => {
   if (!idEvaluacion) {
     return res.status(400).json({ error: 'El identificador de evaluación no es válido.' });
   }
+  const idAcademia = idPositivo(req.usuario?.idAcademia);
+  if (!idAcademia) {
+    return res.status(401).json({ error: 'El usuario autenticado no tiene una academia válida.' });
+  }
 
   try {
     const [rows] = await pool.query(
@@ -30,9 +34,9 @@ const verificarPeriodoAbierto = async (req, res, next) => {
        FROM Evaluacion e
        INNER JOIN Matricula m ON m.IdMatricula = e.IdMatricula
        INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-       WHERE e.IdEvaluacion = ?
+        WHERE e.IdEvaluacion = ? AND u.IdAcademia = ?
        LIMIT 1`,
-      [idEvaluacion],
+      [idEvaluacion, idAcademia],
     );
 
     // Si no se encuentra, dejamos que el controlador de la ruta responda 404.
@@ -69,7 +73,7 @@ const verificarPeriodoAbierto = async (req, res, next) => {
 
     return next();
   } catch (error) {
-    console.error('[Cierre] No se pudo comprobar el estado de la evaluación:', error.message);
+    console.error('[Cierre] No se pudo comprobar el estado de la evaluación:', error);
     return res.status(500).json({ error: 'No se pudo verificar si la evaluación está abierta.' });
   }
 };
