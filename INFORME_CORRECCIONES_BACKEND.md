@@ -25,9 +25,27 @@ Observaciones que impiden marcarlo como "LISTO":
 - Rama: `main` (no se cambió de rama).
 - Commit inicial: `44521d0` (`fix(ciclos): capacidad real hasta 500 y docente desde Asignacion_Aula`).
 - Estado inicial: working tree limpio.
-- **No hay commit, push, merge, rebase ni pull.** Todos los cambios están sin versionar, para revisión.
-- Archivos modificados: 18 existentes + 11 nuevos (detalle en "Archivos tocados").
+- **Los cambios están commitados y publicados en `origin/main`.** El commit de entrega es
+  `fix: corregir backend y reforzar flujos críticos` (hash `3396d5a` tras reaplicar sobre el remoto).
+  Durante el push, `origin/main` había avanzado con `23a891e` ("Arreglado lo de perfiles y elimine un
+  database que no se usa"), que solo borra `database/MIGRACION_PREU.sql`. Se integró con `git rebase`
+  (sin merge, sin conflictos y sin perder la eliminación remota de ese archivo); no se hizo `push --force`.
+- Archivos del commit: 18 modificados + 13 nuevos (detalle en "Archivos tocados").
 - No se modificaron `.env`, credenciales, `node_modules`, archivos generados ni datos de la BD.
+
+### Archivos tocados
+
+Modificados: `index.js`, `middlewares/cierre.middleware.js`, `routes/academico.routes.js`,
+`routes/actas.routes.js`, `routes/admin-ciclos.routes.js`, `routes/alumno.routes.js`,
+`routes/auth.routes.js`, `routes/ciclos.routes.js`, `routes/comunicados.routes.js`,
+`routes/dashboard.routes.js`, `routes/ia.routes.js`, `routes/materiales.routes.js`,
+`routes/matriculas.routes.js`, `routes/menu.routes.js`, `routes/notas.routes.js`,
+`routes/pagos.routes.js`, `routes/perfil.routes.js`, `routes/usuario.routes.js`.
+
+Nuevos: `.env.example`, `INFORME_CORRECCIONES_BACKEND.md`, `database/POST_DEMO_UNIQUE_FK.sql`
+(documentado, **no ejecutado**), `middlewares/error.middleware.js`, `utils/validaciones.js`,
+`tests/correcciones-backend.test.js`, `tests/smoke-readonly.js` y los seis scripts de verificación de
+`scripts/`.
 
 ## Bugs corregidos
 
@@ -190,7 +208,7 @@ decimal.
 
 | Comprobación | Comando | Resultado |
 | --- | --- | --- |
-| Sintaxis de todos los JS modificados | `node scripts/check-sintaxis.js` (interno `node --check`) | **Correcto en 27 archivos** |
+| Sintaxis de todos los JS versionados | `node scripts/check-sintaxis.js` (interno `node --check`) | **Correcto en 27 archivos** |
 | Suite completa | `node --test tests/*.test.js` | **65/65 pasan**, 0 fallos |
 | `npm test` | `npm test` | Falla en este entorno por el shim de Windows: `/usr/bin/env: 'bash': No such file or directory`. Se ejecutó el runner nativo equivalente: `node "C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js" test` → **65/65** |
 | Arranque y smoke | `node tests/smoke-readonly.js` | Arranca una instancia local y ejecuta solo GET/OPTIONS. `GET /ping` → **200**; `/api/ciclos/publicos` → 200 (9 ciclos); `/api/ciclos/publicos/:id/detalle` → 200; `/api/ciclos/:id/cursos` → 200; `/api/admin/ciclos`, `/api/materiales/admin`, `/api/notas` sin token → **403**; preflight CORS `http://localhost:5173` → **204** |

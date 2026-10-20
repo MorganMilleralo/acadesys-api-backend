@@ -1,14 +1,15 @@
-// Verificación de sintaxis de los archivos JS modificados (uso interno).
+// Verificación de sintaxis de los archivos JS versionados (uso interno).
 // Ejecutar con: node scripts/check-sintaxis.js
 const { execFileSync, spawnSync } = require('node:child_process');
 const path = require('node:path');
 
 const raiz = path.join(__dirname, '..');
-const salida = execFileSync('git', ['status', '--porcelain'], { cwd: raiz, encoding: 'utf8' });
+// Se listan los archivos versionados (no solo los modificados) para que la
+// comprobación siga siendo útil con el árbol de trabajo limpio.
+const salida = execFileSync('git', ['ls-files', '*.js'], { cwd: raiz, encoding: 'utf8' });
 const archivos = salida
   .split(/\r?\n/)
   .filter(Boolean)
-  .map((linea) => linea.slice(3).trim().replace(/^"|"$/g, ''))
   .filter((archivo) => archivo.endsWith('.js') && !archivo.includes('node_modules'));
 
 let fallos = 0;
