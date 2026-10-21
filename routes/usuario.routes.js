@@ -665,4 +665,63 @@ router.delete(
   },
 );
 
+  // 2d. ELIMINAR FOTO DE PERFIL (Mi Perfil)
+  // Elimina la foto del usuario autenticado: pone FotoUrl = NULL en BD
+  // y elimina el archivo físico si existe en uploads/perfiles/.
+  // Nunca acepta IdUsuario del cliente: la identidad viene del JWT.
+  router.delete("/usuarios/me/foto", async (req, res) => {
+    let connection;
+    try {
+      const idUsuario = Number(req.usuario?.idUsuario ?? req.usuario?.id);
+      if (!Number.isSafeInteger(idUsuario) || idUsuario <= 0) {
+        return res
+          .status(401)
+          .json({ error: "Sesión inválida. Inicia sesión nuevamente." });
+      }
+
+      connection = await pool.getConnection();
+      await connection.beginTransaction();
+
+      // Verificar que el usuario existe
+      const [[usuario]] = await connection.query(
+        'SELECT IdUsuario, FotoUrl FROM Usuario WHERE IdUsuario = ? AND EstadoRegistro = 1',
+        [idUsuario],
+      );
+      if (!usuario) {
+        await connection.rollback();
+        return res.status(404).json({ error: 'No se encontró tu usuario.' });
+      }
+
+      // Quitar referencia de foto en la BD (poner NULL)
+      await connection.query(
+        'UPDATE Usuario SET FotoUrl = NULL WHERE IdUsuario = ? AND EstadoRegistro = 1',
+        [idUsuario],
+      );
+
+      // Intentar eliminar el archivo físico si existía en el directorio gestionado
+      if (usuario.FotoUrl) {
+        const fs = require('fs');
+        const rutaArchivo = path.join(__dirname, '..', 'uploads', 'perfiles', usuario.FotoUrl.substring(1)); // quitar la / inicial
+        try {
+          if (fs.existsSync(rutaArchivo)) {
+            fs.unlinkSync(rutaArchivo);
+          }
+          // Si el archivo no existe, no es error fatal: solo ponemos FotoUrl = NULL
+        } catch (fileError) {
+          console.error('Error eliminando archivo físico:', fileError);
+          // Continuamos igual: el NULL en BD ya quedó registrado
+        }
+      }
+
+      await connection.commit();
+      res.json({ message: "Foto de perfil eliminada con éxito." });
+    } catch (error) {
+      await rollbackSeguro(connection);
+      console.error('Error en DELETE /usuarios/me/foto:', error.message);
+      res.status(500).json({ error: 'No se pudo completar la operación.' });
+    } finally {
+      if (connection) connection.release();
+    }
+  });
+
 module.exports = router;
