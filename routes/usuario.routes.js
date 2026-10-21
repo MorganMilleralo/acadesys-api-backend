@@ -280,6 +280,55 @@ router.put("/usuarios/me", async (req, res) => {
         .json({ error: "Sesión inválida. Inicia sesión nuevamente." });
     }
 
+    // --- Procesar foto de perfil (opcional) ---
+    let fotoUrl = null;
+    if (req.body?.fotoBase64 !== undefined) {
+      // Construir objeto de archivo para validación
+      const fileData = {
+        mimetype: req.body?.tipoMime || 'image/jpeg',
+        size: req.body?.tamanoBytes ? Number(req.body.tamanoBytes) : 0,
+        // Decodificar Base64 a buffer para validar magic bytes
+        buffer: Buffer.from(req.body.fotoBase64, 'base64'),
+      };
+
+      // Validar tipo, tamaño y magic bytes (sin agregar dependencias externas)
+      const validacion = validarTipoArchivo(fileData);
+      if (validacion.error) {
+        return res.status(400).json({ error: validacion.error });
+      }
+
+      // Si passed validation, proceed to save file
+      const { size } = validacion;
+
+      // Generar nombre seguro para el archivo (nunca usar nombre original)
+      const nombreArchivo = generarNombreSeguro(idUsuario);
+      const uploadDir = path.join(__dirname, '..', 'uploads');
+      const perfilDir = path.join(uploadDir, 'perfiles');
+
+      // Asegurarse de que los directorios existan
+      const fs = require('fs');
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+      if (!fs.existsSync(perfilDir)) {
+        fs.mkdirSync(perfilDir, { recursive: true });
+      }
+
+      // Ruta completa del archivo
+      const destino = path.join(perfilDir, nombreArchivo);
+
+      // Escribir el archivo decodificado desde Base64
+      try {
+        fs.writeFileSync(destino, fileData.buffer);
+      } catch (writeError) {
+        console.error('Error escribiendo archivo de foto:', writeError);
+        return res.status(500).json({ error: 'No se pudo guardar el archivo de imagen.' });
+      }
+
+      // Construir la URL relativa para devolver al cliente
+      fotoUrl = `/uploads/perfiles/${nombreArchivo}`;
+    }
+
     const validado = validarDatosUsuario(Object.fromEntries(
       ['Nombres', 'DNI', 'CorreoElectronico', 'Celular'].filter((campo) => req.body?.[campo] !== undefined).map((campo) => [campo, req.body[campo]]),
     ));
@@ -296,15 +345,25 @@ router.put("/usuarios/me", async (req, res) => {
     if (Nombres !== undefined) {
       const nombresLimpios = String(Nombres).trim();
       if (!nombresLimpios) {
-        return res
-          .status(400)
-          .json({ error: "El nombre no puede quedar vacío." });
+        // Si falla la validación de nombre, intentar limpiar el archivo subido
+        if (fotoUrl) {
+          const fs = require('fs');
+          const destino = path.join(__dirname, '..', 'uploads', 'perfiles', fotoUrl.substring(10));
+          try { fs.unlinkSync(destino); } catch (e) {}
+        }
+        return res.status(400).json({ error: "El nombre no puede quedar vacío." });
       }
       asignar("Nombres", nombresLimpios);
     }
     if (DNI !== undefined) {
       const dniLimpio = String(DNI ?? "").trim();
       if (dniLimpio && !/^\d{8}$/.test(dniLimpio)) {
+        // Si falla la validación de DNI, intentar limpiar el archivo subido
+        if (fotoUrl) {
+          const fs = require('fs');
+          const destino = path.join(__dirname, '..', 'uploads', 'perfiles', fotoUrl.substring(10));
+          try { fs.unlinkSync(destino); } catch (e) {}
+        }
         return res.status(400).json({ error: "El DNI debe tener 8 dígitos." });
       }
       asignar("DNI", dniLimpio || null);
@@ -312,9 +371,13 @@ router.put("/usuarios/me", async (req, res) => {
     if (CorreoElectronico !== undefined) {
       const correoLimpio = String(CorreoElectronico ?? "").trim();
       if (correoLimpio && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correoLimpio)) {
-        return res
-          .status(400)
-          .json({ error: "El correo electrónico no es válido." });
+        // Si falla la validación de correo, intentar limpiar el archivo subido
+        if (fotoUrl) {
+          const fs = require('fs');
+          const destino = path.join(__dirname, '..', 'uploads', 'perfiles', fotoUrl.substring(10));
+          try { fs.unlinkSync(destino); } catch (e) {}
+        }
+        return res.status(400).json({ error: "El correo electrónico no es válido." });
       }
       asignar("CorreoElectronico", correoLimpio || null);
     }
@@ -322,7 +385,9 @@ router.put("/usuarios/me", async (req, res) => {
       asignar("Celular", String(Celular ?? "").trim());
     }
 
-    if (campos.length === 0) {
+    // Verificar que al menos haya un cambio (datos o foto)
+    const hayCambios = campos.length > 0 || req.body?.fotoBase64 !== undefined;
+    if (!hayCambios) {
       return res
         .status(400)
         .json({ error: "No se enviaron cambios para tu perfil." });
