@@ -55,7 +55,7 @@ router.get('/dashboard/overview', async (req, res) => {
       SELECT COUNT(*) AS MatriculasActivas
       FROM Matricula m
       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-      INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo
+      INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo AND c.IdAcademia = u.IdAcademia
       WHERE u.IdAcademia = ?
         AND u.EstadoRegistro = 1
         AND m.EstadoRegistro = 1
@@ -78,6 +78,7 @@ router.get('/dashboard/overview', async (req, res) => {
           WHERE m.IdCiclo = c.IdCiclo
             AND m.EstadoRegistro = 1
             AND u.EstadoRegistro = 1
+            AND u.IdAcademia = c.IdAcademia
         ) AS TotalAlumnos,
         (
           SELECT COUNT(*)

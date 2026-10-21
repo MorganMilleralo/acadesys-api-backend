@@ -22,11 +22,12 @@ function ejecutar(middleware, req) {
   return { res, llamadaNext };
 }
 
-test('listado de notas: permite al docente con academia válida', () => {
+test('listado de notas: academia y rol docente no acreditan asignacion de alumnos', () => {
   const resultado = ejecutar(requiereGestionNotas, {
     usuario: { id: 20, idUsuario: 20, idAcademia: 3, rol: 'Docente', idPerfil: 2 },
   });
-  assert.equal(resultado.llamadaNext, true);
+  assert.equal(resultado.llamadaNext, false);
+  assert.equal(resultado.res.statusCode, 403);
 });
 
 test('listado de notas: bloquea a un alumno', () => {
@@ -63,12 +64,13 @@ test('historial individual: rechaza un ID inválido', () => {
   assert.equal(resultado.res.statusCode, 400);
 });
 
-test('historial individual: permite al personal académico con academia válida', () => {
+test('historial individual: bloquea al docente sin asignacion verificable', () => {
   const resultado = ejecutar(autorizarHistorialAlumno, {
     params: { id: '21' },
     usuario: { id: 20, idUsuario: 20, idAcademia: 3, rol: 'Docente', idPerfil: 2 },
   });
-  assert.equal(resultado.llamadaNext, true);
+  assert.equal(resultado.llamadaNext, false);
+  assert.equal(resultado.res.statusCode, 403);
 });
 
 test('historial individual: no permite consultar sin academia válida', () => {
@@ -94,4 +96,16 @@ test('notas: reconoce administrador por el rol actual sin depender del ID', () =
     usuario: { id: 20, idUsuario: 20, idAcademia: 3, rol: 'Administrador', idPerfil: 8 },
   });
   assert.equal(resultado.llamadaNext, true);
+});
+
+test('notas e historial: equivalencia administrativa exacta, sin alias ni subcadenas', () => {
+  for (const [rol, permitido] of [['Administrador', true], [' Recursos   Humanos ', true],
+    ['Administrador externo', false], ['rrhh', false], ['Tutor de Aula', false]]) {
+    const req = { usuario: { id: 20, idAcademia: 3, rol }, params: { id: '21' } };
+    for (const middleware of [requiereGestionNotas, autorizarHistorialAlumno]) {
+      const resultado = ejecutar(middleware, req);
+      assert.equal(resultado.llamadaNext, permitido, rol);
+      if (!permitido) assert.equal(resultado.res.statusCode, 403);
+    }
+  }
 });

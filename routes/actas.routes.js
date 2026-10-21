@@ -12,7 +12,8 @@ const TIPOS_VALIDOS = new Map([
 ]);
 
 function normalizarTipo(valor) {
-  const clave = String(valor ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+  if (typeof valor !== 'string') return null;
+  const clave = valor.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
   return TIPOS_VALIDOS.get(clave) || null;
 }
 
@@ -23,7 +24,8 @@ function periodoValido(valor) {
 
 // PUT /api/actas/cierre
 // Body: { idCiclo, idCurso, periodo, tipoEvaluacion }
-// El cierre queda acotado a una combinación. No bloquea otros cursos, periodos o ciclos.
+// Contrato legado de main: IdCurso es el alcance de Matricula, no de Evaluacion.
+// Se conserva por compatibilidad; no representa un nuevo cierre semanal.
 router.put('/actas/cierre', requiereRol('Administrador'), async (req, res) => {
   const idCiclo = idPositivo(req.body?.idCiclo ?? req.body?.IdCiclo);
   const idCursoRaw = req.body?.idCurso ?? req.body?.IdCurso;
@@ -32,8 +34,8 @@ router.put('/actas/cierre', requiereRol('Administrador'), async (req, res) => {
     : Number(idCursoRaw);
   const periodo = periodoValido(req.body?.periodo ?? req.body?.Periodo);
   const tipoEvaluacion = normalizarTipo(req.body?.tipoEvaluacion ?? req.body?.TipoEvaluacion);
-  const idAdmin = Number(req.usuario?.idUsuario ?? req.usuario?.id);
-  const idAcademia = Number(req.usuario?.idAcademia);
+  const idAdmin = idPositivo(req.usuario?.idUsuario ?? req.usuario?.id);
+  const idAcademia = idPositivo(req.usuario?.idAcademia);
 
   const cursoFueIndicado = Object.prototype.hasOwnProperty.call(req.body || {}, 'idCurso')
     || Object.prototype.hasOwnProperty.call(req.body || {}, 'IdCurso');

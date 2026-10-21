@@ -168,6 +168,7 @@ router.get('/me', async (req, res) => {
       LEFT JOIN Curso cu ON cu.IdCurso = m.IdCurso
       WHERE m.IdUsuario = ?
         AND m.IdCiclo = ?
+        AND m.EstadoRegistro = 1
         AND e.EstadoRegistro IN (1, 2)
       ORDER BY e.FechaCreacion DESC, e.IdEvaluacion DESC
     `, [idUsuario, ciclo.idCiclo]);
@@ -213,6 +214,7 @@ router.get('/me', async (req, res) => {
       INNER JOIN Curso cu ON cu.IdCurso = ma.IdCurso
       WHERE ma.IdCiclo = ?
         AND ma.EstadoRegistro = 1
+        AND cu.EstadoRegistro = 1
       ORDER BY ma.FechaPublicacion DESC, ma.IdMaterial DESC
     `, [ciclo.idCiclo]);
 

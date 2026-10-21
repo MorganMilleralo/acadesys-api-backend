@@ -1,5 +1,19 @@
 # Avance de Morgan — autorización RBAC de notas
 
+> Estado de la rama de consolidación: este avance ya está integrado. Consultar
+> [CONSOLIDACION_BACKEND.md](CONSOLIDACION_BACKEND.md) para el contrato vigente,
+> pruebas y bloqueos. Ejecutar `npm.cmd test`; no volver a ejecutar el instalador
+> descrito abajo. Docente/tutor no reciben acceso a notas sin asignación verificable;
+> Administrador y Recursos Humanos comparten permisos por nombre exacto normalizado.
+>
+> Alcance confirmado por Morgan: **solo simulacros semanales, sin calificaciones
+> por curso**. La integración conserva el contrato existente de main, sin
+> Evaluacion.IdCurso ni RegistrosAfectados. Sus 154 pruebas locales pasan; la
+> adaptación semanal completa y la verificación del esquema vivo siguen pendientes.
+> **No apto para Auto-Deploy**: Render despliega main y Aiven es la única base.
+
+El texto siguiente conserva la descripción del avance original de main.
+
 ## Objetivo
 Cerrar las rutas de lectura de notas que no exigen autorización por rol y evitar que un alumno consulte el historial de otro estudiante.
 

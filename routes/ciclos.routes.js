@@ -396,5 +396,3 @@ module.exports = {
   MAX_CAPACIDAD,
   MAX_PRECIO,
 };
-
-

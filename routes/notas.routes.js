@@ -2,7 +2,6 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
-const requiereRol = require("../middlewares/roles.middleware");
 const verificarPeriodoAbierto = require("../middlewares/cierre.middleware");
 const { requiereGestionNotas, autorizarHistorialAlumno } = require("../middlewares/notas-acceso.middleware");
 const { calificacionEntera, idPositivo, rollbackSeguro } = require('../utils/validaciones');
@@ -24,18 +23,20 @@ const ESCALAS_POR_UNIVERSIDAD = {
 
 const obtenerMaximoPermitido = (universidad = "") => {
   const key = String(universidad || "").trim();
-  return ESCALAS_POR_UNIVERSIDAD[key] ?? ESCALAS_POR_UNIVERSIDAD.DEFAULT;
+  return Object.hasOwn(ESCALAS_POR_UNIVERSIDAD, key)
+    ? ESCALAS_POR_UNIVERSIDAD[key] : ESCALAS_POR_UNIVERSIDAD.DEFAULT;
 };
 
 const TIPOS_VALIDOS = ['Practica', 'Evaluacion', 'Examen', 'Simulacro'];
 
 function normalizarTipoEvaluacion(valor) {
-  const clave = String(valor ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+  if (typeof valor !== 'string') return null;
+  const clave = valor.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
   // Se guardan valores canónicos sin tildes para mantener compatibilidad con
   // datos preexistentes como 'Practica' y 'Participacion'. La interfaz puede
   // seguir mostrando las etiquetas con tildes.
   const tipos = { practica: 'Practica', evaluacion: 'Evaluacion', examen: 'Examen', simulacro: 'Simulacro' };
-  return tipos[clave] || null;
+  return Object.hasOwn(tipos, clave) ? tipos[clave] : null;
 }
 
 /* ============================================================
@@ -71,7 +72,7 @@ router.get("/", requiereGestionNotas, async (req, res) => {
    ============================================================ */
 router.get("/contexto/:idCiclo", requiereGestionNotas, async (req, res) => {
   try {
-    const idCiclo = Number(req.params.idCiclo);
+    const idCiclo = idPositivo(req.params.idCiclo);
     const idAcademia = req.usuario.idAcademia;
 
     if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
@@ -119,7 +120,7 @@ router.get("/contexto/:idCiclo", requiereGestionNotas, async (req, res) => {
    ============================================================ */
 router.get("/matriculas/:idCiclo", requiereGestionNotas, async (req, res) => {
   try {
-    const idCiclo = Number(req.params.idCiclo);
+    const idCiclo = idPositivo(req.params.idCiclo);
     const idAcademia = req.usuario.idAcademia;
 
     if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
@@ -212,7 +213,7 @@ router.get("/alumno/:id", autorizarHistorialAlumno, async (req, res) => {
    ============================================================ */
 router.post(
   "/",
-  requiereRol("Docente", "Tutor de Aula", "Administrador"),
+  requiereGestionNotas,
   verificarPeriodoAbierto,
   async (req, res) => {
     const idCiclo = idPositivo(req.body?.idCiclo ?? req.body?.IdCiclo);
@@ -330,7 +331,8 @@ router.post(
         }
 
         const clave = `${idMat}:${tipo}`;
-        // COALESCE(Periodo,'General') cubre notas antiguas con Periodo NULL.
+        // Contrato heredado de main: NULL y General comparten la misma clave.
+        // General no identifica una semana; no inventar fechas ni cambiar esta regla aqu?.
         const [duplicadas] = await connection.query(
           `SELECT IdEvaluacion FROM Evaluacion
            WHERE IdMatricula = ? AND COALESCE(Periodo, 'General') = ? AND TipoEvaluacion = ?
@@ -399,7 +401,7 @@ router.post(
    ============================================================ */
 router.put(
   "/:id",
-  requiereRol("Docente", "Tutor de Aula", "Administrador"),
+  requiereGestionNotas,
   verificarPeriodoAbierto,
   async (req, res) => {
     const id = idPositivo(req.params.id);

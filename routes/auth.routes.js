@@ -208,12 +208,11 @@ const loginHandler = async (req, res) => {
         a.ColorTema,
         a.LogoUrl
       FROM Usuario u
-      LEFT JOIN Usuario_Perfiles up
+      INNER JOIN Usuario_Perfiles up
         ON u.IdUsuario = up.IdUsuario
        AND up.EstadoRegistro = 1
-      LEFT JOIN perfil p
-        ON up.IdPerfil = p.IdPerfil
-       AND p.EstadoRegistro = 1
+      INNER JOIN perfil p
+        ON up.IdPerfil = p.IdPerfil AND p.EstadoRegistro = 1
       LEFT JOIN Academia a
         ON u.IdAcademia = a.IdAcademia
       WHERE u.EstadoRegistro = 1
@@ -236,10 +235,8 @@ const loginHandler = async (req, res) => {
         WHEN LOWER(TRIM(u.CodigoUsuario)) = ? THEN 2
         WHEN TRIM(COALESCE(u.DNI, '')) = ? THEN 3
         ELSE 4
-      END,
-      CASE WHEN p.IdPerfil IS NULL THEN 1 ELSE 0 END ASC,
-      up.IdPerfil ASC
-      LIMIT 1`,
+      END
+      LIMIT 2`,
       [
         termLower,
         termLower,
@@ -276,27 +273,29 @@ const loginHandler = async (req, res) => {
       return res.status(401).json({ error: "Credenciales incorrectas." });
     }
 
-    // No emitir sesión si el usuario no tiene un perfil ACTIVO vigente.
-    // (El LEFT JOIN exige p.EstadoRegistro = 1, por lo que un perfil inactivo
-    // o eliminado lógicamente deja Rol = 'Sin Rol').
-    if (user.IdPerfil == null || !user.Rol || user.Rol === "Sin Rol") {
-      return res.status(403).json({
-        error:
-          "Tu cuenta no tiene un perfil activo asignado. Contacta al administrador.",
-      });
+    if (rows.length !== 1) {
+      return res.status(403).json({ error: "Identidad ambigua o multiples perfiles activos." });
     }
 
     const rol = user.Rol || "Sin Rol";
 
-    if (claveLegadaEnTextoPlano) {
-      const claveHash = await bcrypt.hash(clave, 10);
-      await pool.query('UPDATE Usuario SET Clave = ? WHERE IdUsuario = ?', [claveHash, user.IdUsuario]);
-    }
-
     const jwtSecret = process.env.JWT_SECRET;
-    if (!jwtSecret || jwtSecret.length < 32) {
+    if (!jwtSecret || jwtSecret.trim().length < 32) {
       console.error('[Auth] JWT_SECRET no está configurado o es demasiado corto.');
       return res.status(503).json({ error: 'La autenticación no está configurada correctamente.' });
+    }
+
+    if (claveLegadaEnTextoPlano) {
+      const claveHash = await bcrypt.hash(clave, 10);
+      // No sobrescribir una clave cambiada por recuperacion mientras se calcula
+      // el hash. La comparacion binaria evita la collation insensible a mayusculas.
+      const [actualizacion] = await pool.query(
+        'UPDATE Usuario SET Clave = ? WHERE IdUsuario = ? AND BINARY Clave = BINARY ? AND EstadoRegistro = 1',
+        [claveHash, user.IdUsuario, claveEnBD],
+      );
+      if (actualizacion.affectedRows !== 1) {
+        return res.status(401).json({ error: 'Las credenciales cambiaron. Inicia sesion nuevamente.' });
+      }
     }
 
     const token = jwt.sign(
@@ -314,9 +313,7 @@ const loginHandler = async (req, res) => {
     let matricula = null;
 
     const esAlumno =
-      String(rol).toLowerCase().includes("alumno") ||
-      String(rol).toLowerCase().includes("estudiante");
-
+      ["alumno", "estudiante"].includes(String(rol).trim().toLowerCase());
     if (esAlumno) {
       const [matriculas] = await pool.query(
         `SELECT
@@ -338,11 +335,12 @@ const loginHandler = async (req, res) => {
         FROM Matricula m
         INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo
         WHERE m.IdUsuario = ?
+          AND c.IdAcademia = ?
           AND m.EstadoRegistro = 1
           AND c.EstadoRegistro = 1
         ORDER BY m.IdMatricula DESC
         LIMIT 1`,
-        [user.IdUsuario],
+        [user.IdUsuario, user.IdAcademia],
       );
 
       if (matriculas.length > 0) {

@@ -34,7 +34,7 @@ async function main() {
       await get(`/api/ciclos/publicos/${Number(id)}/detalle`);
       await get(`/api/ciclos/${Number(id)}/cursos`);
     }
-    for (const ruta of ['/api/admin/ciclos', '/api/materiales/admin', '/api/notas']) await get(ruta, 403);
+    for (const ruta of ['/api/admin/ciclos', '/api/materiales/admin', '/api/notas']) await get(ruta, 401);
     const cors = await fetch(base + '/api/auth/login', { method: 'OPTIONS', headers: {
       Origin: 'http://localhost:5173', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'Content-Type',
     }, signal: AbortSignal.timeout(5000) });

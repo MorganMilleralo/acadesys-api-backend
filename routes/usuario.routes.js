@@ -5,6 +5,16 @@ const pool = require("../config/db");
 const bcrypt = require("bcrypt");
 const requiereRol = require("../middlewares/roles.middleware");
 const { validarDatosUsuario, usuarioDuplicado, bloquearIdentidades, rollbackSeguro } = require('../utils/validaciones');
+const { enteroPositivo } = require("../utils/evaluaciones");
+
+async function perfilActivo(connection, idPerfil) {
+  if (!enteroPositivo(idPerfil)) return false;
+  const [perfiles] = await connection.query(
+    "SELECT IdPerfil FROM perfil WHERE IdPerfil = ? AND EstadoRegistro = 1 LIMIT 1 FOR SHARE",
+    [Number(idPerfil)]
+  );
+  return perfiles.length === 1;
+}
 
 const idPerfilValido = (valor) => {
   if (!["string", "number"].includes(typeof valor)) return null;
@@ -13,22 +23,9 @@ const idPerfilValido = (valor) => {
   return Number.isSafeInteger(id) && id > 0 && id <= 2147483647 ? id : null;
 };
 
-const normalizarTexto = (valor) =>
-  String(valor ?? "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-
 // Un perfil es administrativo por su NOMBRE (igual criterio que roles.middleware).
 // Nunca por un IdPerfil/IdUsuario fijo.
-const esPerfilAdministrativo = (nombre) => {
-  const n = normalizarTexto(nombre);
-  return (
-    n.includes("administrador") || n.includes("recursos humanos") || n === "rrhh"
-  );
-};
+const esPerfilAdministrativo = requiereRol.esAdministrativo;
 
 // ¿Existe OTRO usuario administrativo ACTIVO (con perfil activo) en la academia?
 const existeOtroAdminActivo = async (
@@ -122,16 +119,9 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
       return res.status(409).json({ error: 'Ya existe un usuario con ese DNI o correo electrónico.' });
     }
 
-    // El perfil debe existir y estar activo; no se confía en el select del front.
-    const [perfilValido] = await connection.query(
-      "SELECT IdPerfil FROM perfil WHERE IdPerfil = ? AND EstadoRegistro = 1",
-      [idPerfilSolicitado],
-    );
-    if (!perfilValido.length) {
+    if (!await perfilActivo(connection, IdPerfil)) {
       await connection.rollback();
-      return res
-        .status(400)
-        .json({ error: "El perfil seleccionado no existe o está inactivo." });
+      return res.status(400).json({ error: "El perfil debe existir y estar activo." });
     }
 
     const baseCodigo = String(
@@ -215,9 +205,9 @@ router.get("/usuarios", requiereRol("Administrador"), async (req, res) => {
 });
 
 // 2a. DIRECTORIO MÍNIMO NO SENSIBLE.
-// Solo identidad académica (id + nombre) y perfil, para que las vistas de
-// Administrador / Docente / Tutor de Aula funcionen sin exponer DNI, correo,
-// celular ni ningún otro dato privado. No sustituye al listado administrativo.
+// Los administradores consultan su academia. Docente/tutor solo ven su propia
+// entrada hasta acreditar una relacion verificable con los demas usuarios.
+// No expone DNI, correo, celular ni hashes; conserva la URL y el array de React.
 router.get(
   "/usuarios/directorio",
   requiereRol("Administrador", "Docente", "Tutor de Aula", "Tutor"),
@@ -234,8 +224,9 @@ router.get(
            INNER JOIN perfil p
              ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
            WHERE u.EstadoRegistro = 1 AND u.IdAcademia = ?
+             AND (? = 1 OR u.IdUsuario = ?)
            ORDER BY u.Nombres ASC, u.ApellidoPaterno ASC`,
-        [req.usuario.idAcademia],
+        [req.usuario.idAcademia, esPerfilAdministrativo(req.usuario.rol) ? 1 : 0, req.usuario.id],
       );
       res.json(rows);
     } catch (error) {
@@ -428,16 +419,14 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
          FROM Usuario_Perfiles up
          INNER JOIN perfil p ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
         WHERE up.IdUsuario = ? AND up.EstadoRegistro = 1
-        LIMIT 1`,
+        FOR SHARE`,
       [idUsuarioObjetivo],
     );
-    const esAdminActual = perfilActualRows.length
-      ? esPerfilAdministrativo(perfilActualRows[0].NombrePerfil)
-      : false;
+    const esAdminActual = perfilActualRows.some((perfil) => esPerfilAdministrativo(perfil.NombrePerfil));
 
     // Validar IdPerfil (existente y activo) antes de tocar al usuario.
     let idPerfilNuevo = null;
-    if (IdPerfil !== undefined && IdPerfil !== null && IdPerfil !== "") {
+    if (IdPerfil !== undefined) {
       idPerfilNuevo = idPerfilValido(IdPerfil);
       if (!idPerfilNuevo) {
         await connection.rollback();
@@ -446,7 +435,7 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
           .json({ error: "El IdPerfil enviado no es un identificador válido." });
       }
       const [perfilValido] = await connection.query(
-        "SELECT IdPerfil, Nombre FROM perfil WHERE IdPerfil = ? AND EstadoRegistro = 1",
+        "SELECT IdPerfil, Nombre FROM perfil WHERE IdPerfil = ? AND EstadoRegistro = 1 LIMIT 1 FOR SHARE",
         [idPerfilNuevo],
       );
       if (!perfilValido.length) {
@@ -561,14 +550,20 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
     }
 
     if (idPerfilNuevo) {
-      const [existePerfil] = await connection.query(
-        "SELECT IdUsuario FROM Usuario_Perfiles WHERE IdUsuario = ?",
+      const [existentes] = await connection.query(
+        "SELECT IdUsuarioPerfil FROM Usuario_Perfiles WHERE IdUsuario = ? AND IdPerfil = ? ORDER BY IdUsuarioPerfil LIMIT 1 FOR UPDATE",
+        [idUsuarioObjetivo, idPerfilNuevo],
+      );
+      // El usuario esta bloqueado desde el inicio de la transaccion. Se conserva
+      // el historial y se reactiva una sola relacion, nunca todas las anteriores.
+      await connection.query(
+        "UPDATE Usuario_Perfiles SET EstadoRegistro = 0 WHERE IdUsuario = ?",
         [idUsuarioObjetivo],
       );
-      if (existePerfil.length > 0) {
+      if (existentes.length > 0) {
         await connection.query(
-          "UPDATE Usuario_Perfiles SET IdPerfil = ?, EstadoRegistro = 1 WHERE IdUsuario = ?",
-          [idPerfilNuevo, idUsuarioObjetivo],
+          "UPDATE Usuario_Perfiles SET EstadoRegistro = 1 WHERE IdUsuarioPerfil = ?",
+          [existentes[0].IdUsuarioPerfil],
         );
       } else {
         await connection.query(

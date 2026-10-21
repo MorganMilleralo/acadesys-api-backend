@@ -1,5 +1,11 @@
 # Avance técnico de Morgan: control de acceso a notas
 
+> Nota de integración: los criterios siguientes describen el avance original.
+> En `david/consolidacion-backend` se mantiene el middleware y sus rutas, pero el
+> rol docente/tutor y la academia no prueban asignación a alumnos; esas consultas
+> responden 403. Admin/RRHH usan coincidencia exacta normalizada. Las pruebas se
+> actualizaron a este requisito explícito; ver [consolidación](../CONSOLIDACION_BACKEND.md).
+
 ## Hallazgo
 La revisión estática de `BACKEND.md` mostró cuatro rutas GET en `routes/notas.routes.js` sin validación de rol en su declaración: listado general, contexto de ciclo, matrículas de ciclo e historial por ID. El historial filtra por academia, pero ese filtro por sí solo no demuestra que quien consulta tenga permiso de ver los datos.
 

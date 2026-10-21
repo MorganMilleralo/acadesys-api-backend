@@ -24,7 +24,8 @@ const ESCALAS_POR_UNIVERSIDAD = Object.freeze({
 
 function obtenerMaximoPermitido(universidad = "") {
   const clave = String(universidad || "").trim();
-  return ESCALAS_POR_UNIVERSIDAD[clave] ?? ESCALAS_POR_UNIVERSIDAD.DEFAULT;
+  return Object.hasOwn(ESCALAS_POR_UNIVERSIDAD, clave)
+    ? ESCALAS_POR_UNIVERSIDAD[clave] : ESCALAS_POR_UNIVERSIDAD.DEFAULT;
 }
 
 function idPositivo(valor) {
@@ -163,6 +164,7 @@ async function obtenerContextoAcademico(req) {
        FROM Evaluacion e
        INNER JOIN Matricula m ON m.IdMatricula = e.IdMatricula
        INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
+       INNER JOIN Ciclo ci ON ci.IdCiclo = m.IdCiclo AND ci.IdAcademia = u.IdAcademia
        LEFT JOIN Curso cu ON cu.IdCurso = m.IdCurso
        WHERE m.IdUsuario = ?
          AND m.IdCiclo = ?

@@ -1,114 +1,117 @@
 
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
+const { enteroPositivo } = require("../utils/evaluaciones");
 
-// ============================================================
-// VERIFICACIÓN DE SESIÓN (JWT + ESTADO REAL EN BD)
-// ============================================================
-//
-// Antes solo se verificaba la firma del token y se confiaba en el rol
-// guardado dentro del JWT. Eso permitía que un token emitido con un perfil
-// activo siguiera otorgando permisos aunque el usuario fuera desactivado,
-// se le cambiara el perfil o el perfil se desactivara/eliminara.
-//
-// Ahora, tras validar la firma, se consulta el estado vigente en la base de
-// datos y se reemplaza el rol del token por el rol actual. Así:
-//
-//   - usuario desactivado       -> 401
-//   - sin relación de perfil     -> 401
-//   - perfil inactivo/eliminado  -> 401
-//   - perfil cambiado            -> se aplican los permisos nuevos
-//
-// El token ya no es fuente de autorización: solo identifica al usuario.
-// El formato del JWT no cambia.
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET || JWT_SECRET.trim().length < 32) {
+  throw new Error(
+    "JWT_SECRET debe tener al menos 32 caracteres para iniciar AcadeSys."
+  );
+}
+
 const verificarToken = async (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
+  const authHeader = req.headers.authorization;
 
-  if (!token) {
-    return res
-      .status(403)
-      .json({ error: "Acceso denegado: Un token de acceso es requerido" });
+  if (
+    typeof authHeader !== "string" ||
+    !/^Bearer\s+\S+$/i.test(authHeader.trim())
+  ) {
+    return res.status(401).json({
+      error: "Se requiere un token Bearer válido.",
+    });
   }
 
-  let decoded;
-  try {
-    const jwtSecret = process.env.JWT_SECRET;
-    if (!jwtSecret || jwtSecret.length < 32) {
-      console.error('[Auth] JWT_SECRET no está configurado o es demasiado corto.');
-      return res.status(503).json({ error: 'La autenticación no está configurada correctamente.' });
-    }
-    decoded = jwt.verify(token, jwtSecret);
-  } catch (error) {
-    return res
-      .status(401)
-      .json({ error: "Token inválido o expirado. Inicie sesión nuevamente." });
-  }
-
-  const idUsuario = decoded?.idUsuario || decoded?.id;
-  if (!idUsuario) {
-    return res
-      .status(401)
-      .json({ error: "Sesión inválida. Inicie sesión nuevamente." });
-  }
+  const token = authHeader.trim().split(/\s+/)[1];
 
   try {
-    const [rows] = await pool.query(
-      `SELECT
-          u.IdUsuario,
-          u.EstadoRegistro AS EstadoUsuario,
-          u.IdAcademia,
-          up.IdPerfil,
-          COALESCE(NULLIF(p.Nombre, ''), '') AS Rol,
-          p.EstadoRegistro AS EstadoPerfil
-        FROM Usuario u
-        LEFT JOIN Usuario_Perfiles up
-          ON up.IdUsuario = u.IdUsuario
-         AND up.EstadoRegistro = 1
-        LEFT JOIN perfil p
-          ON p.IdPerfil = up.IdPerfil
-         AND p.EstadoRegistro = 1
-       WHERE u.IdUsuario = ?
-       ORDER BY CASE WHEN p.IdPerfil IS NULL THEN 1 ELSE 0 END ASC,
-                up.IdPerfil ASC
-       LIMIT 1`,
-      [idUsuario],
-    );
-
-    const usuario = rows[0];
-
-    if (!usuario || Number(usuario.EstadoUsuario) !== 1) {
-      return res.status(401).json({
-        error: "Tu sesión ya no es válida. Vuelve a iniciar sesión.",
-      });
-    }
+    const decoded = jwt.verify(token, JWT_SECRET, {
+      algorithms: ["HS256"],
+    });
 
     if (
-      usuario.IdPerfil == null ||
-      Number(usuario.EstadoPerfil) !== 1 ||
-      !usuario.Rol
+      !decoded ||
+      typeof decoded !== "object" ||
+      decoded.proposito !== undefined ||
+      !enteroPositivo(decoded.id) ||
+      !enteroPositivo(decoded.idAcademia)
     ) {
       return res.status(401).json({
-        error: "Tu perfil ya no está disponible. Contacta al administrador.",
+        error: "El token no contiene una identidad válida.",
       });
     }
 
-    // Datos vigentes: se ignora el rol almacenado en el token.
+    let usuarios;
+
+    try {
+      [usuarios] = await pool.query(
+        `SELECT
+            u.IdUsuario,
+            u.IdAcademia,
+            up.IdPerfil,
+            p.Nombre AS Rol
+         FROM Usuario u
+         INNER JOIN Usuario_Perfiles up
+           ON up.IdUsuario = u.IdUsuario
+           AND up.EstadoRegistro = 1
+         INNER JOIN perfil p
+           ON p.IdPerfil = up.IdPerfil
+           AND p.EstadoRegistro = 1
+         WHERE u.IdUsuario = ?
+           AND u.EstadoRegistro = 1
+         LIMIT 2`,
+        [Number(decoded.id)]
+      );
+    } catch (dbError) {
+      console.error("Error al verificar permisos:", dbError);
+
+      return res.status(503).json({
+        error: "No se pudo verificar la sesion.",
+      });
+    }
+
+    if (usuarios.length === 0) {
+      return res.status(401).json({
+        error: "Usuario inactivo o sin perfil activo.",
+      });
+    }
+
+    if (usuarios.length > 1) {
+      return res.status(403).json({
+        error: "El usuario tiene multiples perfiles activos.",
+      });
+    }
+
+    const usuarioActual = usuarios[0];
+
+    if (
+      Number(usuarioActual.IdAcademia) !==
+      Number(decoded.idAcademia)
+    ) {
+      return res.status(401).json({
+        error: "La academia del usuario ha cambiado.",
+      });
+    }
+
     req.usuario = {
-      id: usuario.IdUsuario,
-      idUsuario: usuario.IdUsuario,
-      idAcademia: usuario.IdAcademia,
-      idPerfil: usuario.IdPerfil,
-      rol: usuario.Rol,
+      ...decoded,
+      id: usuarioActual.IdUsuario,
+      idUsuario: usuarioActual.IdUsuario,
+      idAcademia: usuarioActual.IdAcademia,
+      idPerfil: usuarioActual.IdPerfil,
+      rol: usuarioActual.Rol,
     };
 
     return next();
+
+
   } catch (error) {
-    console.error("[Auth] Error al validar la sesión:", error.message);
-    return res
-      .status(500)
-      .json({ error: "No se pudo validar la sesión. Inténtalo nuevamente." });
+    return res.status(401).json({
+      error: "Token inválido o expirado. Inicie sesión nuevamente.",
+    });
   }
+
 };
 
 module.exports = verificarToken;

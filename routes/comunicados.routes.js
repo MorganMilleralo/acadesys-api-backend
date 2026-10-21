@@ -103,8 +103,8 @@ router.get('/comunicados', async (req, res) => {
   }
 });
 
-// POST /api/comunicados — administradores y docentes pueden publicar.
-router.post('/comunicados', requiereRol('Administrador', 'Docente'), async (req, res) => {
+// Publicacion institucional: el esquema no vincula destinatarios con asignaciones docentes.
+router.post('/comunicados', requiereRol('Administrador'), async (req, res) => {
   const { idUsuario, idAcademia } = obtenerIdentidad(req);
   if (!idUsuario || !idAcademia) return res.status(401).json({ error: 'No se pudo identificar al usuario o su academia.' });
 

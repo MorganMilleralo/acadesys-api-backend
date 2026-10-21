@@ -8,25 +8,10 @@ const { bloquearIdentidades, rollbackSeguro } = require('../utils/validaciones')
 // UTILIDADES
 // ============================================================
 
-const normalizarTexto = (valor) =>
-  String(valor ?? "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-
 // Mismo criterio que roles.middleware: el perfil administrativo se reconoce
 // por nombre normalizado (Recursos Humanos opera como Administrador).
 // Nunca se usa un IdPerfil fijo.
-const esPerfilAdministrativo = (nombre) => {
-  const n = normalizarTexto(nombre);
-  return (
-    n.includes("administrador") ||
-    n.includes("recursos humanos") ||
-    n === "rrhh"
-  );
-};
+const esPerfilAdministrativo = requiereRol.esAdministrativo;
 
 const idPerfilValido = (valor) => {
   if (!["string", "number"].includes(typeof valor)) return null;
@@ -64,7 +49,7 @@ const contarUsuariosActivosDePerfil = async (idPerfil, connection = pool) => {
 
 // 1. LISTAR PERFILES (GET)
 // Activos (1) e Inactivos (0); se ocultan los Eliminados (-1).
-router.get("/perfiles", async (req, res) => {
+router.get("/perfiles", requiereRol("Administrador"), async (req, res) => {
   try {
     const [rows] = await pool.query(
       "SELECT * FROM perfil WHERE EstadoRegistro IN (0, 1) ORDER BY IdPerfil",

@@ -1,11 +1,8 @@
 // Bloquea únicamente la evaluación cuyo ciclo, curso, periodo y tipo estén cerrados.
-// Requiere la migración 20261016_periodo_evaluacion.sql antes de usarlo.
+// Conserva el contrato de main; no ejecuta migraciones nuevas.
 const pool = require('../config/db');
 
-function idPositivo(valor) {
-  const n = Number(valor);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
+const { idPositivo } = require('../utils/validaciones');
 
 function textoPeriodo(valor) {
   const s = String(valor ?? 'General').trim().replace(/\s+/g, ' ');
@@ -34,6 +31,7 @@ const verificarPeriodoAbierto = async (req, res, next) => {
        FROM Evaluacion e
        INNER JOIN Matricula m ON m.IdMatricula = e.IdMatricula
        INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
+       INNER JOIN Ciclo ci ON ci.IdCiclo = m.IdCiclo AND ci.IdAcademia = u.IdAcademia
         WHERE e.IdEvaluacion = ? AND u.IdAcademia = ?
        LIMIT 1`,
       [idEvaluacion, idAcademia],

@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node index.js",
-    "test": "node --test tests/*.test.js"
+    "test": "node scripts/probar-local.js"
   },
   "repository": {
     "type": "git",

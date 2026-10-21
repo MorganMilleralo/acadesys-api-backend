@@ -105,9 +105,9 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
       WHERE cc.IdCiclo = ?
         AND cc.IdCurso = ?
         AND cc.EstadoRegistro = 1
-         AND c.EstadoRegistro = 1
-         AND c.IdAcademia = ?
+        AND c.EstadoRegistro = 1
         AND cu.EstadoRegistro = 1
+        AND c.IdAcademia = ?
       LIMIT 1
     `, [Number(idCiclo), Number(idCurso), idAcademia]);
 

@@ -88,7 +88,7 @@ function crearApp(rol = 'Administrador') {
 }
 
 async function conServidor(fn) {
-  const server = crearApp().listen(0);
+  const server = crearApp().listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   try {
@@ -141,7 +141,7 @@ test('GET /api/admin/ciclos/:id con ID inválido responde 400', async () => {
 });
 
 test('GET /api/admin/ciclos/:id sin rol autorizado responde 403', async () => {
-  const server = crearApp('Alumno').listen(0);
+  const server = crearApp('Alumno').listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   try {

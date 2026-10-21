@@ -7,7 +7,7 @@ const { idPositivo, rollbackSeguro } = require('../utils/validaciones');
 // GET /api/pagos/ciclo/:idCiclo - Monitor de mensualidades y morosidad de un ciclo
 router.get(
   "/pagos/ciclo/:idCiclo",
-  requiereRol("Administrador", "Tutor de Aula"),
+  requiereRol("Administrador"),
   async (req, res) => {
     try {
       const { idCiclo } = req.params;
@@ -47,7 +47,7 @@ router.get(
 // PUT /api/pagos/:id/estado - Actualizar pago (Marcar como Pagado/Moroso)
 router.put(
   "/pagos/:id/estado",
-  requiereRol("Administrador", "Tutor de Aula"),
+  requiereRol("Administrador"),
   async (req, res) => {
     const { id } = req.params;
     if (!idPositivo(id)) return res.status(400).json({ error: 'El IdPago no es válido.' });

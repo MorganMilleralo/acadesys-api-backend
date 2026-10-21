@@ -1,6 +1,7 @@
 const express = require('express');
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
+const { esAdministrativo } = requiereRol;
 const { rollbackSeguro, idPositivo } = require('../utils/validaciones');
 
 const router = express.Router();
@@ -28,6 +29,7 @@ function fechaISOValida(valor) {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === valor;
 }
 
+// Validador compartido por horarios y asistencias.
 function horaValida(valor) {
   if (valor === null || valor === undefined || valor === '') return null;
   const texto = String(valor).trim();
@@ -299,11 +301,15 @@ router.get('/asignaciones', requiereRol(...ROLES_GESTION), async (req, res) => {
        INNER JOIN Aula a ON a.IdAula = aa.IdAula
        INNER JOIN Curso cu ON cu.IdCurso = aa.IdCurso
        INNER JOIN Ciclo c ON c.IdCiclo = aa.IdCiclo
+       INNER JOIN CicloCurso cc ON cc.IdCiclo = aa.IdCiclo AND cc.IdCurso = aa.IdCurso
        WHERE aa.IdAcademia = ? AND aa.EstadoRegistro = 1
+         AND u.IdAcademia = aa.IdAcademia AND a.IdAcademia = aa.IdAcademia
+         AND c.IdAcademia = aa.IdAcademia AND cc.EstadoRegistro = 1
+         AND (? = 1 OR aa.IdUsuario = ?)
          AND u.EstadoRegistro = 1 AND a.EstadoRegistro = 1
          AND cu.EstadoRegistro = 1 AND c.EstadoRegistro = 1
        ORDER BY c.Nombre, a.Nombre, cu.Nombre, docente`,
-      [idAcademia],
+      [idAcademia, esAdministrativo(req.usuario.rol) ? 1 : 0, req.usuario.id],
     );
     res.json(rows);
   } catch (error) {
@@ -338,7 +344,7 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
        INNER JOIN Usuario_Perfiles up ON up.IdUsuario = u.IdUsuario AND up.EstadoRegistro = 1
        INNER JOIN perfil p ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
        WHERE u.IdUsuario = ? AND u.IdAcademia = ? AND u.EstadoRegistro = 1
-          AND (LOWER(p.Nombre) LIKE '%docente%' OR LOWER(p.Nombre) LIKE '%tutor%')
+         AND LOWER(TRIM(p.Nombre)) IN ('docente', 'tutor de aula')
        LIMIT 1`,
       [idUsuario, idAcademia],
     );
@@ -592,10 +598,8 @@ router.delete('/horarios/:id', requiereRol('Administrador'), async (req, res) =>
 });
 
 // ============================================================
-// ASISTENCIAS — flujo principal por ciclo (sin migrar la BD).
-// Se conserva idAula para clientes antiguos. Como Asistencia.IdAula
-// existe en el modelo, el ciclo usa internamente una aula vinculada
-// a alguna asignación activa del ciclo para guardar el registro.
+// ASISTENCIAS POR CICLO: flujo de Morgan conservado por decision del usuario.
+// Mantiene compatibilidad con idAula y los permisos actuales de ROLES_GESTION.
 // ============================================================
 router.get('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
   const idAcademia = academiaDelUsuario(req, res);
@@ -779,4 +783,3 @@ router.post('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
   }
 });
 module.exports = router;
-

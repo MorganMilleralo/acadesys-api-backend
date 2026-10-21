@@ -1,13 +1,9 @@
 
-const ROLES_GESTION_NOTAS = ['docente', 'tutor de aula', 'administrador'];
-
-function normalizarTexto(valor) {
-  return String(valor ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase().replace(/\s+/g, ' ');
-}
+const { normalizarRol: normalizarTexto, esAdministrativo } = require('./roles.middleware');
+const { enteroPositivo } = require('../utils/evaluaciones');
 
 function idPositivo(valor) {
-  const numero = Number(valor);
-  return Number.isInteger(numero) && numero > 0 ? numero : null;
+  return enteroPositivo(valor) ? Number(valor) : null;
 }
 
 function obtenerIdUsuario(req) {
@@ -23,28 +19,16 @@ function normalizarRol(req) {
 }
 
 function esAdministrador(req) {
-  const rol = normalizarRol(req);
   // Nunca conceder permisos elevados solo por un IdPerfil fijo; el nombre del
   // perfil vigente es la fuente de autorización que usa roles.middleware.js.
-  return (
-    rol.includes('administrador') ||
-    rol.includes('recursos humanos') ||
-    rol === 'rrhh'
-  );
-}
-
-function esPersonalAcademico(req) {
-  const rol = normalizarRol(req);
-  return (
-    esAdministrador(req) ||
-    rol === 'docente' ||
-    rol === 'tutor de aula'
-  );
+  return esAdministrativo(req.usuario?.rol);
 }
 
 /**
  * Autoriza las rutas de consulta que exponen listados académicos de una academia.
- * Requiere JWT (inyectado en req.usuario), academia válida y rol de gestión.
+ * Requiere JWT (inyectado en req.usuario), academia válida y rol administrativo.
+ * Docente/tutor requieren una relacion verificable con los alumnos. El rol y
+ * la academia por si solos no acreditan ese alcance.
  */
 function requiereGestionNotas(req, res, next) {
   if (!req.usuario) {
@@ -55,12 +39,9 @@ function requiereGestionNotas(req, res, next) {
     return res.status(401).json({ error: 'El usuario autenticado no tiene una academia válida.' });
   }
 
-  const rol = normalizarRol(req);
-  const autorizado = ROLES_GESTION_NOTAS.includes(rol) || esAdministrador(req);
-
-  if (!autorizado) {
+  if (!esAdministrador(req)) {
     return res.status(403).json({
-      error: `Acceso denegado: se requiere el rol ${'Docente, Tutor de Aula o Administrador'}.`,
+      error: 'La gestion de notas requiere permisos administrativos o una asignacion verificable.',
     });
   }
 
@@ -68,7 +49,7 @@ function requiereGestionNotas(req, res, next) {
 }
 
 /**
- * Permite consultar el historial de un alumno al personal académico autorizado
+ * Permite consultar el historial de un alumno al personal administrativo
  * de su academia, o al propio alumno si su rol e identidad coinciden.
  */
 function autorizarHistorialAlumno(req, res, next) {
@@ -88,12 +69,12 @@ function autorizarHistorialAlumno(req, res, next) {
     return res.status(401).json({ error: 'No fue posible validar la identidad o academia del usuario.' });
   }
 
-  if (esPersonalAcademico(req)) {
+  if (esAdministrador(req)) {
     return next();
   }
 
   const rol = normalizarRol(req);
-  const esAlumno = rol.includes('alumno') || rol.includes('estudiante');
+  const esAlumno = ['alumno', 'estudiante'].includes(rol);
 
   if (esAlumno && idSolicitado === idUsuarioAutenticado) {
     return next();
