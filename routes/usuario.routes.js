@@ -4,6 +4,7 @@ const router = express.Router();
 const pool = require("../config/db");
 const bcrypt = require("bcrypt");
 const requiereRol = require("../middlewares/roles.middleware");
+const { validarDatosUsuario, usuarioDuplicado, bloquearIdentidades, rollbackSeguro } = require('../utils/validaciones');
 const { enteroPositivo } = require("../utils/evaluaciones");
 
 async function perfilActivo(connection, idPerfil) {
@@ -77,6 +78,8 @@ const SELECT_USUARIO = `
 
 // 1. CREAR USUARIO STAFF (Docente / Tutor de Aula)
 router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
+  const validado = validarDatosUsuario(req.body || {}, { crear: true });
+  if (validado.error) return res.status(400).json({ error: validado.error });
   const {
     DNI,
     Nombres,
@@ -85,8 +88,8 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
     Celular,
     CorreoElectronico,
     Clave,
-    IdPerfil,
-  } = req.body;
+  } = validado.datos;
+  const IdPerfil = req.body?.IdPerfil;
 
   if (!Nombres || !ApellidoPaterno || !Clave || !IdPerfil) {
     return res.status(400).json({
@@ -103,11 +106,18 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
   }
 
   const idAcademia = req.usuario.idAcademia;
-  const claveHasheada = await bcrypt.hash(String(Clave), 10);
-
-  const connection = await pool.getConnection();
+  let connection;
   try {
+    const claveHasheada = await bcrypt.hash(Clave, 10);
+    connection = await pool.getConnection();
     await connection.beginTransaction();
+    await bloquearIdentidades(connection);
+    const [[academia]] = await connection.query('SELECT IdAcademia FROM Academia WHERE IdAcademia = ?', [idAcademia]);
+    if (!academia) { await connection.rollback(); return res.status(401).json({ error: 'Academia de sesión inválida.' }); }
+    if (await usuarioDuplicado(connection, validado.datos)) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'Ya existe un usuario con ese DNI o correo electrónico.' });
+    }
 
     if (!await perfilActivo(connection, IdPerfil)) {
       await connection.rollback();
@@ -171,10 +181,10 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
       codigoUsuario,
     });
   } catch (error) {
-    await connection.rollback();
+    await rollbackSeguro(connection);
     responderError(res, error, "POST /usuarios");
   } finally {
-    connection.release();
+    if (connection) connection.release();
   }
 });
 
@@ -261,6 +271,7 @@ router.get("/usuarios/me", async (req, res) => {
 // IdAcademia, CodigoUsuario, Clave, permisos u otro IdUsuario: la identidad
 // siempre se toma de req.usuario (sesión validada contra BD).
 router.put("/usuarios/me", async (req, res) => {
+  let connection;
   try {
     const idUsuario = Number(req.usuario?.idUsuario ?? req.usuario?.id);
     if (!Number.isSafeInteger(idUsuario) || idUsuario <= 0) {
@@ -269,7 +280,11 @@ router.put("/usuarios/me", async (req, res) => {
         .json({ error: "Sesión inválida. Inicia sesión nuevamente." });
     }
 
-    const { Nombres, DNI, CorreoElectronico, Celular } = req.body;
+    const validado = validarDatosUsuario(Object.fromEntries(
+      ['Nombres', 'DNI', 'CorreoElectronico', 'Celular'].filter((campo) => req.body?.[campo] !== undefined).map((campo) => [campo, req.body[campo]]),
+    ));
+    if (validado.error) return res.status(400).json({ error: validado.error });
+    const { Nombres, DNI, CorreoElectronico, Celular } = validado.datos;
 
     const campos = [];
     const params = [];
@@ -313,36 +328,54 @@ router.put("/usuarios/me", async (req, res) => {
         .json({ error: "No se enviaron cambios para tu perfil." });
     }
 
-    params.push(idUsuario);
-    await pool.query(
-      `UPDATE Usuario SET ${campos.join(", ")} WHERE IdUsuario = ? AND EstadoRegistro = 1`,
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    await bloquearIdentidades(connection);
+    const [[actual]] = await connection.query('SELECT DNI, CorreoElectronico FROM Usuario WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1 FOR UPDATE', [idUsuario, req.usuario.idAcademia]);
+    if (!actual) { await connection.rollback(); return res.status(404).json({ error: 'No se encontró tu usuario.' }); }
+    if (await usuarioDuplicado(connection, validado.datos, idUsuario, actual)) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'Ya existe un usuario con ese DNI o correo electrónico.' });
+    }
+    params.push(idUsuario, req.usuario.idAcademia);
+    await connection.query(
+      `UPDATE Usuario SET ${campos.join(", ")} WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1`,
       params,
     );
 
-    const [rows] = await pool.query(
+    const [rows] = await connection.query(
       `${SELECT_USUARIO}
              WHERE u.IdUsuario = ? AND u.EstadoRegistro = 1
              LIMIT 1`,
       [idUsuario],
     );
     if (!rows.length) {
+      await connection.rollback();
       return res.status(404).json({ error: "No se encontró tu usuario." });
     }
 
+    await connection.commit();
     res.json({
       message: "Tus datos se actualizaron con éxito.",
       usuario: rows[0],
     });
   } catch (error) {
+    await rollbackSeguro(connection);
     return responderError(res, error, "PUT /usuarios/me");
+  } finally {
+    if (connection) connection.release();
   }
 });
 
 // 3. MODIFICAR USUARIO (actualización PARCIAL; protege al último administrador)
 router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
-  const connection = await pool.getConnection();
+  const validado = validarDatosUsuario(req.body || {});
+  if (validado.error) return res.status(400).json({ error: validado.error });
+  let connection;
   try {
+    connection = await pool.getConnection();
     await connection.beginTransaction();
+    await bloquearIdentidades(connection);
 
     const idUsuarioObjetivo = Number(req.params.id);
     if (!Number.isSafeInteger(idUsuarioObjetivo) || idUsuarioObjetivo <= 0) {
@@ -360,13 +393,12 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
       Celular,
       CorreoElectronico,
       Clave,
-      EstadoRegistro,
-      IdPerfil,
-    } = req.body;
+    } = validado.datos;
+    const { EstadoRegistro, IdPerfil } = req.body || {};
 
     // El usuario objetivo debe pertenecer a la academia del administrador.
     const [objetivoRows] = await connection.query(
-      "SELECT IdUsuario, EstadoRegistro FROM Usuario WHERE IdUsuario = ? AND IdAcademia = ? FOR UPDATE",
+      "SELECT IdUsuario, EstadoRegistro, DNI, CorreoElectronico FROM Usuario WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro IN (0, 1) FOR UPDATE",
       [idUsuarioObjetivo, req.usuario.idAcademia],
     );
     if (!objetivoRows.length) {
@@ -376,6 +408,10 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
         .json({ error: "Usuario no encontrado en tu academia." });
     }
     const estadoActual = Number(objetivoRows[0].EstadoRegistro);
+    if (await usuarioDuplicado(connection, validado.datos, idUsuarioObjetivo, objetivoRows[0])) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'Ya existe un usuario con ese DNI o correo electrónico.' });
+    }
 
     // ¿El usuario objetivo es administrador ACTIVO actualmente?
     const [perfilActualRows] = await connection.query(
@@ -464,7 +500,7 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
 
     if (DNI !== undefined) {
       const dniLimpio = String(DNI ?? "").trim();
-      asignar("DNI", dniLimpio ? dniLimpio.slice(0, 8) : null);
+      asignar("DNI", dniLimpio || null);
     }
     if (Nombres !== undefined) {
       const nombresLimpios = String(Nombres).trim();
@@ -489,8 +525,8 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
       const correoLimpio = String(CorreoElectronico ?? "").trim();
       asignar("CorreoElectronico", correoLimpio || null);
     }
-    if (Clave !== undefined && String(Clave).trim() !== "") {
-      asignar("Clave", await bcrypt.hash(String(Clave).trim(), 10));
+    if (Clave !== undefined) {
+      asignar("Clave", await bcrypt.hash(Clave, 10));
     }
     if (estadoNum !== undefined) {
       asignar("EstadoRegistro", estadoNum);
@@ -540,10 +576,10 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
     await connection.commit();
     res.json({ message: "Usuario y perfil actualizados con éxito" });
   } catch (error) {
-    await connection.rollback();
+    await rollbackSeguro(connection);
     responderError(res, error, "PUT /usuarios/:id");
   } finally {
-    connection.release();
+    if (connection) connection.release();
   }
 });
 
@@ -552,8 +588,9 @@ router.delete(
   "/usuarios/:id",
   requiereRol("Administrador"),
   async (req, res) => {
-    const connection = await pool.getConnection();
+    let connection;
     try {
+      connection = await pool.getConnection();
       const idUsuarioObjetivo = Number(req.params.id);
       if (!Number.isSafeInteger(idUsuarioObjetivo) || idUsuarioObjetivo <= 0) {
         return res
@@ -562,6 +599,7 @@ router.delete(
       }
 
       await connection.beginTransaction();
+      await bloquearIdentidades(connection);
 
       const [objetivoRows] = await connection.query(
         `SELECT u.IdUsuario, u.EstadoRegistro, p.Nombre AS NombrePerfil
@@ -614,10 +652,10 @@ router.delete(
       await connection.commit();
       res.json({ message: "Usuario eliminado lógicamente con éxito (-1)" });
     } catch (error) {
-      await connection.rollback();
+      await rollbackSeguro(connection);
       responderError(res, error, "DELETE /usuarios/:id");
     } finally {
-      connection.release();
+      if (connection) connection.release();
     }
   },
 );

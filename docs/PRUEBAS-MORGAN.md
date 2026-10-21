@@ -1,8 +1,9 @@
 # Pruebas manuales mínimas
 
 > Morgan confirmó que solo hay simulacros semanales generales, sin notas por
-> curso. Render despliega main automáticamente y no existe staging. La adaptación
-> está bloqueada hasta confirmar el identificador semanal y el DDL de auditoría:
+> curso. La integración conserva el contrato de main y sus controles de duplicados
+> y cierre legado. Render despliega main automáticamente y no existe staging.
+> La adaptación semanal requiere confirmar el identificador y el DDL de auditoría:
 > ver [la revisión vigente](../database/REVISION_NOTAS_ACTAS.md). No ejecutar las
 > migraciones sugeridas en la versión histórica de este documento.
 > Los criterios siguientes son antecedentes de main, no la aceptación del nuevo
@@ -13,9 +14,10 @@
 - Con rol Alumno: `GET /api/notas`, `/api/notas/contexto/ID` y `/api/notas/matriculas/ID` deben responder 403.
 - Alumno consultando su propio `/api/notas/alumno/ID_USUARIO`: respuesta únicamente con sus registros.
 - Alumno consultando otro ID: 403.
-- Docente/Tutor/Administrador: las consultas permitidas responden con filas limitadas a la academia.
+- Administrador/Recursos Humanos: consultas limitadas a la academia. Docente/Tutor
+  reciben 403 en gestión de notas hasta verificar su alcance sobre los alumnos.
 
-## Cierre de actas
+## Cierre semanal pendiente (no implementado en esta integración)
 - Confirmar primero cómo se identifica un simulacro en el esquema y en React.
 - Con datos ficticios, registrar dos simulacros semanales distintos del mismo ciclo.
 - Cerrar uno con `PUT /api/actas/cierre`; debe bloquear edición e inserción solo

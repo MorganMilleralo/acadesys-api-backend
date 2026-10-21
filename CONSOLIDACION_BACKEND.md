@@ -1,35 +1,83 @@
-# Consolidación local de seguridad, notas y actas
+# Integración del backend AcadeSys
 
-## Estado vigente: solo simulacros semanales
+## Estado vigente: integración sobre main, 2026-10-20
 
-Morgan confirmó que AcadeSys **no registra calificaciones por curso**. Cada
-simulacro tiene una fecha o semana identificable y su nota máxima depende de la
-universidad objetivo. La propuesta de migrar `Evaluacion.IdCurso` queda retirada;
-su archivo SQL ahora es inerte. La escala provisional 0–20 para cursos deja de
-ser un requisito o una decisión pendiente.
+Base de referencia: `6ce9331` (los dos avances `3396d5a` y `6ce9331` de los
+compañeros, además de los 13 commits ya integrados en `cafdfd1`). Se conserva
+el merge abierto originalmente, sin cancelarlo, reiniciarlo ni reescribir
+`f7f379a`, `cafdfd1` o `72696f4`. Main local no se actualiza ni se publica.
 
-También está confirmado que Render despliega **main con Auto-Deploy activado** y
-que existe una sola base Aiven de producción, consultada también desde DBeaver.
-No hay staging. Un push a main activaría el despliegue: **NO APTO para Auto-Deploy**.
+### Combinación autorizada
 
-La adaptación funcional está **bloqueada por falta de evidencia del esquema**.
-El SQL local no define la fecha/semana del simulacro ni `Evaluacion.Periodo`;
-el repositorio tampoco incluye el DDL de `Auditoria_Cierres`. No se puede asumir
-que `FechaCreacion` sea fecha del examen, que `General` identifique una semana,
-ni que la auditoría tenga `RegistrosAfectados`. Se solicitaron los DDL reales y
-el campo/valor semanal enviado por React, sin solicitar datos de alumnos.
+- Notas parte de la versión de Morgan que participa en el merge. Conserva
+  registro, edición, historial, límites de lote, escala universitaria, enteros,
+  protección de duplicados y bloqueo transaccional del estado cerrado.
+- No hay consultas activas a `Evaluacion.IdCurso` ni a
+  `Auditoria_Cierres.RegistrosAfectados`. Se retiraron de alumno, dashboard,
+  Tutor IA y cierre los cambios locales que requerían esas columnas.
+- Se mantiene el cierre existente de main: su `IdCurso` corresponde al alcance
+  legado de `Matricula`, no a calificaciones por curso. No se implementó un cierre
+  semanal nuevo, ni se modificaron datos históricos, escalas o columnas.
+- Se conserva el control de duplicados por matrícula + periodo + tipo, incluido
+  `COALESCE(Periodo, 'General')`. General y NULL comparten clave; no distinguen
+  semanas y pueden impedir registrar un nuevo simulacro con el mismo valor.
+- Se conservan los nombres y respuestas de main, incluidos los tipos heredados
+  `Practica`, `Evaluacion`, `Examen`, `Simulacro` y campos como `Curso` o
+  `totalCursosEvaluados`. Son compatibilidad del cliente, no un modelo nuevo de
+  notas por curso. La adaptación semanal completa sigue pendiente.
+- Seguridad conservada: JWT HS256, identidad/academia y perfil vigentes, rechazo
+  de múltiples perfiles, exclusión de tokens de recuperación como sesión, roles
+  exactos y equivalencia Administrador/Recursos Humanos. Cambio de perfil único
+  con historial; conversión a bcrypt sin pisar una recuperación concurrente.
+- Se preservan validaciones y transacciones nuevas de Morgan, recuperación de
+  acceso, CORS, horarios, ciclos, materiales, usuarios y Tutor IA. Asistencias
+  conserva su flujo por ciclo y permisos actuales, autorizado por el usuario.
+- Gestión de notas y pagos reservada a administrativos; alumno ve su historial.
+  Docente/tutor conserva asignaciones propias y directorio propio. La publicación
+  institucional de comunicados requiere administración. Estos límites locales de
+  seguridad son diferencias frente a main que React debe manejar con 403.
 
-Se mantiene `david/consolidacion-backend` en `cafdfd1`, incluidos los 13 commits
-remotos y las mejoras de seguridad. No se modificaron las rutas ni las pruebas
-funcionales mientras falta ese contrato: **el código aún depende de IdCurso**
-en notas, actas, cierre, alumno, dashboard y contexto de Tutor IA. No debe
-desplegarse este estado. Ver [la revisión vigente](database/REVISION_NOTAS_ACTAS.md).
+### Verificación de esta integración
 
-Verificación de este estado: `npm.cmd test` aprueba 114 casos (84 node:test y 30
-casos de scripts). Esas pruebas todavía verifican el contrato anterior; **no
-demuestran compatibilidad con simulacros semanales ni con producción**. Se
-mantienen los dobles locales y el bloqueo de carga de mysql2/dotenv; no se hizo
-ninguna conexión a Aiven, migración, push ni despliegue.
+- `npm.cmd test`: **154 casos aprobados**, 0 fallos: 124 node:test + 4 de
+  autenticación + 5 de cierre + 21 del flujo de notas/actas con rollback simulado.
+- Se conservaron las pruebas de Morgan. Las pruebas locales de notas por curso,
+  separación por Evaluacion.IdCurso y cierre con RegistrosAfectados se adaptaron
+  al contrato autorizado. No se omitieron suites para obtener un resultado verde.
+- Sintaxis de los archivos JavaScript y `git diff --check` correctos.
+- Se conservan las **71 combinaciones de método y ruta** declaradas en main.
+- Smoke de arranque con pool ficticio: ping y catálogo 200, rutas protegidas sin
+  token 401, preflight CORS 204. MySQL y dotenv reales bloqueados; catálogo vacío.
+  No equivale a pruebas de datos o pantallas reales de React.
+- Revisión estática: sin consultas a las dos columnas retiradas. Se consultó el
+  informe de main como evidencia previa de su contrato. El intento de lectura
+  de metadatos de Aiven falló con `ER_ACCESS_DENIED_ERROR`, antes de obtener el
+  esquema. **No se certifica compatibilidad contra la base viva** ni SQL real.
+- No se ejecutaron migraciones, SQL de escritura, scripts de mantenimiento,
+  conexiones de pruebas funcionales a Aiven, llamadas a Gemini ni envíos de correo.
+
+### Pendientes y publicación
+
+1. Confirmar el esquema vivo con acceso autorizado de lectura: `Evaluacion`,
+   `Auditoria_Cierres`, `Matricula`, perfiles y demás tablas utilizadas. El SQL
+   histórico del repositorio no es una copia completa de Aiven.
+2. Definir identificación semanal y cierre semanal con respaldo del modelo real.
+   No convertir General en una fecha ni reclasificar NULL. El cierre y los tipos
+   heredados de main siguen como compatibilidad; no son la nueva funcionalidad.
+3. Probar React con 401/403, límites administrativos, un único perfil activo,
+   contratos de notas, asistencia por ciclo y recuperación. Falta el frontend local.
+4. Permanecen los límites de main: fallback de escala desconocida, promedios entre
+   periodos/escalas, identidad en reinscripción, configuración de correo, pagos de
+   demostración y restricciones SQL/concurrencia pendientes de validar realmente.
+5. **No publicar mientras Render tenga Auto-Deploy activo**, por instrucción
+   vigente. No se usa `[skip render]` como sustituto de esa condición. No se cambió
+   configuración de Render. Tras levantar el bloqueo, repetir fetch y actualizar
+   main exclusivamente con fast-forward y push sin force.
+
+`.vscode/extensions.json` se conserva local sin versionar. `.env` sigue ignorado;
+`.env.example` de Morgan solo contiene valores ficticios. Las verificaciones
+temporales quedan fuera del repositorio. Los antecedentes siguientes describen
+estados anteriores y están sustituidos por esta sección.
 
 ## Antecedentes de la consolidación e integración
 

@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
-const { esNotaCurso, esSimulacro, responderErrorEsquema } = require('../utils/evaluaciones');
 
 const universidadDesdeNombre = (nombre = '') => {
   const n = String(nombre).toLowerCase();
@@ -71,9 +70,9 @@ router.get('/me', async (req, res) => {
       FROM Matricula m
       INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo
       WHERE m.IdUsuario = ?
-        AND c.IdAcademia = ?
         AND m.EstadoRegistro = 1
-        AND c.EstadoRegistro = 1
+         AND c.EstadoRegistro = 1
+         AND c.IdAcademia = ?
       ORDER BY m.IdMatricula DESC
       LIMIT 1
     `, [idUsuario, idAcademia]);
@@ -125,14 +124,18 @@ router.get('/me', async (req, res) => {
     const [cursos] = await pool.query(`
       SELECT
         cu.IdCurso,
-        cu.Nombre
+        cu.Nombre, cu.Codigo, cu.Descripcion, cu.UniversidadObjetivo,
+        COALESCE((SELECT GROUP_CONCAT(DISTINCT TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno)) SEPARATOR ', ')
+          FROM Asignacion_Aula aa INNER JOIN Usuario u ON u.IdUsuario = aa.IdUsuario
+          WHERE aa.IdCiclo = cc.IdCiclo AND aa.IdCurso = cc.IdCurso AND aa.IdAcademia = ?
+            AND aa.EstadoRegistro = 1 AND u.EstadoRegistro = 1 AND u.IdAcademia = aa.IdAcademia), 'Por asignar') AS Docente
       FROM CicloCurso cc
       INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
       WHERE cc.IdCiclo = ?
         AND cc.EstadoRegistro = 1
         AND cu.EstadoRegistro = 1
       ORDER BY cc.Orden ASC, cu.Nombre ASC
-    `, [ciclo.idCiclo]);
+    `, [idAcademia, ciclo.idCiclo]);
 
     const [horarioDetalle] = await pool.query(`
       SELECT
@@ -141,30 +144,28 @@ router.get('/me', async (req, res) => {
         TIME_FORMAT(h.HoraInicio, '%H:%i') AS HoraInicio,
         TIME_FORMAT(h.HoraFin, '%H:%i') AS HoraFin,
         cu.Nombre AS Curso,
-        'Por asignar' AS Docente
+        COALESCE((SELECT GROUP_CONCAT(DISTINCT TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno)) SEPARATOR ', ')
+          FROM Asignacion_Aula aa INNER JOIN Usuario u ON u.IdUsuario = aa.IdUsuario
+          WHERE aa.IdCiclo = h.IdCiclo AND aa.IdCurso = h.IdCurso AND aa.IdAcademia = ?
+            AND aa.EstadoRegistro = 1 AND u.EstadoRegistro = 1 AND u.IdAcademia = aa.IdAcademia), 'Por asignar') AS Docente
       FROM HorarioCurso h
       INNER JOIN Curso cu ON cu.IdCurso = h.IdCurso
       WHERE h.IdCiclo = ?
         AND h.EstadoRegistro = 1
       ORDER BY h.Orden ASC, h.DiaNumero ASC, h.HoraInicio ASC
-    `, [ciclo.idCiclo]);
+    `, [idAcademia, ciclo.idCiclo]);
 
     const [notas] = await pool.query(`
       SELECT
         e.IdEvaluacion,
-        e.IdCurso,
-        e.Periodo,
-        e.EstadoRegistro,
-        CASE WHEN e.IdCurso IS NULL AND e.TipoEvaluacion = 'Simulacro'
-          THEN 'Simulacro general' ELSE COALESCE(cu.Nombre, 'Curso pendiente de clasificar') END AS Curso,
+        COALESCE(cu.Nombre, 'Simulacro general') AS Curso,
         e.TipoEvaluacion,
         e.Calificacion,
+        e.EstadoRegistro AS EstadoRegistro,
         e.FechaCreacion
       FROM Evaluacion e
-      INNER JOIN Matricula m
-        ON m.IdMatricula = e.IdMatricula
-      LEFT JOIN Curso cu
-        ON cu.IdCurso = e.IdCurso
+      INNER JOIN Matricula m ON m.IdMatricula = e.IdMatricula
+      LEFT JOIN Curso cu ON cu.IdCurso = m.IdCurso
       WHERE m.IdUsuario = ?
         AND m.IdCiclo = ?
         AND m.EstadoRegistro = 1
@@ -172,31 +173,11 @@ router.get('/me', async (req, res) => {
       ORDER BY e.FechaCreacion DESC, e.IdEvaluacion DESC
     `, [idUsuario, ciclo.idCiclo]);
 
-    // Las notas de curso y los puntajes de simulacros
-    // tienen escalas distintas: no deben promediarse juntos.
-    const notasCursos = notas.filter(esNotaCurso);
+    const promedioBruto = notas.length ? notas.reduce((sum, n) => sum + Number(n.Calificacion), 0) / notas.length : 0;
+    const promedio = Number(promedioBruto.toFixed(2));
 
-    const notasSimulacros = notas.filter(esSimulacro);
-
-    const calcularPromedio = (registros) =>
-      registros.length
-        ? Number((
-            registros.reduce(
-              (suma, nota) =>
-                suma + Number(nota.Calificacion),
-              0
-            ) / registros.length
-          ).toFixed(2))
-        : 0;
-
-    const promedio = calcularPromedio(notasSimulacros);
-    const promedioCursos = calcularPromedio(notasCursos);
-
-    // Ranking provisional basado solo en simulacros
-    // del mismo ciclo, comparables en una misma escala.
     let puestoRanking = null;
-
-    if (notasSimulacros.length > 0) {
+    if (notas.length > 0) {
       const [rankingRows] = await pool.query(`
         SELECT COUNT(*) + 1 AS Puesto
         FROM (
@@ -204,31 +185,19 @@ router.get('/me', async (req, res) => {
             m2.IdUsuario,
             AVG(e2.Calificacion) AS Promedio
           FROM Matricula m2
-          INNER JOIN Evaluacion e2
-            ON e2.IdMatricula = m2.IdMatricula
-          INNER JOIN Usuario u2
-            ON u2.IdUsuario = m2.IdUsuario
+          INNER JOIN Evaluacion e2 ON e2.IdMatricula = m2.IdMatricula
+          INNER JOIN Usuario u2 ON u2.IdUsuario = m2.IdUsuario AND u2.EstadoRegistro = 1
           WHERE m2.IdCiclo = ?
             AND m2.EstadoRegistro = 1
-            AND u2.IdAcademia = ?
-            AND u2.EstadoRegistro = 1
             AND e2.EstadoRegistro IN (1, 2)
-            AND e2.IdCurso IS NULL
-            AND e2.TipoEvaluacion = 'Simulacro'
+            AND u2.IdAcademia = ? AND m2.IdUsuario <> ?
           GROUP BY m2.IdUsuario
           HAVING AVG(e2.Calificacion) > ?
         ) r
-      `, [
-        ciclo.idCiclo,
-        idAcademia,
-        promedio
-      ]);
+      `, [ciclo.idCiclo, idAcademia, idUsuario, promedioBruto]);
 
-      puestoRanking = Number(
-        rankingRows[0]?.Puesto || 1
-      );
+      puestoRanking = Number(rankingRows[0]?.Puesto || 1);
     }
-
 
     const [materiales] = await pool.query(`
       SELECT
@@ -245,6 +214,7 @@ router.get('/me', async (req, res) => {
       INNER JOIN Curso cu ON cu.IdCurso = ma.IdCurso
       WHERE ma.IdCiclo = ?
         AND ma.EstadoRegistro = 1
+        AND cu.EstadoRegistro = 1
       ORDER BY ma.FechaPublicacion DESC, ma.IdMaterial DESC
     `, [ciclo.idCiclo]);
 
@@ -264,9 +234,10 @@ router.get('/me', async (req, res) => {
       cursos: cursos.map((c) => ({
         idCurso: c.IdCurso,
         nombre: c.Nombre,
-        codigo: '',
-        descripcion: '',
-        universidadObjetivo: ciclo.universidadObjetivo
+        codigo: c.Codigo || '',
+        descripcion: c.Descripcion || '',
+        docente: c.Docente,
+        universidadObjetivo: c.UniversidadObjetivo || ciclo.universidadObjetivo
       })),
       horarioDetalle: horarioDetalle.map((h) => ({
         idHorario: h.IdHorario,
@@ -278,23 +249,17 @@ router.get('/me', async (req, res) => {
       })),
       notas: {
         promedioGeneral: promedio,
-        promedioSimulacros: promedio,
-        promedioCursos,
-        evaluacionesPendientesClasificar: notas.length - notasCursos.length - notasSimulacros.length,
         puestoRanking,
         totalEvaluaciones: notas.length,
         historial: notas.map((n) => ({
           idEvaluacion: n.IdEvaluacion,
-          idCurso: n.IdCurso,
           curso: n.Curso,
-          periodo: n.Periodo,
           tipoEvaluacion: n.TipoEvaluacion,
-          calificacion: Number(n.Calificacion),
-          estadoRegistro: n.EstadoRegistro,
+          calificacion: Number(n.Calificacion || 0),
+          estadoRegistro: Number(n.EstadoRegistro),
           fechaCreacion: n.FechaCreacion
         }))
       },
-
       materiales: materiales.map((m) => ({
         idMaterial: m.IdMaterial,
         titulo: m.Titulo,
@@ -307,7 +272,6 @@ router.get('/me', async (req, res) => {
       }))
     });
   } catch (error) {
-    if (responderErrorEsquema(res, error)) return;
     console.error('Error en GET /api/alumno/me:', error.message);
     res.status(500).json({ error: 'No se pudo cargar el expediente del alumno.' });
   }

@@ -11,8 +11,8 @@ function idPositivo(value) {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
-function texto(value, maxLength) {
-  return String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, maxLength);
+function texto(value) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ');
 }
 
 function obtenerIdentidad(req) {
@@ -22,13 +22,18 @@ function obtenerIdentidad(req) {
 }
 
 function prepararDatos(body = {}) {
+  for (const [camel, pascal] of [['titulo', 'Titulo'], ['categoria', 'Categoria'], ['prioridad', 'Prioridad'], ['dirigidoA', 'DirigidoA'], ['contenido', 'Contenido']]) {
+    const valor = body[camel] ?? body[pascal];
+    if (valor !== undefined && typeof valor !== 'string') return { error: `${camel} debe ser texto.` };
+  }
   const titulo = texto(body.titulo ?? body.Titulo, 180);
   const categoria = texto(body.categoria ?? body.Categoria ?? 'Académico', 50);
   const prioridad = texto(body.prioridad ?? body.Prioridad ?? 'media', 10).toLowerCase();
   const dirigidoA = texto(body.dirigidoA ?? body.DirigidoA ?? 'Todos los Niveles', 150) || 'Todos los Niveles';
   const contenido = String(body.contenido ?? body.Contenido ?? '').trim();
 
-  if (titulo.length < 3) return { error: 'El título debe tener entre 3 y 180 caracteres.' };
+  if (titulo.length < 3 || titulo.length > 180) return { error: 'El título debe tener entre 3 y 180 caracteres.' };
+  if (dirigidoA.length > 150) return { error: 'DirigidoA no puede superar 150 caracteres.' };
   if (!CATEGORIAS_VALIDAS.has(categoria)) return { error: 'La categoría debe ser Académico, Reunión, Salud o Feriado.' };
   if (!PRIORIDADES_VALIDAS.has(prioridad)) return { error: 'La prioridad debe ser baja, media o alta.' };
   if (!contenido || contenido.length > 10000) return { error: 'El contenido es obligatorio y no puede superar 10 000 caracteres.' };
@@ -94,7 +99,7 @@ router.get('/comunicados', async (req, res) => {
     res.json(rows);
   } catch (error) {
     console.error('GET /api/comunicados:', error);
-    res.status(500).json({ error: 'No se pudieron consultar los comunicados. Verifica que la migración de comunicados esté aplicada.' });
+    res.status(500).json({ error: 'No se pudieron consultar los comunicados.' });
   }
 });
 

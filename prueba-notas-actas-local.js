@@ -1,493 +1,83 @@
-
-const assert = require("node:assert/strict");
-const express = require("express");
-
-// Sustituir MySQL antes de cargar las rutas.
-// Esta prueba NO se conecta a Aiven.
-const rutaDB = require.resolve("./config/db");
-
-const evaluaciones = [];
-const cierres = [];
-let siguienteId = 1;
-let respaldo = null;
-let falloInsercionEn = 0;
-let falloAuditoria = false;
-let pruebasRealizadas = 0;
-
-const copia = (obj) => JSON.parse(JSON.stringify(obj));
-
-const igualCurso = (a, b) =>
-  a === b || (a == null && b == null);
-
-const coincide = (e, ciclo, curso, periodo, tipo) =>
-  e.idCiclo === Number(ciclo) &&
-  igualCurso(e.IdCurso, curso) &&
-  e.Periodo === periodo &&
-  e.TipoEvaluacion === tipo;
-
-async function query(sql, p = []) {
-  const q = sql.replace(/\s+/g, " ").trim();
-  assert.equal((q.match(/\?/g) || []).length, p.length, "Parametros SQL completos");
-
-  if (/\bFROM Ciclo\b/i.test(q)) {
-    return [
-      [7, 8].includes(Number(p[0])) &&
-      Number(p[1]) === 1
-        ? [{
-            IdCiclo: Number(p[0]),
-            Nombre: "Ciclo de prueba",
-            UniversidadObjetivo: "UNMSM",
-          }]
-        : [],
-    ];
-  }
-
-  if (/\bFROM CicloCurso\b/i.test(q)) {
-    return [
-      [3, 4].includes(Number(p[1])) &&
-      Number(p[0]) === 7
-        ? [{ IdCurso: Number(p[1]) }]
-        : [],
-    ];
-  }
-
-  if (
-    /\bFROM Matricula m\b/i.test(q) &&
-    /SELECT m\.IdMatricula\b/i.test(q)
-  ) {
-    return [
-      Number(p[0]) === 100 &&
-      Number(p[1]) === 7 &&
-      Number(p[2]) === 1
-        ? [{ IdMatricula: 100 }]
-        : [],
-    ];
-  }
-
-  if (/\bFROM Auditoria_Cierres\b/i.test(q)) {
-    assert.match(q, /IdCurso\s*<=>\s*\?/i);
-
-    const existe = cierres.some(
-      (c) =>
-        c.idCiclo === Number(p[0]) &&
-        igualCurso(c.idCurso, p[1]) &&
-        c.periodo === p[2] &&
-        c.tipo === p[3]
-    );
-
-    return [existe ? [{ IdCierre: 1 }] : []];
-  }
-
-  if (
-    /\bFROM Evaluacion e\b/i.test(q) &&
-    /EstadoRegistro\s+IN\s*\(1,\s*2\)/i.test(q)
-  ) {
-    assert.match(q, /e\.IdCurso/i);
-
-    return [
-      evaluaciones
-        .filter((e) => [1, 2].includes(e.EstadoRegistro))
-        .map((e) => ({
-          ...e,
-          Curso:
-            e.IdCurso == null
-              ? "Simulacro General"
-              : "Curso de prueba",
-        })),
-    ];
-  }
-
-  if (
-    /\bFROM Evaluacion e\b/i.test(q) &&
-    /\bIdEvaluacion\s*=\s*\?/i.test(q)
-  ) {
-    const e = evaluaciones.find(
-      (x) => x.IdEvaluacion === Number(p[0])
-    );
-
-    return [e ? [{ ...e, IdCiclo: e.idCiclo }] : []];
-  }
-
-  if (/^INSERT INTO Evaluacion\b/i.test(q)) {
-    if (falloInsercionEn > 0 && --falloInsercionEn === 0) {
-      throw new Error("Fallo de insercion simulado para comprobar rollback");
-    }
-    assert.match(q, /\bIdCurso\b/i);
-    assert.match(q, /\bPeriodo\b/i);
-
-    evaluaciones.push({
-      IdEvaluacion: siguienteId++,
-      IdMatricula: Number(p[0]),
-      idCiclo: 7,
-      IdCurso: p[1],
-      Periodo: p[2],
-      TipoEvaluacion: p[3],
-      Calificacion: Number(p[4]),
-      EstadoRegistro: 1,
-    });
-
-    return [{
-      insertId: siguienteId - 1,
-      affectedRows: 1,
-    }];
-  }
-
-  if (
-    /^UPDATE Evaluacion e\b/i.test(q) &&
-    /SET\s+e\.EstadoRegistro\s*=\s*2/i.test(q)
-  ) {
-    assert.match(q, /e\.IdCurso\s*<=>\s*\?/i);
-
-    let cantidad = 0;
-
-    for (const e of evaluaciones) {
-      if (
-        e.EstadoRegistro === 1 &&
-        coincide(e, p[1], p[2], p[3], p[4])
-      ) {
-        e.EstadoRegistro = 2;
-        cantidad++;
-      }
-    }
-
-    return [{ affectedRows: cantidad }];
-  }
-
-  if (
-    /^UPDATE Evaluacion e\b/i.test(q) &&
-    /SET\s+e\.Calificacion\s*=\s*\?/i.test(q)
-  ) {
-    const e = evaluaciones.find(
-      (x) =>
-        x.IdEvaluacion === Number(p[2]) &&
-        x.EstadoRegistro === 1
-    );
-
-    if (e) {
-      e.Calificacion = Number(p[0]);
-    }
-
-    return [{ affectedRows: e ? 1 : 0 }];
-  }
-
-  if (/^INSERT INTO Auditoria_Cierres\b/i.test(q)) {
-    if (falloAuditoria) throw new Error("Fallo de auditoria simulado para comprobar rollback");
-    cierres.push({
-      idCiclo: Number(p[1]),
-      idCurso: p[2],
-      periodo: p[3],
-      tipo: p[4],
-    });
-
-    return [{ affectedRows: 1 }];
-  }
-
-  throw new Error(
-    "Consulta no simulada: " + q.slice(0, 120)
-  );
+﻿const assert = require('node:assert/strict');
+const express = require('express');
+// Flujo de main con datos ficticios. Nunca se conecta a Aiven.
+const evaluaciones = [], cierres = [];
+let siguienteId = 1, respaldo, falloInsercionEn = 0, falloAuditoria = false, pruebas = 0;
+const copia = value => JSON.parse(JSON.stringify(value));
+const clave = (ciclo, curso, periodo, tipo) => JSON.stringify([Number(ciclo),curso ?? null,periodo,tipo]);
+async function query(sql, p=[]) {
+ const q=sql.replace(/\s+/g,' ').trim();
+ assert.equal((q.match(/\?/g)||[]).length,p.length,'Parametros completos');
+ assert.doesNotMatch(q,/e\.IdCurso|RegistrosAfectados/);
+ if(/\bFROM Ciclo\b/.test(q))return [[7,8].includes(Number(p[0]))&&Number(p[1])===1?[{IdCiclo:Number(p[0]),Nombre:'Ciclo ficticio',UniversidadObjetivo:'UNMSM'}]:[]];
+ if(/FROM Matricula m/.test(q))return [[100,101].includes(Number(p[0]))&&Number(p[1])===7&&p[2]===1?[{IdMatricula:Number(p[0]),IdCurso:null}]:[]];
+ if(/FROM Auditoria_Cierres/.test(q))return [cierres.includes(clave(...p))?[{IdCierre:1}]:[]];
+ if(/FROM Evaluacion WHERE IdMatricula/.test(q))return [evaluaciones.filter(e=>e.IdMatricula===p[0]&&(e.Periodo??'General')===p[1]&&e.TipoEvaluacion===p[2]&&[1,2].includes(e.EstadoRegistro))];
+ if(/SELECT EstadoRegistro FROM Evaluacion/.test(q))return [evaluaciones.filter(e=>e.IdEvaluacion===Number(p[0]))];
+ if(/FROM Evaluacion e/.test(q)) {
+   if(/e.IdEvaluacion = \?/.test(q))return [evaluaciones.filter(e=>e.IdEvaluacion===Number(p[0])).map(e=>({...e,IdCiclo:7,IdCurso:null,IdAcademia:1,UniversidadObjetivo:'UNMSM'}))];
+   return [evaluaciones.filter(e=>[1,2].includes(e.EstadoRegistro)).map(e=>({...e,Curso:'Simulacro general',UniversidadObjetivo:'UNMSM'}))];
+ }
+ if(/^INSERT INTO Evaluacion/.test(q)) {
+   assert.doesNotMatch(q,/IdCurso/);
+   if(falloInsercionEn>0&&--falloInsercionEn===0)throw Error('Fallo de insercion simulado');
+   evaluaciones.push({IdEvaluacion:siguienteId++,IdMatricula:p[0],Calificacion:p[1],TipoEvaluacion:p[2],Periodo:p[3],EstadoRegistro:1});
+   return [{affectedRows:1,insertId:siguienteId-1}];
+ }
+ if(/^UPDATE Evaluacion e/.test(q)&&/SET e.EstadoRegistro = 2/.test(q)) {
+   assert.match(q,/m.IdCurso <=> \?/);assert.match(q,/e.Periodo = \?/);assert.match(q,/e.TipoEvaluacion = \?/);
+   let affectedRows=0;for(const e of evaluaciones)if(p[1]===7&&p[2]===null&&e.Periodo===p[3]&&e.TipoEvaluacion===p[4]&&e.EstadoRegistro===1){e.EstadoRegistro=2;affectedRows++;}
+   return [{affectedRows}];
+ }
+ if(/^UPDATE Evaluacion e/.test(q)&&/SET e.Calificacion/.test(q)) {
+   const e=evaluaciones.find(e=>e.IdEvaluacion===p[2]&&e.EstadoRegistro===1);if(e)e.Calificacion=p[0];return [{affectedRows:e?1:0}];
+ }
+ if(/^INSERT INTO Auditoria_Cierres/.test(q)) {
+   if(falloAuditoria)throw Error('Fallo de auditoria simulado');
+   cierres.push(clave(...p.slice(1)));return [{affectedRows:1,insertId:cierres.length}];
+ }
+ throw Error('Consulta no simulada: '+q);
 }
-
-const conexion = {
-  query,
-
-  async beginTransaction() {
-    respaldo = {
-      evaluaciones: copia(evaluaciones),
-      cierres: copia(cierres),
-      siguienteId,
-    };
-  },
-
-  async commit() {
-    respaldo = null;
-  },
-
-  async rollback() {
-    if (!respaldo) return;
-
-    evaluaciones.splice(
-      0,
-      evaluaciones.length,
-      ...respaldo.evaluaciones
-    );
-
-    cierres.splice(
-      0,
-      cierres.length,
-      ...respaldo.cierres
-    );
-
-    siguienteId = respaldo.siguienteId;
-    respaldo = null;
-  },
-
-  release() {},
-};
-
-require.cache[rutaDB] = {
-  id: rutaDB,
-  filename: rutaDB,
-  loaded: true,
-  exports: {
-    query,
-    getConnection: async () => conexion,
-  },
-};
-
-// Servidor exclusivo de pruebas locales.
-const app = express();
-app.use(express.json());
-
-app.use((req, res, next) => {
-  req.usuario = {
-    id: 10,
-    idAcademia: 1,
-    rol:
-      req.headers["x-rol-prueba"] ||
-      "Administrador",
-  };
-  next();
+const connection={query,async beginTransaction(){respaldo={evaluaciones:copia(evaluaciones),cierres:copia(cierres),siguienteId};},
+ async commit(){respaldo=null;},async rollback(){if(!respaldo)return;evaluaciones.splice(0,evaluaciones.length,...respaldo.evaluaciones);cierres.splice(0,cierres.length,...respaldo.cierres);siguienteId=respaldo.siguienteId;respaldo=null;},release(){}};
+const dbPath=require.resolve('./config/db');require.cache[dbPath]={id:dbPath,filename:dbPath,loaded:true,exports:{query,getConnection:async()=>connection}};
+const app=express();app.use(express.json());app.use((req,res,next)=>{req.usuario={id:10,idAcademia:1,rol:req.headers['x-rol-prueba']||'Administrador'};next();});
+app.use('/api/notas',require('./routes/notas.routes'));app.use('/api',require('./routes/actas.routes'));
+const server=app.listen(0,'127.0.0.1',async()=>{
+ const base=`http://127.0.0.1:${server.address().port}`;
+ async function probar(nombre,metodo,ruta,body,esperado,rol='Administrador') {
+   const response=await fetch(base+ruta,{method:metodo,headers:{'Content-Type':'application/json','x-rol-prueba':rol},body:body===undefined?undefined:JSON.stringify(body)});
+   const result=await response.json();assert.equal(response.status,esperado,nombre+': '+JSON.stringify(result));pruebas++;console.log('OK - '+nombre);return result;
+ }
+ const lote=(periodo='General',id=100)=>({idCiclo:7,periodo,notas:[{IdMatricula:id,TipoEvaluacion:'Simulacro',Calificacion:1400}]});
+ const cierre={idCiclo:7,idCurso:null,periodo:'General',tipoEvaluacion:'Simulacro'};
+ try {
+   await probar('Registrar simulacro sin curso','POST','/api/notas',lote(),201);
+   await probar('Registrar otro periodo','POST','/api/notas',lote('Periodo B'),201);
+   await probar('Modificar nota abierta','PUT','/api/notas/1',{Calificacion:1500},200);assert.equal(evaluaciones[0].Calificacion,1500);
+   await probar('Duplicado abierto rechazado','POST','/api/notas',lote(),409);assert.equal(evaluaciones.length,2);
+   await probar('Cierre legado del periodo General','PUT','/api/actas/cierre',cierre,200);
+   assert.equal(evaluaciones[0].EstadoRegistro,2);assert.equal(evaluaciones[1].EstadoRegistro,1);
+   const listado=await probar('Cerradas siguen visibles','GET','/api/notas',undefined,200);assert.equal(listado.length,2);assert.equal(listado[0].EstadoRegistro,2);
+   await probar('RRHH consulta notas','GET','/api/notas',undefined,200,'Recursos Humanos');
+   await probar('Nota cerrada no editable','PUT','/api/notas/1',{Calificacion:1600},403);
+   await probar('Duplicado cerrado rechazado','POST','/api/notas',lote(),409);
+   await probar('Cierre impide alta de otro alumno','POST','/api/notas',lote('General',101),403);
+   await probar('Otro periodo permanece abierto','PUT','/api/notas/2',{Calificacion:1700},200);
+   await probar('Decimal rechazado','POST','/api/notas',{...lote('Periodo C'),notas:[{...lote().notas[0],Calificacion:1.5}]},400);
+   await probar('Docente no escribe sin alcance','POST','/api/notas',lote('Periodo C'),403,'Docente');
+   const antes=copia(evaluaciones);
+   await probar('Lote invalido no escribe parcialmente','POST','/api/notas',{...lote('Periodo C'),notas:[lote().notas[0],{...lote().notas[0],IdMatricula:101,Calificacion:2001}]},400);assert.deepEqual(evaluaciones,antes);
+   falloInsercionEn=2;
+   await probar('Fallo en segunda insercion revierte lote','POST','/api/notas',{...lote('Periodo C'),notas:[lote().notas[0],{...lote().notas[0],IdMatricula:101}]},500);assert.deepEqual(evaluaciones,antes);
+   const cierresAntes=copia(cierres);falloAuditoria=true;
+   await probar('Fallo de auditoria restaura notas','PUT','/api/actas/cierre',{...cierre,periodo:'Periodo B'},500);assert.deepEqual(evaluaciones,antes);assert.deepEqual(cierres,cierresAntes);falloAuditoria=false;
+   await probar('RRHH cierra periodo B','PUT','/api/actas/cierre',{...cierre,periodo:'Periodo B'},200,'Recursos Humanos');
+   assert.ok(evaluaciones.every(e=>e.EstadoRegistro===2));
+   await probar('Cierre repetido rechazado','PUT','/api/actas/cierre',{...cierre,periodo:'Periodo B'},409);
+   await probar('Periodo B cerrado no editable','PUT','/api/notas/2',{Calificacion:1500},403);
+   await probar('Otro periodo admite notas','POST','/api/notas',lote('Periodo C'),201);
+   await probar('Lote repetido se revierte completo','POST','/api/notas',{...lote('Periodo D'),notas:[lote().notas[0],lote().notas[0]]},409);
+   console.log(`${pruebas} pruebas locales correctas. Sin Aiven.`);
+ }catch(error){console.error('PRUEBA FALLIDA:',error.message);process.exitCode=1;}finally{server.close();server.closeAllConnections();}
 });
-
-app.use(
-  "/api/notas",
-  require("./routes/notas.routes")
-);
-
-app.use(
-  "/api",
-  require("./routes/actas.routes")
-);
-
-const servidor = app.listen(
-  0,
-  "127.0.0.1",
-  async () => {
-    const base =
-      `http://127.0.0.1:${servidor.address().port}`;
-
-    async function probar(
-      nombre,
-      metodo,
-      ruta,
-      body,
-      esperado,
-      rol
-    ) {
-      const respuesta = await fetch(base + ruta, {
-        method: metodo,
-        headers: {
-          "Content-Type": "application/json",
-          "x-rol-prueba": rol || "Administrador",
-        },
-        body: JSON.stringify(body),
-      });
-
-      const detalle = await respuesta.text();
-
-      assert.equal(
-        respuesta.status,
-        esperado,
-        `${nombre}: esperado ${esperado}, ` +
-          `recibido ${respuesta.status}. ${detalle}`
-      );
-
-      console.log("OK - " + nombre);
-      pruebasRealizadas++;
-      return JSON.parse(detalle);
-    }
-
-    const notaCurso = (
-      IdCurso,
-      periodo = "General"
-    ) => ({
-      idCiclo: 7,
-      periodo,
-      notas: [{
-        IdMatricula: 100,
-        IdCurso,
-        TipoEvaluacion: "Practica",
-        Calificacion: 16,
-      }],
-    });
-
-    const simulacro = {
-      idCiclo: 7,
-      periodo: "General",
-      notas: [{
-        IdMatricula: 100,
-        IdCurso: null,
-        TipoEvaluacion: "Simulacro",
-        Calificacion: 1450,
-      }],
-    };
-
-    try {
-      await probar(
-        "Registrar nota del curso 3",
-        "POST", "/api/notas",
-        notaCurso(3), 201
-      );
-
-      await probar(
-        "Registrar simulacro general",
-        "POST", "/api/notas",
-        simulacro, 201
-      );
-
-      assert.equal(evaluaciones.length, 2);
-
-      const idNota =
-        evaluaciones[0].IdEvaluacion;
-
-      await probar(
-        "Modificar nota abierta",
-        "PUT", `/api/notas/${idNota}`,
-        { Calificacion: 18 }, 200
-      );
-
-      assert.equal(
-        evaluaciones[0].Calificacion, 18
-      );
-
-      await probar(
-        "Cerrar Practica del curso 3",
-        "PUT", "/api/actas/cierre",
-        {
-          idCiclo: 7,
-          idCurso: 3,
-          periodo: "General",
-          tipoEvaluacion: "Practica",
-        },
-        200
-      );
-
-      assert.equal(
-        evaluaciones[0].EstadoRegistro, 2
-      );
-
-      assert.equal(
-        evaluaciones[1].EstadoRegistro, 1
-      );
-
-      assert.equal(cierres.length, 1);
-
-      const listado = await probar(
-        "Las notas cerradas siguen visibles",
-        "GET", "/api/notas",
-        undefined, 200
-      );
-
-      assert.ok(
-        listado.some(
-          (e) => e.EstadoRegistro === 2
-        )
-      );
-
-      await probar(
-        "RRHH puede consultar notas",
-        "GET", "/api/notas",
-        undefined, 200,
-        "Recursos Humanos"
-      );
-
-      await probar(
-        "Impedir modificar nota cerrada",
-        "PUT", `/api/notas/${idNota}`,
-        { Calificacion: 19 }, 409
-      );
-
-      await probar(
-        "Impedir insertar en acta cerrada",
-        "POST", "/api/notas",
-        notaCurso(3), 409
-      );
-
-      await probar(
-        "Permitir otro curso del mismo ciclo",
-        "POST", "/api/notas",
-        notaCurso(4), 201
-      );
-
-      await probar(
-        "Permitir otro periodo del curso cerrado",
-        "POST", "/api/notas",
-        notaCurso(3, "Semana 2"), 201
-      );
-
-      await probar(
-        "Permitir simulacro aun abierto",
-        "POST", "/api/notas",
-        simulacro, 201
-      );
-
-      await probar(
-        "Impedir nota decimal",
-        "POST", "/api/notas",
-        {
-          ...notaCurso(4),
-          notas: [{
-            IdMatricula: 100,
-            IdCurso: 4,
-            TipoEvaluacion: "Practica",
-            Calificacion: 15.5,
-          }],
-        },
-        400
-      );
-
-      await probar(
-        "Docente sin permiso temporal",
-        "POST", "/api/notas",
-        notaCurso(4), 403,
-        "Docente"
-      );
-
-      const antes = copia(evaluaciones);
-      await probar("Lote invalido no guarda parcialmente", "POST", "/api/notas", {
-        ...notaCurso(4), notas: [notaCurso(4).notas[0], { ...notaCurso(4).notas[0], Calificacion: 21 }],
-      }, 400);
-      assert.deepEqual(evaluaciones, antes);
-
-      falloInsercionEn = 2;
-      await probar("Fallo de segunda insercion restaura el lote", "POST", "/api/notas", {
-        ...notaCurso(4), notas: [notaCurso(4).notas[0], notaCurso(4).notas[0]],
-      }, 500);
-      assert.deepEqual(evaluaciones, antes);
-
-      const cierreGeneral = { idCiclo: 7, idCurso: null, periodo: "General", tipoEvaluacion: "Simulacro" };
-      const cierresAntes = copia(cierres);
-      falloAuditoria = true;
-      await probar("Fallo de auditoria restaura estados de notas", "PUT", "/api/actas/cierre", cierreGeneral, 500);
-      assert.deepEqual(evaluaciones, antes);
-      assert.deepEqual(cierres, cierresAntes);
-      falloAuditoria = false;
-
-      await probar("RRHH cierra simulacros generales", "PUT", "/api/actas/cierre", cierreGeneral, 200, "Recursos Humanos");
-      assert.ok(evaluaciones.filter(e => e.IdCurso === null).every(e => e.EstadoRegistro === 2));
-      assert.ok(evaluaciones.filter(e => e.IdCurso === 4).every(e => e.EstadoRegistro === 1));
-      await probar("Cierre general duplicado", "PUT", "/api/actas/cierre", cierreGeneral, 409);
-      await probar("Simulacro cerrado no admite nuevas notas", "POST", "/api/notas", simulacro, 409);
-      await probar("Simulacro cerrado no admite edicion", "PUT", `/api/notas/${evaluaciones[1].IdEvaluacion}`, { Calificacion: 1500 }, 409);
-      await probar("Otro tipo del mismo curso permanece abierto", "POST", "/api/notas", {
-        ...notaCurso(3), notas: [{ ...notaCurso(3).notas[0], TipoEvaluacion: "Examen" }],
-      }, 201);
-
-      console.log(`\n${pruebasRealizadas} pruebas locales correctas.`);
-      console.log(
-        "No se utilizo Aiven."
-      );
-
-    } catch (error) {
-      console.error(
-        "PRUEBA FALLIDA:",
-        error.message
-      );
-
-      process.exitCode = 1;
-
-    } finally {
-      servidor.close();
-    }
-  }
-);

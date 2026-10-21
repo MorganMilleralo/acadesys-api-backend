@@ -84,13 +84,21 @@ for (const rol of ['Administrador', 'Recursos Humanos']) {
     const fin = secuencia([
       { sql: /SELECT \* FROM perfil/, rows: [] },
       { sql: /FROM Usuario u/, rows: [] },
+      { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
+      { sql: /SELECT IdPerfil FROM perfil WHERE LOWER/, rows: [] },
       { sql: /INSERT INTO perfil/, rows: { insertId: 99, affectedRows: 1 } },
+      { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
       { sql: /SELECT IdPerfil, Nombre, EstadoRegistro FROM perfil/, rows: [{ IdPerfil: 99, Nombre: 'Ficticio', EstadoRegistro: 1 }] },
+      { sql: /SELECT IdPerfil FROM perfil WHERE LOWER/, rows: [] },
       { sql: /UPDATE perfil/, rows: { affectedRows: 1 } },
+      { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
       { sql: /SELECT IdPerfil, Nombre, EstadoRegistro FROM perfil/, rows: [{ IdPerfil: 99, Nombre: 'Ficticio', EstadoRegistro: 1 }] },
       { sql: /COUNT\(\*\)/, rows: [{ total: 0 }] },
       { sql: /UPDATE perfil/, rows: { affectedRows: 1 } },
+      { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
+      { sql: /SELECT IdOpcionMenu FROM OpcionesMenu WHERE UrlMenu/, rows: [] },
       { sql: /INSERT INTO OpcionesMenu /, rows: { insertId: 99, affectedRows: 1 } },
+      { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
       { sql: /FROM OpcionesMenu WHERE/, rows: [{ IdOpcionMenu: 99 }] },
       { sql: /FROM perfil WHERE/, rows: [{ IdPerfil: 99 }] },
       { sql: /FROM OpcionesMenu_Perfiles/, rows: [] },
@@ -114,14 +122,11 @@ test('docente consulta solo sus asignaciones con academia, curso y estados valid
   assert.equal(r.status, 200); assert.deepEqual(r.body, [{ idAsignacion: 7 }]); fin();
 });
 
-test('no se inventa alumno-aula para leer ni registrar asistencias', async t => {
-  simular();
-  const pedir = await servir(t, [['/api', 'academico.routes']]);
-  for (const metodo of ['GET', 'POST']) {
-    const r = await pedir(metodo, '/api/asistencias', metodo === 'POST' ? { idAula: 1, listaAlumnos: [{ idMatricula: 1 }] } : undefined);
-    assert.equal(r.status, 409); assert.equal(r.body.codigo, 'RELACION_ALUMNO_AULA_PENDIENTE');
-  }
-  assert.equal(consultas.length, 0);
+test('asistencias conserva validacion de entrada del flujo por ciclo de main', async t => {
+  simular(); const pedir = await servir(t, [['/api', 'academico.routes']]);
+  assert.equal((await pedir('GET','/api/asistencias')).status,400);
+  assert.equal((await pedir('POST','/api/asistencias',{idCiclo:7,fecha:'2026-02-31',listaAlumnos:[]})).status,400);
+  assert.equal(consultas.length,0);
 });
 
 test('docentes no publican comunicados institucionales sin alcance verificable', async t => {
@@ -139,7 +144,7 @@ test('materiales filtra por academia antes de listar, escribir archivos o elimin
   ]);
   const pedir = await servir(t, [['/api/materiales', 'materiales.routes']]);
   assert.equal((await pedir('GET', '/api/materiales/admin')).status, 200);
-  assert.equal((await pedir('POST', '/api/materiales', { idCiclo: 7, idCurso: 3, titulo: 'Ficticio', fileData: 'a'.repeat(30) })).status, 400);
+  assert.equal((await pedir('POST', '/api/materiales', { idCiclo: 7, idCurso: 3, titulo: 'Ficticio', fileData: Buffer.from('%PDF-1.4 documento ficticio').toString('base64') })).status, 400);
   assert.equal((await pedir('DELETE', '/api/materiales/99')).status, 404); fin();
 });
 
@@ -169,7 +174,8 @@ test('login no entrega JWT cuando hay multiples perfiles activos', async t => {
 
 test('cambio de perfil deja una sola asignacion activa y conserva historial', async t => {
   const fin = secuencia([
-    { sql: /SELECT IdUsuario, EstadoRegistro FROM Usuario.*FOR UPDATE/, params: [10, 1], rows: [{ IdUsuario: 10, EstadoRegistro: 1 }] },
+    { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
+    { sql: /SELECT IdUsuario, EstadoRegistro, DNI, CorreoElectronico FROM Usuario.*FOR UPDATE/, params: [10, 1], rows: [{ IdUsuario: 10, EstadoRegistro: 1 }] },
     { sql: /SELECT p.Nombre AS NombrePerfil/, rows: [{ NombrePerfil: 'Docente' }] },
     { sql: /SELECT IdPerfil, Nombre FROM perfil.*EstadoRegistro = 1.*FOR SHARE/, params: [3], rows: [{ IdPerfil: 3, Nombre: 'Tutor de Aula' }] },
     { sql: /^UPDATE Usuario /, rows: { affectedRows: 1 } },
@@ -184,7 +190,8 @@ test('cambio de perfil deja una sola asignacion activa y conserva historial', as
 
 test('perfil inactivo revierte la actualizacion del usuario', async t => {
   const fin = secuencia([
-    { sql: /SELECT IdUsuario, EstadoRegistro FROM Usuario.*FOR UPDATE/, params: [10, 1], rows: [{ IdUsuario: 10, EstadoRegistro: 1 }] },
+    { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
+    { sql: /SELECT IdUsuario, EstadoRegistro, DNI, CorreoElectronico FROM Usuario.*FOR UPDATE/, params: [10, 1], rows: [{ IdUsuario: 10, EstadoRegistro: 1 }] },
     { sql: /SELECT p.Nombre AS NombrePerfil/, rows: [{ NombrePerfil: 'Docente' }] },
     { sql: /SELECT IdPerfil, Nombre FROM perfil/, rows: [] },
   ]);
@@ -221,7 +228,9 @@ test('usuarios/me permite autoservicio sin cambiar identidad, academia, clave ni
   const fila = { IdUsuario: 10, Nombres: 'Ficticio', IdPerfil: 2 };
   const fin = secuencia([
     { sql: /FROM Usuario u.*WHERE u.IdUsuario = \?/, params: [10], rows: [fila], verificar(q) { assert.doesNotMatch(q, /u\.Clave/); } },
-    { sql: /^UPDATE Usuario SET Nombres=\? WHERE IdUsuario = \? AND EstadoRegistro = 1$/, params: ['Nuevo ficticio', 10], rows: { affectedRows: 1 } },
+    { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
+    { sql: /SELECT DNI, CorreoElectronico FROM Usuario.*FOR UPDATE/, rows: [{DNI:null,CorreoElectronico:null}] },
+    { sql: /^UPDATE Usuario SET Nombres=\? WHERE IdUsuario = \? AND IdAcademia = \? AND EstadoRegistro = 1$/, params: ['Nuevo ficticio', 10, 1], rows: { affectedRows: 1 } },
     { sql: /FROM Usuario u.*WHERE u.IdUsuario = \?/, params: [10], rows: [{ ...fila, Nombres: 'Nuevo ficticio' }] },
   ]);
   const pedir = await servir(t, privadas, { id: 10, idAcademia: 1, rol: 'Alumno' });
@@ -246,7 +255,8 @@ test('directorio preserva el formato pero no expone alumnos a personal sin alcan
 test('se conserva la proteccion del ultimo administrador con nombres exactos', async t => {
   for (const rol of ['Administrador', 'Recursos Humanos']) {
     const fin = secuencia([
-      { sql: /SELECT IdUsuario, EstadoRegistro FROM Usuario.*FOR UPDATE/, rows: [{ IdUsuario: 10, EstadoRegistro: 1 }] },
+      { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
+    { sql: /SELECT IdUsuario, EstadoRegistro, DNI, CorreoElectronico FROM Usuario.*FOR UPDATE/, rows: [{ IdUsuario: 10, EstadoRegistro: 1 }] },
       { sql: /SELECT p.Nombre AS NombrePerfil/, rows: [{ NombrePerfil: rol }] },
       { sql: /FROM Usuario u.*u.IdUsuario <> \?/, params: [1, 10], rows: [{ IdUsuario: 22, NombrePerfil: 'Administrador externo' }] },
     ]);
@@ -275,12 +285,17 @@ test('pago pendiente del checkout no se marca como cobrado manualmente', async t
 test('CRUD de horarios conserva el validador requerido por los nuevos endpoints', async t => {
   const body = { idCiclo: 7, idCurso: 3, diaNumero: 1, diaSemana: 'Lunes', horaInicio: '08:00', horaFin: '10:00' };
   const fin = secuencia([
+    { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
     { sql: /FROM Ciclo WHERE/, params: [7, 1], rows: [{ IdCiclo: 7 }] },
-    { sql: /FROM Curso WHERE/, params: [3], rows: [{ IdCurso: 3 }] },
-    { sql: /INSERT INTO HorarioCurso/, params: [7, 3, 1, 'Lunes', '08:00', '10:00', 1], rows: { insertId: 5 } },
+    { sql: /FROM Curso cu INNER JOIN CicloCurso/, params: [3, 7], rows: [{ IdCurso: 3 }] },
+    { sql: /SELECT IdHorario FROM HorarioCurso/, rows: [] },
+    { sql: /INSERT INTO HorarioCurso/, params: [7, 3, 1, 'Lunes', '08:00:00', '10:00:00', 1], rows: { insertId: 5 } },
+    { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
     { sql: /FROM Ciclo WHERE/, rows: [{ IdCiclo: 7 }] },
-    { sql: /FROM Curso WHERE/, rows: [{ IdCurso: 3 }] },
-    { sql: /UPDATE HorarioCurso.*h.IdHorario = \? AND c.IdAcademia = \?/, params: [7, 3, 1, 'Lunes', '08:00', '10:00', 1, 5, 1], rows: { affectedRows: 1 } },
+    { sql: /FROM Curso cu INNER JOIN CicloCurso/, rows: [{ IdCurso: 3 }] },
+    { sql: /SELECT h.IdHorario FROM HorarioCurso/, rows: [{IdHorario:5}] },
+    { sql: /SELECT IdHorario FROM HorarioCurso/, rows: [] },
+    { sql: /UPDATE HorarioCurso.*WHERE IdHorario = \?/, params: [7, 3, 1, 'Lunes', '08:00:00', '10:00:00', 1, 5], rows: { affectedRows: 1 } },
     { sql: /UPDATE HorarioCurso.*SET h.EstadoRegistro = 0/, params: [5, 1], rows: { affectedRows: 1 } },
   ]);
   const pedir = await servir(t, [['/api', 'academico.routes']], { id: 10, idAcademia: 1, rol: 'Recursos Humanos' });
@@ -291,3 +306,38 @@ test('CRUD de horarios conserva el validador requerido por los nuevos endpoints'
   assert.equal((await pedir('POST', '/api/horarios', { ...body, horaInicio: '99:00' })).status, 400);
   assert.equal(consultas.length, 0);
 });
+
+for (const rol of ['Administrador','Recursos Humanos','Docente','Tutor de Aula']) {
+  test('asistencia por ciclo conserva lectura y escritura para '+rol, async t => {
+    const fin=secuencia([
+      {sql:/FROM Ciclo WHERE.*IdAcademia = \?/,params:[7,1],rows:[{IdCiclo:7}]},
+      {sql:/FROM Matricula m/,params:['2026-10-20','2026-10-20',1,7],rows:[{idMatricula:100}],verificar(q){assert.match(q,/c.IdAcademia = u.IdAcademia/);assert.match(q,/u.IdAcademia = \?/);}},
+      {sql:/FROM Ciclo.*FOR UPDATE/,params:[7,1],rows:[{IdCiclo:7,Nombre:'Ficticio'}]},
+      {sql:/FROM Aula WHERE.*Nombre = \?/,params:[1,'Ciclo 7'],rows:[{IdAula:3,EstadoRegistro:1}]},
+      {sql:/FROM Aula WHERE.*IdAcademia = \?/,params:[3,1],rows:[{IdAula:3}]},
+      {sql:/SELECT DISTINCT m.IdMatricula/,params:[1,7,100],rows:[{IdMatricula:100}],verificar(q){assert.match(q,/m.IdCiclo = \?/);assert.match(q,/c.IdAcademia = u.IdAcademia/);}},
+      {sql:/INSERT INTO Asistencia/,params:[100,3,'2026-10-20','presente','08:00',10],rows:{affectedRows:1}},
+    ]);
+    const pedir=await servir(t,[['/api','academico.routes']],{id:10,idAcademia:1,rol});
+    assert.equal((await pedir('GET','/api/asistencias?idCiclo=7&fecha=2026-10-20')).status,200);
+    const r=await pedir('POST','/api/asistencias',{idCiclo:7,fecha:'2026-10-20',listaAlumnos:[{idMatricula:100,estado:'presente',horaLlegada:'08:00'}]});
+    assert.equal(r.status,200);assert.equal(r.body.registrosGuardados,1);fin();assert.deepEqual(eventos,['begin','commit','release']);
+  });
+}
+
+test('asistencia rechaza ciclo ajeno antes de guardar',async t=>{
+ const fin=secuencia([{sql:/FROM Ciclo.*IdAcademia = \?.*FOR UPDATE/,params:[7,1],rows:[]}]);
+ const pedir=await servir(t,[['/api','academico.routes']],{id:10,idAcademia:1,rol:'Docente'});
+ assert.equal((await pedir('POST','/api/asistencias',{idCiclo:7,fecha:'2026-10-20',listaAlumnos:[{idMatricula:100,estado:'presente',horaLlegada:'08:00'}]})).status,404);
+ fin();assert.deepEqual(eventos,['begin','rollback','release']);
+});
+
+ test('login mantiene el alias Estudiante y consulta su ciclo solo en su academia',async t=>{
+  const fin=secuencia([
+   {sql:/FROM Usuario u.*LIMIT 2$/,rows:[{...cuenta,Rol:'Estudiante'}]},
+   {sql:/FROM Matricula m.*c.IdAcademia = \?/,params:[10,1],rows:[]},
+  ]);
+  const pedir=await servir(t,[['/api','auth.routes']]);
+  const r=await pedir('POST','/api/auth/login',{usuario:'ficticio',password:'clave-ficticia'});
+  assert.equal(r.status,200);assert.equal(r.body.rol,'Estudiante');assert.ok(r.body.token);fin();
+ });

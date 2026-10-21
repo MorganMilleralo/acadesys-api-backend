@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
 const requiereRol = require("../middlewares/roles.middleware");
+const { idPositivo, rollbackSeguro } = require('../utils/validaciones');
 
 // GET /api/pagos/ciclo/:idCiclo - Monitor de mensualidades y morosidad de un ciclo
 router.get(
@@ -10,6 +11,7 @@ router.get(
   async (req, res) => {
     try {
       const { idCiclo } = req.params;
+      if (!idPositivo(idCiclo)) return res.status(400).json({ error: 'El IdCiclo no es válido.' });
       const idAcademia = req.usuario.idAcademia;
 
       const [rows] = await pool.query(
@@ -37,7 +39,7 @@ router.get(
       res.json(rows);
     } catch (error) {
       console.error("Error en GET /pagos/ciclo/:idCiclo:", error.message);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: 'No se pudieron consultar los pagos.' });
     }
   },
 );
@@ -48,7 +50,8 @@ router.put(
   requiereRol("Administrador"),
   async (req, res) => {
     const { id } = req.params;
-    const { Estado } = req.body;
+    if (!idPositivo(id)) return res.status(400).json({ error: 'El IdPago no es válido.' });
+    const { Estado } = req.body || {};
     const idAcademia = req.usuario.idAcademia;
 
     if (!["Pagado", "Moroso"].includes(Estado)) {
@@ -59,14 +62,17 @@ router.put(
 
     const fechaPago = Estado === "Pagado" ? new Date() : null;
 
-    const connection = await pool.getConnection();
+    let connection;
     try {
+      connection = await pool.getConnection();
       await connection.beginTransaction();
       const [pagos] = await connection.query(
         `SELECT p.IdPago, p.Estado, p.Mes
          FROM PagosMensualidad p
          INNER JOIN Usuario u ON p.IdUsuario = u.IdUsuario
-         WHERE p.IdPago = ? AND u.IdAcademia = ?
+         INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = u.IdAcademia
+          WHERE p.IdPago = ? AND u.IdAcademia = ?
+            AND p.EstadoRegistro = 1 AND u.EstadoRegistro = 1
          LIMIT 1 FOR UPDATE`,
         [id, idAcademia],
       );
@@ -100,11 +106,11 @@ router.put(
       await connection.commit();
       res.json({ message: `Pago actualizado a estado: ${Estado}` });
     } catch (error) {
-      try { await connection.rollback(); } catch (_) {}
+      await rollbackSeguro(connection);
       console.error("Error en PUT /pagos/:id/estado:", error.message);
       res.status(500).json({ error: 'No se pudo actualizar el estado de pago.' });
     } finally {
-      connection.release();
+      if (connection) connection.release();
     }
   },
 );

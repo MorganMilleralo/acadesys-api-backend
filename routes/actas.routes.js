@@ -1,219 +1,139 @@
-
-const express = require("express");
+const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
+const { idPositivo, rollbackSeguro } = require('../utils/validaciones');
 
-const { normalizarTipo, enteroPositivo: valido, periodoValido,
-  responderErrorEsquema } = require("../utils/evaluaciones");
+const TIPOS_VALIDOS = new Map([
+  ['practica', 'Practica'],
+  ['evaluacion', 'Evaluacion'],
+  ['examen', 'Examen'],
+  ['simulacro', 'Simulacro'],
+]);
 
-router.put(
-  "/actas/cierre",
-  requiereRol("Administrador"),
-  async (req, res) => {
-    let idCiclo = req.body?.idCiclo ?? req.body?.IdCiclo;
-    // Conservar ambos nombres utilizados por los clientes, incluido null
-    // explicito para el simulacro general.
-    const entradaCurso = Object.hasOwn(req.body || {}, 'idCurso')
-      ? req.body.idCurso : req.body?.IdCurso;
-    let idCurso = entradaCurso == null ? null : entradaCurso;
+function normalizarTipo(valor) {
+  if (typeof valor !== 'string') return null;
+  const clave = valor.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+  return TIPOS_VALIDOS.get(clave) || null;
+}
 
-    const periodoEntrada = (
-      req.body?.periodo ??
-      req.body?.Periodo ??
-      ""
+function periodoValido(valor) {
+  const periodo = typeof valor === 'string' ? valor.trim().replace(/\s+/g, ' ') : '';
+  return periodo.length >= 1 && periodo.length <= 50 ? periodo : null;
+}
+
+// PUT /api/actas/cierre
+// Body: { idCiclo, idCurso, periodo, tipoEvaluacion }
+// Contrato legado de main: IdCurso es el alcance de Matricula, no de Evaluacion.
+// Se conserva por compatibilidad; no representa un nuevo cierre semanal.
+router.put('/actas/cierre', requiereRol('Administrador'), async (req, res) => {
+  const idCiclo = idPositivo(req.body?.idCiclo ?? req.body?.IdCiclo);
+  const idCursoRaw = req.body?.idCurso ?? req.body?.IdCurso;
+  const idCurso = idCursoRaw === null || idCursoRaw === undefined || idCursoRaw === ''
+    ? null
+    : Number(idCursoRaw);
+  const periodo = periodoValido(req.body?.periodo ?? req.body?.Periodo);
+  const tipoEvaluacion = normalizarTipo(req.body?.tipoEvaluacion ?? req.body?.TipoEvaluacion);
+  const idAdmin = idPositivo(req.usuario?.idUsuario ?? req.usuario?.id);
+  const idAcademia = idPositivo(req.usuario?.idAcademia);
+
+  const cursoFueIndicado = Object.prototype.hasOwnProperty.call(req.body || {}, 'idCurso')
+    || Object.prototype.hasOwnProperty.call(req.body || {}, 'IdCurso');
+  if (!cursoFueIndicado) {
+    return res.status(400).json({ error: 'Indica idCurso explícitamente; usa null para las evaluaciones cuya matrícula todavía no tiene un curso asignado.' });
+  }
+  if (idCursoRaw != null && idCursoRaw !== '' && !idPositivo(idCursoRaw)) return res.status(400).json({ error: 'IdCurso no válido.' });
+  if (!Number.isInteger(idCiclo) || idCiclo <= 0 || (idCurso !== null && (!Number.isInteger(idCurso) || idCurso <= 0))) {
+    return res.status(400).json({ error: 'Debes indicar un idCiclo válido y un idCurso positivo o null.' });
+  }
+  if (!periodo) return res.status(400).json({ error: 'El periodo es obligatorio y debe tener hasta 50 caracteres.' });
+  if (!tipoEvaluacion) {
+    return res.status(400).json({ error: 'Tipo de evaluación inválido. Usa Práctica, Evaluación, Examen o Simulacro.' });
+  }
+  if (!Number.isInteger(idAdmin) || idAdmin <= 0 || !Number.isInteger(idAcademia) || idAcademia <= 0) {
+    return res.status(401).json({ error: 'No se pudo validar la identidad o academia del administrador.' });
+  }
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    // Se serializa el cierre por ciclo para que el registro de notas, que también
+    // bloquea esta fila, no inserte calificaciones durante el cierre.
+    const [ciclos] = await connection.query(
+      `SELECT IdCiclo FROM Ciclo
+       WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1
+       LIMIT 1 FOR UPDATE`,
+      [idCiclo, idAcademia],
     );
-    const periodo = typeof periodoEntrada === 'string' ? periodoEntrada.trim() : periodoEntrada;
-
-    const tipo = normalizarTipo(
-      req.body?.tipoEvaluacion ??
-      req.body?.TipoEvaluacion
-    );
-
-    const idAcademia = Number(req.usuario.idAcademia);
-
-    if (
-      !valido(idCiclo) ||
-      (idCurso !== null && !valido(idCurso)) ||
-      !periodoValido(periodo) ||
-      !tipo
-    ) {
-      return res.status(400).json({
-        error: "Ciclo, curso, periodo o tipo invalidos.",
-      });
+    if (!ciclos.length) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'El ciclo no existe, está inactivo o no pertenece a tu academia.' });
     }
 
-    idCiclo = Number(idCiclo);
-    idCurso = idCurso === null ? null : Number(idCurso);
-
-    if (
-      (tipo === "Simulacro" && idCurso !== null) ||
-      (tipo !== "Simulacro" && idCurso === null)
-    ) {
-      return res.status(400).json({
-        error:
-          "Simulacro general exige IdCurso null; otros tipos exigen curso.",
-      });
+    if (idCurso !== null) {
+      const [cursos] = await connection.query(
+        `SELECT IdCurso FROM CicloCurso
+         WHERE IdCiclo = ? AND IdCurso = ? AND EstadoRegistro = 1
+         LIMIT 1`,
+        [idCiclo, idCurso],
+      );
+      if (!cursos.length) {
+        await connection.rollback();
+        return res.status(404).json({ error: 'El curso no está asociado al ciclo indicado.' });
+      }
     }
 
-    let connection;
+    const [cierresPrevios] = await connection.query(
+      `SELECT IdCierre FROM Auditoria_Cierres
+       WHERE IdCiclo = ? AND IdCurso <=> ? AND Periodo = ? AND TipoEvaluacion = ?
+       LIMIT 1 FOR UPDATE`,
+      [idCiclo, idCurso, periodo, tipoEvaluacion],
+    );
+    if (cierresPrevios.length) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'Este curso, ciclo, periodo y tipo de evaluación ya están cerrados.' });
+    }
 
-    try {
-      connection = await pool.getConnection();
-      await connection.beginTransaction();
-
-      // 1. Bloquear el ciclo.
-      const [ciclos] = await connection.query(
-        `SELECT IdCiclo
-         FROM Ciclo
-         WHERE IdCiclo = ?
-           AND IdAcademia = ?
-           AND EstadoRegistro = 1
-         LIMIT 1 FOR UPDATE`,
-        [idCiclo, idAcademia]
-      );
-
-      if (!ciclos.length) {
-        await connection.rollback();
-
-        return res.status(404).json({
-          error: "Ciclo ajeno o inactivo.",
-        });
-      }
-
-      // 2. Comprobar el curso, si corresponde.
-      if (idCurso !== null) {
-        const [cursos] = await connection.query(
-          `SELECT cc.IdCurso
-           FROM CicloCurso cc
-           INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso AND cu.EstadoRegistro = 1
-           WHERE cc.IdCiclo = ?
-             AND cc.IdCurso = ?
-             AND cc.EstadoRegistro = 1
-           LIMIT 1`,
-          [idCiclo, idCurso]
-        );
-
-        if (!cursos.length) {
-          await connection.rollback();
-
-          return res.status(400).json({
-            error: "Curso no asignado al ciclo.",
-          });
-        }
-      }
-
-      // 3. Comprobar que no exista ya el cierre.
-      const [cerrado] = await connection.query(
-        `SELECT IdCierre
-         FROM Auditoria_Cierres
-         WHERE IdCiclo = ?
-           AND IdCurso <=> ?
-           AND Periodo = ?
-           AND TipoEvaluacion = ?
-         LIMIT 1 FOR UPDATE`,
-        [idCiclo, idCurso, periodo, tipo]
-      );
-
-      if (cerrado.length) {
-        await connection.rollback();
-
-        return res.status(409).json({
-          error: "Esa acta ya esta cerrada.",
-        });
-      }
-
-      // 4. Cerrar solo las evaluaciones seleccionadas.
-      const [resultado] = await connection.query(
-        `UPDATE Evaluacion e
-         INNER JOIN Matricula m
-           ON m.IdMatricula = e.IdMatricula
-         INNER JOIN Usuario u
-           ON u.IdUsuario = m.IdUsuario
-         SET
-           e.EstadoRegistro = 2,
+    const [actualizacion] = await connection.query(
+      `UPDATE Evaluacion e
+       INNER JOIN Matricula m ON m.IdMatricula = e.IdMatricula
+       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
+       SET e.EstadoRegistro = 2,
            e.UsuarioModificacion = ?,
            e.FechaModificacion = NOW()
-         WHERE m.IdCiclo = ?
-           AND e.IdCurso <=> ?
-           AND e.Periodo = ?
-           AND e.TipoEvaluacion = ?
-           AND e.EstadoRegistro = 1
-           AND m.EstadoRegistro = 1
-           AND u.IdAcademia = ?`,
-        [
-          req.usuario.id,
-          idCiclo,
-          idCurso,
-          periodo,
-          tipo,
-          idAcademia,
-        ]
-      );
+       WHERE m.IdCiclo = ?
+         AND m.IdCurso <=> ?
+         AND e.Periodo = ?
+         AND e.TipoEvaluacion = ?
+         AND e.EstadoRegistro = 1
+         AND u.IdAcademia = ?`,
+      [idAdmin, idCiclo, idCurso, periodo, tipoEvaluacion, idAcademia],
+    );
 
-      if (resultado.affectedRows === 0) {
-        await connection.rollback();
+    await connection.query(
+      `INSERT INTO Auditoria_Cierres
+         (IdAdministrador, IdCiclo, IdCurso, Periodo, TipoEvaluacion, FechaCierre)
+       VALUES (?, ?, ?, ?, ?, NOW())`,
+      [idAdmin, idCiclo, idCurso, periodo, tipoEvaluacion],
+    );
 
-        return res.status(409).json({
-          error:
-            "No existen evaluaciones abiertas para ese alcance.",
-        });
-      }
-
-      // 5. Registrar la auditoria.
-      await connection.query(
-        `INSERT INTO Auditoria_Cierres
-         (
-           IdAdministrador,
-           IdCiclo,
-           IdCurso,
-           Periodo,
-           TipoEvaluacion,
-           RegistrosAfectados,
-           FechaCierre
-         )
-         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
-        [
-          req.usuario.id,
-          idCiclo,
-          idCurso,
-          periodo,
-          tipo,
-          resultado.affectedRows,
-        ]
-      );
-
-      await connection.commit();
-
-      return res.json({
-        message: "Acta cerrada correctamente.",
-        mensaje: "Acta cerrada correctamente.",
-        idCiclo,
-        idCurso,
-        periodo,
-        tipoEvaluacion: tipo,
-        notasBloqueadas: resultado.affectedRows,
-        evaluacionesSelladas: resultado.affectedRows,
-        alcance: { idCiclo, idCurso, periodo, tipoEvaluacion: tipo,
-          alcanceCurso: idCurso === null ? 'Simulacro General' : 'Curso específico' },
-      });
-    } catch (error) {
-      if (connection) {
-        await connection.rollback().catch(() => {});
-      }
-
-      console.error("PUT /actas/cierre:", error);
-      if (responderErrorEsquema(res, error)) return;
-
-      return res.status(500).json({
-        error: "No se pudo cerrar el acta.",
-      });
-    } finally {
-      if (connection) {
-        connection.release();
-      }
+    await connection.commit();
+    return res.json({
+      mensaje: 'Cierre de acta registrado correctamente.',
+      alcance: { idCiclo, idCurso, periodo, tipoEvaluacion, alcanceCurso: idCurso === null ? 'Matrículas sin curso asignado' : 'Curso específico' },
+      evaluacionesSelladas: Number(actualizacion.affectedRows || 0),
+    });
+  } catch (error) {
+    if (connection) {
+      await rollbackSeguro(connection);
     }
+    console.error('Error en PUT /api/actas/cierre:', error.message);
+    return res.status(500).json({ error: 'No se pudo cerrar el acta. La operación fue revertida.' });
+  } finally {
+    if (connection) connection.release();
   }
-);
+});
 
 module.exports = router;

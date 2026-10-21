@@ -29,7 +29,7 @@ const conexionFalsa = {
     if (sql.includes("UPDATE Evaluacion")) {
       // Verificamos que no sea un cierre global.
       assert.match(sql, /m\.IdCiclo\s*=\s*\?/i);
-      assert.match(sql, /e\.IdCurso\s*<=>\s*\?/i);
+      assert.match(sql, /m\.IdCurso\s*<=>\s*\?/i);
       assert.match(sql, /e\.Periodo\s*=\s*\?/i);
       assert.match(sql, /e\.TipoEvaluacion\s*=\s*\?/i);
       assert.match(sql, /u\.IdAcademia\s*=\s*\?/i);
@@ -127,8 +127,8 @@ const servidor = app.listen(0, "127.0.0.1", async () => {
     );
 
     await probar(
-      "Simulacro general no admite curso",
-      { ...datos, idCurso: 3 },
+      "Identificador de curso invalido se rechaza",
+      { ...datos, idCurso: true },
       400
     );
 

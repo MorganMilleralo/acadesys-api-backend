@@ -7,8 +7,9 @@
 > Administrador y Recursos Humanos comparten permisos por nombre exacto normalizado.
 >
 > Alcance confirmado por Morgan: **solo simulacros semanales, sin calificaciones
-> por curso**. El ajuste funcional está bloqueado hasta confirmar el DDL vigente y
-> el identificador semanal. La suite actual todavía prueba el contrato anterior.
+> por curso**. La integración conserva el contrato existente de main, sin
+> Evaluacion.IdCurso ni RegistrosAfectados. Sus 154 pruebas locales pasan; la
+> adaptación semanal completa y la verificación del esquema vivo siguen pendientes.
 > **No apto para Auto-Deploy**: Render despliega main y Aiven es la única base.
 
 El texto siguiente conserva la descripción del avance original de main.
