@@ -7,6 +7,13 @@ compañeros, además de los 13 commits ya integrados en `cafdfd1`). Se conserva
 el merge abierto originalmente, sin cancelarlo, reiniciarlo ni reescribir
 `f7f379a`, `cafdfd1` o `72696f4`. Main local no se actualiza ni se publica.
 
+El merge original quedó completado en `fde4fb6`. Al repetir fetch, main cambió
+por una reescritura remota a `7c0abb8`: su código es idéntico a `6ce9331` y solo
+cambia una cifra del informe de Morgan (38 archivos). Se integra también esa
+referencia conservando ambos historiales y las resoluciones ya comprobadas.
+El historial integrado contiene 16 commits remotos desde la base local: 13
+anteriores, los dos de la referencia original y el nuevo commit equivalente.
+
 ### Combinación autorizada
 
 - Notas parte de la versión de Morgan que participa en el merge. Conserva

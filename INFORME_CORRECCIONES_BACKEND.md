@@ -208,7 +208,7 @@ decimal.
 
 | Comprobación | Comando | Resultado |
 | --- | --- | --- |
-| Sintaxis de todos los JS versionados | `node scripts/check-sintaxis.js` (interno `node --check`) | **Correcto en 27 archivos** |
+| Sintaxis de todos los JS versionados | `node scripts/check-sintaxis.js` (interno `node --check`) | **Correcto en 38 archivos** |
 | Suite completa | `node --test tests/*.test.js` | **65/65 pasan**, 0 fallos |
 | `npm test` | `npm test` | Falla en este entorno por el shim de Windows: `/usr/bin/env: 'bash': No such file or directory`. Se ejecutó el runner nativo equivalente: `node "C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js" test` → **65/65** |
 | Arranque y smoke | `node tests/smoke-readonly.js` | Arranca una instancia local y ejecuta solo GET/OPTIONS. `GET /ping` → **200**; `/api/ciclos/publicos` → 200 (9 ciclos); `/api/ciclos/publicos/:id/detalle` → 200; `/api/ciclos/:id/cursos` → 200; `/api/admin/ciclos`, `/api/materiales/admin`, `/api/notas` sin token → **403**; preflight CORS `http://localhost:5173` → **204** |
