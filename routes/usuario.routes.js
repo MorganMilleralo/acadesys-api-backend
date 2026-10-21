@@ -6,6 +6,9 @@ const bcrypt = require("bcrypt");
 const requiereRol = require("../middlewares/roles.middleware");
 const { validarDatosUsuario, usuarioDuplicado, bloquearIdentidades, rollbackSeguro } = require('../utils/validaciones');
 const { enteroPositivo } = require("../utils/evaluaciones");
+const path = require("path");
+const fs = require("fs");
+const { validarTipoArchivo, generarNombreSeguro } = require("../utils/validar-foto");
 
 async function perfilActivo(connection, idPerfil) {
   if (!enteroPositivo(idPerfil)) return false;
@@ -75,6 +78,54 @@ const SELECT_USUARIO = `
   FROM Usuario u
   LEFT JOIN Usuario_Perfiles up ON u.IdUsuario = up.IdUsuario AND up.EstadoRegistro = 1
   LEFT JOIN perfil p ON up.IdPerfil = p.IdPerfil`;
+
+// La columna Usuario.FotoUrl es opcional: puede no existir todavía en una BD
+// sin la migración ADD_USUARIO_FOTOURL.sql. Se detecta una sola vez y se
+// cachea para que GET/PUT/DELETE sigan funcionando (sin 500) antes de migrar.
+let fotoUrlDisponibleCache = null;
+async function columnaFotoUrlDisponible() {
+  if (fotoUrlDisponibleCache !== null) return fotoUrlDisponibleCache;
+  try {
+    const [rows] = await pool.query(
+      "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'Usuario' AND COLUMN_NAME = 'FotoUrl' LIMIT 1",
+    );
+    fotoUrlDisponibleCache = rows.length === 1;
+  } catch {
+    // No cachear el fallo: un error transitorio no debe deshabilitar la foto
+    // durante toda la vida del proceso.
+    return false;
+  }
+  return fotoUrlDisponibleCache;
+}
+
+async function leerFotoUrl(idUsuario) {
+  if (!(await columnaFotoUrlDisponible())) return null;
+  const [[fila]] = await pool.query(
+    "SELECT FotoUrl FROM Usuario WHERE IdUsuario = ? LIMIT 1",
+    [idUsuario],
+  );
+  return fila?.FotoUrl ?? null;
+}
+
+function rutaArchivoFoto(fotoUrl) {
+  return path.join(
+    __dirname,
+    "..",
+    "uploads",
+    "perfiles",
+    path.basename(String(fotoUrl || "")),
+  );
+}
+
+function borrarArchivoFoto(fotoUrl) {
+  if (!fotoUrl) return;
+  try {
+    const ruta = rutaArchivoFoto(fotoUrl);
+    if (fs.existsSync(ruta)) fs.unlinkSync(ruta);
+  } catch (error) {
+    console.error("No se pudo eliminar el archivo de foto:", error.message);
+  }
+}
 
 // 1. CREAR USUARIO STAFF (Docente / Tutor de Aula)
 router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
@@ -258,7 +309,13 @@ router.get("/usuarios/me", async (req, res) => {
       return res.status(404).json({ error: "No se encontró tu usuario." });
     }
 
-    res.json(rows[0]);
+    const fotoUrl = await leerFotoUrl(idUsuario).catch((error) => {
+      // La foto es complementaria: un fallo al leerla no debe impedir que el
+      // usuario vea su perfil. El error queda registrado para diagnóstico.
+      console.error("No se pudo leer FotoUrl del perfil:", error.message);
+      return null;
+    });
+    res.json({ ...rows[0], FotoUrl: fotoUrl });
   } catch (error) {
     console.error("Error en GET /usuarios/me:", error.message);
     res.status(500).json({ error: "No se pudieron obtener tus datos." });
@@ -272,6 +329,9 @@ router.get("/usuarios/me", async (req, res) => {
 // siempre se toma de req.usuario (sesión validada contra BD).
 router.put("/usuarios/me", async (req, res) => {
   let connection;
+  // Deben vivir fuera del try para poder limpiar el archivo en el catch.
+  let fotoUrl = null;
+  let fotoPersistida = false;
   try {
     const idUsuario = Number(req.usuario?.idUsuario ?? req.usuario?.id);
     if (!Number.isSafeInteger(idUsuario) || idUsuario <= 0) {
@@ -281,32 +341,33 @@ router.put("/usuarios/me", async (req, res) => {
     }
 
     // --- Procesar foto de perfil (opcional) ---
-    let fotoUrl = null;
     if (req.body?.fotoBase64 !== undefined) {
-      // Construir objeto de archivo para validación
+      if (!(await columnaFotoUrlDisponible())) {
+        return res.status(409).json({
+          error:
+            "La foto de perfil no está disponible: falta aplicar la migración ADD_USUARIO_FOTOURL.sql.",
+        });
+      }
+
+      // Construir objeto de archivo para validación. El tamaño real se toma
+      // del buffer decodificado, no del valor declarado por el cliente.
       const fileData = {
         mimetype: req.body?.tipoMime || 'image/jpeg',
         size: req.body?.tamanoBytes ? Number(req.body.tamanoBytes) : 0,
-        // Decodificar Base64 a buffer para validar magic bytes
-        buffer: Buffer.from(req.body.fotoBase64, 'base64'),
+        buffer: Buffer.from(String(req.body.fotoBase64), 'base64'),
       };
 
-      // Validar tipo, tamaño y magic bytes (sin agregar dependencias externas)
       const validacion = validarTipoArchivo(fileData);
       if (validacion.error) {
         return res.status(400).json({ error: validacion.error });
       }
 
-      // Si passed validation, proceed to save file
-      const { size } = validacion;
-
       // Generar nombre seguro para el archivo (nunca usar nombre original)
-      const nombreArchivo = generarNombreSeguro(idUsuario);
+      const nombreArchivo = generarNombreSeguro(idUsuario, validacion.formato);
       const uploadDir = path.join(__dirname, '..', 'uploads');
       const perfilDir = path.join(uploadDir, 'perfiles');
 
       // Asegurarse de que los directorios existan
-      const fs = require('fs');
       if (!fs.existsSync(uploadDir)) {
         fs.mkdirSync(uploadDir, { recursive: true });
       }
@@ -332,7 +393,10 @@ router.put("/usuarios/me", async (req, res) => {
     const validado = validarDatosUsuario(Object.fromEntries(
       ['Nombres', 'DNI', 'CorreoElectronico', 'Celular'].filter((campo) => req.body?.[campo] !== undefined).map((campo) => [campo, req.body[campo]]),
     ));
-    if (validado.error) return res.status(400).json({ error: validado.error });
+    if (validado.error) {
+      borrarArchivoFoto(fotoUrl);
+      return res.status(400).json({ error: validado.error });
+    }
     const { Nombres, DNI, CorreoElectronico, Celular } = validado.datos;
 
     const campos = [];
@@ -342,15 +406,14 @@ router.put("/usuarios/me", async (req, res) => {
       params.push(valor);
     };
 
+    // Persistir la nueva foto junto con los datos personales (misma transacción).
+    if (fotoUrl) asignar("FotoUrl", fotoUrl);
+
     if (Nombres !== undefined) {
       const nombresLimpios = String(Nombres).trim();
       if (!nombresLimpios) {
         // Si falla la validación de nombre, intentar limpiar el archivo subido
-        if (fotoUrl) {
-          const fs = require('fs');
-          const destino = path.join(__dirname, '..', 'uploads', 'perfiles', fotoUrl.substring(10));
-          try { fs.unlinkSync(destino); } catch (e) {}
-        }
+        borrarArchivoFoto(fotoUrl);
         return res.status(400).json({ error: "El nombre no puede quedar vacío." });
       }
       asignar("Nombres", nombresLimpios);
@@ -359,11 +422,7 @@ router.put("/usuarios/me", async (req, res) => {
       const dniLimpio = String(DNI ?? "").trim();
       if (dniLimpio && !/^\d{8}$/.test(dniLimpio)) {
         // Si falla la validación de DNI, intentar limpiar el archivo subido
-        if (fotoUrl) {
-          const fs = require('fs');
-          const destino = path.join(__dirname, '..', 'uploads', 'perfiles', fotoUrl.substring(10));
-          try { fs.unlinkSync(destino); } catch (e) {}
-        }
+        borrarArchivoFoto(fotoUrl);
         return res.status(400).json({ error: "El DNI debe tener 8 dígitos." });
       }
       asignar("DNI", dniLimpio || null);
@@ -372,11 +431,7 @@ router.put("/usuarios/me", async (req, res) => {
       const correoLimpio = String(CorreoElectronico ?? "").trim();
       if (correoLimpio && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correoLimpio)) {
         // Si falla la validación de correo, intentar limpiar el archivo subido
-        if (fotoUrl) {
-          const fs = require('fs');
-          const destino = path.join(__dirname, '..', 'uploads', 'perfiles', fotoUrl.substring(10));
-          try { fs.unlinkSync(destino); } catch (e) {}
-        }
+        borrarArchivoFoto(fotoUrl);
         return res.status(400).json({ error: "El correo electrónico no es válido." });
       }
       asignar("CorreoElectronico", correoLimpio || null);
@@ -397,9 +452,10 @@ router.put("/usuarios/me", async (req, res) => {
     await connection.beginTransaction();
     await bloquearIdentidades(connection);
     const [[actual]] = await connection.query('SELECT DNI, CorreoElectronico FROM Usuario WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1 FOR UPDATE', [idUsuario, req.usuario.idAcademia]);
-    if (!actual) { await connection.rollback(); return res.status(404).json({ error: 'No se encontró tu usuario.' }); }
+    if (!actual) { await connection.rollback(); borrarArchivoFoto(fotoUrl); return res.status(404).json({ error: 'No se encontró tu usuario.' }); }
     if (await usuarioDuplicado(connection, validado.datos, idUsuario, actual)) {
       await connection.rollback();
+      borrarArchivoFoto(fotoUrl);
       return res.status(409).json({ error: 'Ya existe un usuario con ese DNI o correo electrónico.' });
     }
     params.push(idUsuario, req.usuario.idAcademia);
@@ -416,16 +472,26 @@ router.put("/usuarios/me", async (req, res) => {
     );
     if (!rows.length) {
       await connection.rollback();
+      borrarArchivoFoto(fotoUrl);
       return res.status(404).json({ error: "No se encontró tu usuario." });
     }
 
     await connection.commit();
+    fotoPersistida = true;
+    let fotoActual = fotoUrl;
+    try {
+      fotoActual = (await leerFotoUrl(idUsuario)) ?? fotoUrl;
+    } catch {
+      // La foto ya quedó persistida: no convertir un fallo de lectura en un
+      // falso error de guardado. Se devuelve la URL recién generada.
+    }
     res.json({
       message: "Tus datos se actualizaron con éxito.",
-      usuario: rows[0],
+      usuario: { ...rows[0], FotoUrl: fotoActual },
     });
   } catch (error) {
     await rollbackSeguro(connection);
+    if (!fotoPersistida) borrarArchivoFoto(fotoUrl);
     return responderError(res, error, "PUT /usuarios/me");
   } finally {
     if (connection) connection.release();
@@ -739,6 +805,13 @@ router.delete(
           .json({ error: "Sesión inválida. Inicia sesión nuevamente." });
       }
 
+      if (!(await columnaFotoUrlDisponible())) {
+        return res.status(409).json({
+          error:
+            "La foto de perfil no está disponible: falta aplicar la migración ADD_USUARIO_FOTOURL.sql.",
+        });
+      }
+
       connection = await pool.getConnection();
       await connection.beginTransaction();
 
@@ -760,17 +833,7 @@ router.delete(
 
       // Intentar eliminar el archivo físico si existía en el directorio gestionado
       if (usuario.FotoUrl) {
-        const fs = require('fs');
-        const rutaArchivo = path.join(__dirname, '..', 'uploads', 'perfiles', usuario.FotoUrl.substring(1)); // quitar la / inicial
-        try {
-          if (fs.existsSync(rutaArchivo)) {
-            fs.unlinkSync(rutaArchivo);
-          }
-          // Si el archivo no existe, no es error fatal: solo ponemos FotoUrl = NULL
-        } catch (fileError) {
-          console.error('Error eliminando archivo físico:', fileError);
-          // Continuamos igual: el NULL en BD ya quedó registrado
-        }
+        borrarArchivoFoto(usuario.FotoUrl);
       }
 
       await connection.commit();

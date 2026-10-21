@@ -228,6 +228,8 @@ test('usuarios/me permite autoservicio sin cambiar identidad, academia, clave ni
   const fila = { IdUsuario: 10, Nombres: 'Ficticio', IdPerfil: 2 };
   const fin = secuencia([
     { sql: /FROM Usuario u.*WHERE u.IdUsuario = \?/, params: [10], rows: [fila], verificar(q) { assert.doesNotMatch(q, /u\.Clave/); } },
+    // La primera lectura del perfil detecta si la migración FotoUrl ya existe.
+    { sql: /INFORMATION_SCHEMA\.COLUMNS.*FotoUrl/, rows: [] },
     { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
     { sql: /SELECT DNI, CorreoElectronico FROM Usuario.*FOR UPDATE/, rows: [{DNI:null,CorreoElectronico:null}] },
     { sql: /^UPDATE Usuario SET Nombres=\? WHERE IdUsuario = \? AND IdAcademia = \? AND EstadoRegistro = 1$/, params: ['Nuevo ficticio', 10, 1], rows: { affectedRows: 1 } },
