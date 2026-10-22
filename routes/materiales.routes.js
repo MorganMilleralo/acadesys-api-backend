@@ -6,8 +6,9 @@ const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
 const { idPositivo } = require('../utils/validaciones');
+const { MATERIAL_UPLOADS_DIR } = require('../config/storage');
 
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'materiales');
+const UPLOAD_DIR = MATERIAL_UPLOADS_DIR;
 
 function asegurarDirectorio() {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });

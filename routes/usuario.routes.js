@@ -8,6 +8,7 @@ const { enteroPositivo } = require("../utils/evaluaciones");
 const path = require("path");
 const fs = require("fs");
 const { validarTipoArchivo, generarNombreSeguro } = require("../utils/validar-foto");
+const { UPLOADS_DIR, PROFILE_UPLOADS_DIR } = require("../config/storage");
 
 async function perfilActivo(connection, idPerfil) {
   if (!enteroPositivo(idPerfil)) return false;
@@ -107,13 +108,8 @@ async function leerFotoUrl(idUsuario) {
 }
 
 function rutaArchivoFoto(fotoUrl) {
-  return path.join(
-    __dirname,
-    "..",
-    "uploads",
-    "perfiles",
-    path.basename(String(fotoUrl || "")),
-  );
+  // Nunca se admite una ruta aportada por el usuario: solo el nombre base.
+  return path.join(PROFILE_UPLOADS_DIR, path.basename(String(fotoUrl || "")));
 }
 
 function borrarArchivoFoto(fotoUrl) {
@@ -330,6 +326,7 @@ router.put("/usuarios/me", async (req, res) => {
   let connection;
   // Deben vivir fuera del try para poder limpiar el archivo en el catch.
   let fotoUrl = null;
+  let fotoAnteriorUrl = null;
   let fotoPersistida = false;
   try {
     const idUsuario = Number(req.usuario?.idUsuario ?? req.usuario?.id);
@@ -363,8 +360,8 @@ router.put("/usuarios/me", async (req, res) => {
 
       // Generar nombre seguro para el archivo (nunca usar nombre original)
       const nombreArchivo = generarNombreSeguro(idUsuario, validacion.formato);
-      const uploadDir = path.join(__dirname, '..', 'uploads');
-      const perfilDir = path.join(uploadDir, 'perfiles');
+      const uploadDir = UPLOADS_DIR;
+      const perfilDir = PROFILE_UPLOADS_DIR;
 
       // Asegurarse de que los directorios existan
       if (!fs.existsSync(uploadDir)) {
@@ -450,8 +447,12 @@ router.put("/usuarios/me", async (req, res) => {
     connection = await pool.getConnection();
     await connection.beginTransaction();
     await bloquearIdentidades(connection);
-    const [[actual]] = await connection.query('SELECT DNI, CorreoElectronico FROM Usuario WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1 FOR UPDATE', [idUsuario, req.usuario.idAcademia]);
+    const consultaActual = fotoUrl
+      ? 'SELECT DNI, CorreoElectronico, FotoUrl FROM Usuario WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1 FOR UPDATE'
+      : 'SELECT DNI, CorreoElectronico FROM Usuario WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1 FOR UPDATE';
+    const [[actual]] = await connection.query(consultaActual, [idUsuario, req.usuario.idAcademia]);
     if (!actual) { await connection.rollback(); borrarArchivoFoto(fotoUrl); return res.status(404).json({ error: 'No se encontró tu usuario.' }); }
+    fotoAnteriorUrl = actual.FotoUrl || null;
     if (await usuarioDuplicado(connection, validado.datos, idUsuario, actual)) {
       await connection.rollback();
       borrarArchivoFoto(fotoUrl);
@@ -477,6 +478,11 @@ router.put("/usuarios/me", async (req, res) => {
 
     await connection.commit();
     fotoPersistida = true;
+    // Solo se elimina la foto anterior DESPUÉS de confirmar la transacción.
+    // Si el commit falla, el archivo al que apunta la BD no se pierde.
+    if (fotoUrl && fotoAnteriorUrl && fotoAnteriorUrl !== fotoUrl) {
+      borrarArchivoFoto(fotoAnteriorUrl);
+    }
     let fotoActual = fotoUrl;
     try {
       fotoActual = (await leerFotoUrl(idUsuario)) ?? fotoUrl;
@@ -830,12 +836,11 @@ router.delete(
         [idUsuario],
       );
 
-      // Intentar eliminar el archivo físico si existía en el directorio gestionado
-      if (usuario.FotoUrl) {
-        borrarArchivoFoto(usuario.FotoUrl);
-      }
-
       await connection.commit();
+
+      // Eliminar el archivo físico DESPUÉS del commit para no dejar FotoUrl
+      // apuntando a un archivo borrado si la transacción pudiera revertirse.
+      if (usuario.FotoUrl) borrarArchivoFoto(usuario.FotoUrl);
       res.json({ message: "Foto de perfil eliminada con éxito." });
     } catch (error) {
       await rollbackSeguro(connection);

@@ -40,4 +40,6 @@ Cerrar las rutas de lectura de notas que no exigen autorización por rol y evita
 
 Los `POST` y `PUT` existentes mantienen los controles de rol y el middleware de cierre que ya tenían.
 
+## Archivos subidos y fotos de perfil
 
+El almacenamiento local usa `backend/uploads` por defecto. Para un hosting que ofrezca volumen persistente, configura `UPLOADS_DIR` a la ruta montada (por ejemplo `/var/data/uploads`) para que fotos y materiales sobrevivan reinicios/redeploys. Si no hay volumen persistente, usar almacenamiento de objetos externo o deshabilitar la promesa de persistencia. `Usuario.FotoUrl` requiere la migración controlada documentada en `database/migrations/20261022_add_usuario_fotourl.sql`; probarla primero en staging, nunca a ciegas en producción.

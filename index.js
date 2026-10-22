@@ -2,7 +2,7 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-const path = require("path");
+const { UPLOADS_DIR } = require("./config/storage");
 
 require("./config/db");
 
@@ -59,7 +59,7 @@ app.use(
 );
 
 // Carpeta pública de archivos
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use("/uploads", express.static(UPLOADS_DIR));
 
 // ============================================================
 // 3. IMPORTACIÓN DE MIDDLEWARE JWT
