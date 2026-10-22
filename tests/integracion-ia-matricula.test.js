@@ -77,3 +77,5 @@ test('recuperacion publica rechaza tokens invalidos antes de consultar o enviar 
   const r = await pedir('POST', '/api/matriculas/restablecer-clave', { token: 'invalido-ficticio' });
   assert.equal(r.status, 400); assert.equal(consultas.length, 0);
 });
+
+

@@ -1,4 +1,3 @@
-
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
@@ -6,6 +5,10 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { usuarioDuplicado, bloquearIdentidades, rollbackSeguro } = require('../utils/validaciones');
+const { obtenerEstadoCicloValido, obtenerPrecioCiclo, capacidadPermiteMatricula, obtenerIdAcademiaPublica } = require('../utils/reglas-matricula');
+const autenticacionOpcional = require('../middlewares/autenticacion-opcional.middleware');
+const { validarAutorizacionReinscripcion } = require('../utils/autorizacion-reinscripcion');
+const { crearTokenVerificacionMatricula, verificarTokenVerificacionMatricula } = require('../utils/token-verificacion-matricula');
 
 const URL_GOOGLE_SCRIPT = process.env.GOOGLE_SCRIPT_URL || '';
 const API_PUBLIC_URL = (process.env.API_PUBLIC_URL || 'https://acadesys-api.onrender.com').replace(/\/+$/, '');
@@ -53,6 +56,131 @@ async function enviarCorreoHtml(to, subject, htmlBody) {
   return data;
 }
 
+function escaparHtml(valor) {
+  return String(valor ?? '').replace(/[&<>"']/g, (caracter) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[caracter]);
+}
+
+async function enviarCorreoCheckout(correoParaEnviar, datosCorreo) {
+  const asunto = datosCorreo.esReinscripcion
+    ? `Reinscripción exitosa - ${datosCorreo.cicloNombre}`
+    : `Bienvenido a AcadeSys - ${datosCorreo.cicloNombre}`;
+
+  let bloqueClave;
+  if (datosCorreo.esReinscripcion) {
+    const tokenRecuperacion = jwt.sign({
+      idUsuario: datosCorreo.idUsuario,
+      correo: correoParaEnviar,
+      proposito: PROPOSITO_RESET,
+      claveVersion: datosCorreo.claveVersion,
+      codigoUsuario: datosCorreo.codigoUsuario,
+    }, process.env.JWT_SECRET, { expiresIn: '15m' });
+    const enlaceRecuperacion = `${API_PUBLIC_URL}/api/matriculas/restablecer-clave?token=${encodeURIComponent(tokenRecuperacion)}`;
+    bloqueClave = `
+      <p>Tu cuenta y código de usuario se conservaron. Para recibir una contraseña temporal nueva, confirma que tienes acceso a este correo.</p>
+      <p style="margin:24px 0;"><a href="${escaparHtml(enlaceRecuperacion)}" style="background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:8px;display:inline-block;font-weight:bold;">Generar contraseña temporal</a></p>
+      <p>Este enlace vence en 15 minutos y solo puede utilizarse una vez.</p>
+    `;
+  } else {
+    bloqueClave = `<p><strong>Contraseña temporal:</strong> <span style="font-family: monospace;">${escaparHtml(datosCorreo.claveSinEncriptar)}</span></p><p>Guarda esta contraseña en un lugar seguro.</p>`;
+  }
+
+  const cuerpoHtml = `
+    <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px; max-width: 600px;">
+      <h2 style="color: #2563eb;">¡Hola, ${escaparHtml(datosCorreo.nombre)}!</h2>
+      <p>Tu ${datosCorreo.esReinscripcion ? 'reinscripción' : 'inscripción'} al <strong>${escaparHtml(datosCorreo.cicloNombre)}</strong> fue procesada correctamente.</p>
+      <p><strong>Monto de inscripción:</strong> S/ ${Number(datosCorreo.precio || 0).toFixed(2)}</p>
+      <p><strong>Estado del pago:</strong> Pendiente (modo demostración; no se ha confirmado ni realizado un cobro real).</p>
+      <p><strong>Código de usuario:</strong> <span style="font-family: monospace;">${escaparHtml(datosCorreo.codigoUsuario)}</span></p>
+      ${bloqueClave}
+      <p>Gracias por confiar en AcadeSys.</p>
+    </div>`;
+
+  return enviarCorreoHtml(correoParaEnviar, asunto, cuerpoHtml);
+}
+
+/**
+ * En el checkout público, primero se comprueba el control del buzón. No consulta
+ * si el correo ya pertenece a una cuenta y no escribe Usuario/Matricula/Pagos.
+ */
+async function enviarCorreoVerificacionMatricula(correo, datos, token) {
+  const enlace = `${API_PUBLIC_URL}/api/matriculas/confirmar-correo-matricula?token=${encodeURIComponent(token)}`;
+  const cuerpoHtml = `
+    <div style="font-family:Arial,sans-serif;padding:20px;border:1px solid #e2e8f0;border-radius:10px;max-width:600px;">
+      <h2 style="color:#0f766e;">Confirma tu correo para continuar</h2>
+      <p>Hola, ${escaparHtml(datos.nombre)}.</p>
+      <p>Recibimos una solicitud para continuar con una matrícula en AcadeSys. Para demostrar que puedes recibir mensajes en este correo y continuar, abre el enlace de confirmación.</p>
+      <p style="margin:24px 0;"><a href="${escaparHtml(enlace)}" style="background:#0d9488;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:8px;display:inline-block;font-weight:bold;">Confirmar correo y continuar</a></p>
+      <p>El enlace vence en 15 minutos. Por ahora <strong>no se ha creado una cuenta, matrícula ni pago</strong>.</p>
+      <p>Si ya tienes cuenta de alumno, el sistema te indicará que debes iniciar sesión. Si tú no iniciaste esta solicitud, ignora este mensaje.</p>
+      <p>La selección es para el ciclo: <strong>${escaparHtml(datos.cicloNombre)}</strong>.</p>
+      <p>AcadeSys - Academia preuniversitaria</p>
+    </div>`;
+  return enviarCorreoHtml(correo, 'Confirma tu correo para continuar con AcadeSys', cuerpoHtml);
+}
+
+async function iniciarVerificacionMatricula(res, datos) {
+  const idAcademiaPublica = obtenerIdAcademiaPublica();
+  if (!idAcademiaPublica) {
+    return res.status(503).json({
+      code: 'CONFIGURACION_ACADEMIA_PUBLICA_INVALIDA',
+      error: 'La oferta pública no está configurada correctamente. Contacta a la academia.',
+    });
+  }
+
+  let ciclo;
+  try {
+    ciclo = await obtenerCicloDisponible(datos.idCiclo);
+  } catch (error) {
+    console.error('No se pudo consultar el ciclo antes de verificar el correo:', error?.name || 'Error');
+    return res.status(500).json({ error: 'No se pudo comprobar el ciclo. Inténtalo nuevamente.' });
+  }
+
+  if (!ciclo || Number(ciclo.IdAcademia) !== idAcademiaPublica) {
+    return res.status(404).json({ error: 'El ciclo seleccionado no está disponible.' });
+  }
+
+  const estadoCiclo = obtenerEstadoCicloValido(ciclo);
+  if (estadoCiclo !== 'ABIERTO') {
+    return res.status(409).json({
+      code: 'CICLO_NO_DISPONIBLE',
+      error: 'El ciclo seleccionado ya no admite nuevas matrículas.',
+    });
+  }
+  if (!capacidadPermiteMatricula(ciclo.TotalAlumnos, ciclo.Capacidad)) {
+    return res.status(409).json({ code: 'CICLO_SIN_VACANTES', error: 'El ciclo seleccionado ya alcanzó su capacidad máxima.' });
+  }
+  if (obtenerPrecioCiclo(ciclo.Precio) === null) {
+    return res.status(409).json({ code: 'CICLO_PRECIO_NO_CONFIGURADO', error: 'El ciclo todavía no tiene un precio válido publicado.' });
+  }
+
+  let token;
+  try {
+    token = crearTokenVerificacionMatricula(datos);
+  } catch (error) {
+    console.error('No se pudo preparar la verificación de correo:', error?.name || 'Error');
+    return res.status(503).json({ code: 'CONFIGURACION_TOKEN_INVALIDA', error: 'No se pudo preparar la verificación. Contacta a la academia.' });
+  }
+
+  try {
+    await enviarCorreoVerificacionMatricula(datos.correo, { nombre: datos.nombre, cicloNombre: ciclo.Nombre }, token);
+  } catch (error) {
+    // No se escribe nada en la BD antes de confirmar que el proveedor aceptó el mensaje.
+    console.error('No se pudo enviar el correo de verificación de matrícula:', error?.name || 'Error');
+    return res.status(502).json({ code: 'VERIFICACION_CORREO_NO_ENVIADA', error: 'No se pudo enviar el correo de verificación. No se creó matrícula ni se realizó un cobro.' });
+  }
+
+  // Mismo contrato tanto si el buzón ya existe como si aún no tiene cuenta.
+  return res.status(202).json({
+    aceptada: true,
+    verificacionRequerida: true,
+    matriculaRegistrada: false,
+    correo: { estado: 'enviado' },
+    mensaje: 'Te enviamos un enlace para continuar. Aún no se ha creado una cuenta ni una matrícula y no se ha realizado ningún cobro.',
+  });
+}
+
 function generarCodigo(prefix) {
   const base = String(prefix || 'ACAD')
     .trim()
@@ -72,27 +200,6 @@ function universidadDesdeNombre(nombre = '') {
   if (n.includes('callao') || n.includes('unac')) return 'UNAC';
   if (n.includes('trujillo') || n.includes('unt')) return 'UNT';
   return 'Preuniversitario';
-}
-
-function obtenerEstadoCicloValido(ciclo) {
-  if (!ciclo) return 'NO_EXISTE';
-  if (Number(ciclo.EstadoRegistro) !== 1) return 'CERRADO';
-
-  const hoy = new Date();
-  hoy.setHours(0, 0, 0, 0);
-
-  if (ciclo.FechaFin) {
-    const fin = new Date(`${ciclo.FechaFin}T23:59:59`);
-    if (fin < hoy) return 'FINALIZADO';
-  }
-
-  if (ciclo.FechaInicio) {
-    const inicio = new Date(`${ciclo.FechaInicio}T00:00:00`);
-    // Un ciclo futuro sigue siendo inscribible si está visible y no está lleno.
-    if (inicio < new Date('2000-01-01T00:00:00')) return 'INVALIDO';
-  }
-
-  return 'ABIERTO';
 }
 
 async function obtenerCicloDisponible(idCiclo, connection = pool, bloquear = false) {
@@ -172,103 +279,51 @@ router.post('/verificar', async (req, res) => {
   if (!correo || !correoValido(correo)) {
     return res.status(400).json({ error: 'Debes proporcionar un correo electrónico válido.' });
   }
-  if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
+  if (!Number.isSafeInteger(idCiclo) || idCiclo <= 0) {
     return res.status(400).json({ error: 'Debes proporcionar un IdCiclo válido.' });
   }
 
   try {
+    const idAcademiaPublica = obtenerIdAcademiaPublica();
+    if (!idAcademiaPublica) {
+      return res.status(503).json({
+        code: 'CONFIGURACION_ACADEMIA_PUBLICA_INVALIDA',
+        error: 'La oferta pública no está configurada correctamente. Contacta a la academia.',
+      });
+    }
+
     const ciclo = await obtenerCicloDisponible(idCiclo);
-    if (!ciclo) return res.status(404).json({ error: 'El ciclo seleccionado no existe.' });
+    // Respuesta genérica: este endpoint NO consulta ni devuelve si una cuenta
+    // existe. La autorización de cualquier reinscripción se valida en checkout.
+    if (!ciclo || Number(ciclo.IdAcademia) !== idAcademiaPublica) {
+      return res.status(404).json({ error: 'El ciclo seleccionado no está disponible.' });
+    }
 
     const estadoCiclo = obtenerEstadoCicloValido(ciclo);
     if (estadoCiclo !== 'ABIERTO') {
       return res.status(409).json({
-        existe: false,
+        code: 'CICLO_NO_DISPONIBLE',
         error: estadoCiclo === 'CERRADO'
           ? 'El ciclo seleccionado se encuentra cerrado o no está publicado.'
           : 'El ciclo seleccionado ya no admite nuevas inscripciones.',
       });
     }
 
-    if (Number(ciclo.Capacidad || 0) > 0 && Number(ciclo.TotalAlumnos || 0) >= Number(ciclo.Capacidad)) {
-      return res.status(409).json({ existe: false, error: 'El ciclo seleccionado ya alcanzó su capacidad máxima.' });
-    }
-
-    const alumno = await buscarAlumnoActivoPorCorreo(correo, ciclo.IdAcademia);
-
-    if (!alumno) {
-      return res.status(200).json({
-        existe: false,
-        esAlumno: false,
-        idCiclo,
-      });
-    }
-
-    if (Number(alumno.IdAcademia) !== Number(ciclo.IdAcademia)) {
+    if (!capacidadPermiteMatricula(ciclo.TotalAlumnos, ciclo.Capacidad)) {
       return res.status(409).json({
-        existe: true,
-        esAlumno: false,
-        puedeReinscribirse: false,
-        mensaje: 'El correo pertenece a otra academia y no puede reutilizarse en este ciclo.',
-        message: 'El correo pertenece a otra academia y no puede reutilizarse en este ciclo.',
+        code: 'CICLO_SIN_VACANTES',
+        error: 'El ciclo seleccionado ya alcanzó su capacidad máxima.',
       });
     }
 
-    const esAlumno = String(alumno.NombrePerfil || '').trim().toLowerCase() === 'alumno';
-
-    if (!esAlumno) {
-      return res.status(200).json({
-        existe: true,
-        esAlumno: false,
-        mensaje: 'El correo ya pertenece a una cuenta del sistema, pero no corresponde a un alumno.',
-        // Alias en inglés: el frontend actual lee `message` en este flujo.
-        message: 'El correo ya pertenece a una cuenta del sistema, pero no corresponde a un alumno.',
-        puedeReinscribirse: false,
-        idCiclo,
-      });
-    }
-
-    const [ciclosActuales] = await pool.query(`
-      SELECT
-        c.IdCiclo,
-        c.Nombre,
-        c.Turno,
-        c.FechaInicio,
-        c.FechaFin,
-        m.IdMatricula
-      FROM Matricula m
-      INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo
-      WHERE m.IdUsuario = ?
-        AND m.EstadoRegistro = 1
-        AND c.EstadoRegistro = 1
-      ORDER BY c.FechaInicio DESC, c.IdCiclo DESC
-    `, [alumno.IdUsuario]);
-
-    const yaMatriculadoEnCiclo = ciclosActuales.some((c) => Number(c.IdCiclo) === idCiclo);
-
-    const mensajeUsuario = yaMatriculadoEnCiclo
-      ? `Ya estás matriculado en ${ciclo.Nombre}.`
-      : `Ya estás registrado en el sistema y actualmente tienes ${ciclosActuales.length} ciclo(s) activo(s).`;
-
-    res.status(200).json({
-      existe: true,
-      esAlumno: true,
-      mensaje: mensajeUsuario,
-      // Alias en inglés: el frontend actual lee `message` en este flujo.
-      message: mensajeUsuario,
-      puedeReinscribirse: !yaMatriculadoEnCiclo,
-      yaInscritoEnCiclo: yaMatriculadoEnCiclo,
-      cicloSeleccionado: {
-        idCiclo,
-        nombre: ciclo.Nombre,
-      },
-      ciclos: ciclosActuales.map((c) => ({
-        nombre: c.Nombre,
-      })),
+    return res.status(200).json({
+      disponible: true,
+      idCiclo,
+      mensaje: 'El ciclo está disponible para continuar. La validación final se realizará al registrar la matrícula.',
     });
   } catch (error) {
-    console.error('Error en POST /api/matriculas/verificar:', error);
-    res.status(500).json({ error: 'No se pudo verificar el correo del alumno.' });
+    console.error('No se pudo validar la disponibilidad del ciclo:', error?.name || 'Error');
+    return res.status(500).json({ error: 'No se pudo comprobar la disponibilidad. Inténtalo nuevamente.' });
   }
 });
 
@@ -276,7 +331,7 @@ router.post('/verificar', async (req, res) => {
    POST /api/matriculas/checkout
    Inscripción/reinscripción transaccional.
    ============================================================ */
-router.post('/checkout', async (req, res) => {
+async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
   const nombre = String(req.body?.Nombres ?? req.body?.nombres ?? '').trim().replace(/\s+/g, ' ');
   const apellidos = String(req.body?.Apellidos ?? req.body?.apellidos ?? '').trim().replace(/\s+/g, ' ');
   const correo = normalizarCorreo(req.body?.Correo ?? req.body?.correo);
@@ -293,6 +348,22 @@ router.post('/checkout', async (req, res) => {
   }
   if (!Number.isInteger(idCiclo) || idCiclo <= 0) {
     return res.status(400).json({ error: 'El IdCiclo no es válido.' });
+  }
+
+  // Si no existe proveedor de correo, no se crea una cuenta/matrícula que el
+  // usuario no pueda recibir por email. Esta respuesta ocurre antes de abrir
+  // una transacción o modificar datos.
+  if (!URL_GOOGLE_SCRIPT) {
+    return res.status(503).json({
+      code: 'CORREO_NO_CONFIGURADO',
+      error: 'No se registró la matrícula porque el servicio de correo no está configurado. Inténtalo más tarde o contacta a la academia.',
+    });
+  }
+
+  // Visitantes públicos primero deben demostrar que controlan el correo. En este
+  // paso no se busca por email ni se crean registros; así no se enumera cuentas.
+  if (!req.usuario && !correoVerificado) {
+    return iniciarVerificacionMatricula(res, { nombre, apellidos, correo, idCiclo });
   }
 
   let connection;
@@ -314,6 +385,19 @@ router.post('/checkout', async (req, res) => {
       return res.status(404).json({ error: 'El ciclo seleccionado no existe.' });
     }
 
+    const idAcademiaPublica = obtenerIdAcademiaPublica();
+    if (!idAcademiaPublica) {
+      await connection.rollback();
+      return res.status(503).json({
+        code: 'CONFIGURACION_ACADEMIA_PUBLICA_INVALIDA',
+        error: 'La matrícula pública no está configurada correctamente.',
+      });
+    }
+    if (!req.usuario && Number(ciclo.IdAcademia) !== idAcademiaPublica) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'El ciclo seleccionado no está disponible.' });
+    }
+
     const estadoCiclo = obtenerEstadoCicloValido(ciclo);
     if (estadoCiclo !== 'ABIERTO') {
       await connection.rollback();
@@ -330,20 +414,31 @@ router.post('/checkout', async (req, res) => {
       `SELECT m.IdMatricula
        FROM Matricula m
        INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-       WHERE m.IdCiclo = ? AND m.EstadoRegistro = 1 AND u.EstadoRegistro = 1
+       WHERE m.IdCiclo = ?
+         AND m.EstadoRegistro = 1
+         AND u.EstadoRegistro = 1
+         AND u.IdAcademia = ?
        FOR UPDATE`,
-      [idCiclo],
+      [idCiclo, ciclo.IdAcademia],
     );
     const totalAlumnos = matriculasActivasCiclo.length;
     // Capacidad real del ciclo (0/null => sin límite definido).
     const capacidad = Number(ciclo.Capacidad || 0);
-    if (capacidad > 0 && totalAlumnos >= capacidad) {
+    if (!capacidadPermiteMatricula(totalAlumnos, ciclo.Capacidad)) {
       await connection.rollback();
       return res.status(409).json({ error: 'El ciclo seleccionado ya alcanzó su capacidad máxima.' });
     }
 
     /* 2. Precio real desde BD. Nunca confiar en monto enviado por frontend. */
-    const precioReal = Number(ciclo.Precio || 0);
+    const precioConfigurado = obtenerPrecioCiclo(ciclo.Precio);
+    if (precioConfigurado === null) {
+      await connection.rollback();
+      return res.status(409).json({
+        code: 'CICLO_PRECIO_NO_CONFIGURADO',
+        error: 'El ciclo no tiene un precio válido configurado. Contacta a la academia.',
+      });
+    }
+    const precioReal = precioConfigurado;
     const montoReportado = req.body?.monto ?? req.body?.Monto;
     if (montoReportado !== undefined && montoReportado !== null && montoReportado !== '') {
       const montoCliente = Number(montoReportado);
@@ -376,9 +471,17 @@ router.post('/checkout', async (req, res) => {
       WHERE LOWER(TRIM(u.CorreoElectronico)) = ?
         AND u.EstadoRegistro = 1
       ORDER BY CASE WHEN LOWER(TRIM(p.Nombre)) = 'alumno' THEN 0 ELSE 1 END
-      LIMIT 1
+      LIMIT 2
       FOR UPDATE
     `, [correo]);
+
+    if (usuarios.length > 1) {
+      await connection.rollback();
+      return res.status(409).json({
+        code: 'CORREO_ASOCIADO_A_VARIAS_CUENTAS',
+        error: 'Este correo está asociado a más de una cuenta activa. La administración debe revisar los datos antes de continuar.',
+      });
+    }
 
     let idAlumnoFinal = null;
     let codigoUsuarioFinal = null;
@@ -388,7 +491,19 @@ router.post('/checkout', async (req, res) => {
 
     if (usuarios.length > 0) {
       const existente = usuarios[0];
-      const esAlumno = String(existente.NombrePerfil || '').trim().toLowerCase() === 'alumno';
+      const rechazoReinscripcion = validarAutorizacionReinscripcion({
+        usuarioSesion: req.usuario,
+        usuarioExistente: existente,
+        ciclo,
+      });
+      if (rechazoReinscripcion) {
+        await connection.rollback();
+        return res.status(rechazoReinscripcion.status).json(rechazoReinscripcion.body);
+      }
+
+      const esAlumno = ['alumno', 'estudiante'].includes(
+        String(existente.NombrePerfil || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase()
+      );
 
       if (!esAlumno) {
         await connection.rollback();
@@ -427,12 +542,21 @@ router.post('/checkout', async (req, res) => {
           error: `Ya te encuentras matriculado en el ciclo "${ciclo.Nombre}".`,
           yaInscritoEnCiclo: true,
           idCiclo,
-          idUsuario: idAlumnoFinal,
         });
       }
 
       // Conocer un correo no autoriza a cambiar los datos de su propietario.
     } else {
+      // El endpoint público crea cuentas nuevas solo para visitantes. Una sesión
+      // administrativa/ajena no debe poder usar checkout como alta de usuario.
+      if (req.usuario) {
+        await connection.rollback();
+        return res.status(403).json({
+          code: 'ALTA_PUBLICA_REQUIERE_SESION_CERRADA',
+          error: 'Cierra sesión para iniciar una matrícula nueva o usa la cuenta del alumno para reinscribirte.',
+        });
+      }
+
       if (await usuarioDuplicado(connection, { CorreoElectronico: correo })) {
         await connection.rollback();
         return res.status(409).json({
@@ -518,7 +642,8 @@ router.post('/checkout', async (req, res) => {
       WHERE m.IdCiclo = ?
         AND m.EstadoRegistro = 1
         AND u.EstadoRegistro = 1
-    `, [idCiclo]);
+        AND u.IdAcademia = ?
+    `, [idCiclo, ciclo.IdAcademia]);
 
     await connection.commit();
     enTransaccion = false;
@@ -537,21 +662,39 @@ router.post('/checkout', async (req, res) => {
       esReinscripcion,
     };
 
+    // La transacción ya está confirmada: liberar la conexión antes de esperar
+    // al proveedor externo. El fallo de correo no debe inducir al usuario a
+    // repetir el checkout como si nada se hubiera guardado.
+    if (connection) {
+      connection.release();
+      connection = null;
+    }
+
+    let estadoCorreo = 'fallido';
+    try {
+      await enviarCorreoCheckout(correoParaEnviar, datosCorreo);
+      estadoCorreo = 'enviado';
+    } catch (errorCorreo) {
+      // No registrar destinatario, cuerpo HTML, token ni URL secreta.
+      console.error('No se pudo confirmar el correo posterior al checkout:', errorCorreo?.name || 'Error');
+    }
+
+    const mensajeCorreoFallido = 'La matrícula quedó registrada y el pago sigue pendiente, pero no se pudo confirmar el envío del correo. No vuelvas a enviar el formulario; contacta a la academia para recuperar el acceso.';
+
     res.status(201).json({
       exito: true,
       esReinscripcion,
-      idUsuario: idAlumnoFinal,
-      idMatricula: insertMatricula.insertId,
-      codigoUsuario: codigoUsuarioFinal,
-      correo,
       idCiclo,
       ciclo: ciclo.Nombre,
       precio: precioReal,
       totalAlumnos: totalFinal,
       vacantesDisponibles: capacidad > 0 ? Math.max(capacidad - totalFinal, 0) : null,
-      mensaje: esReinscripcion
-        ? 'Reinscripción registrada. El pago está pendiente de confirmación.'
-        : 'Matrícula registrada. El pago está pendiente de confirmación.',
+      correo: { estado: estadoCorreo },
+      mensaje: estadoCorreo === 'enviado'
+        ? (esReinscripcion
+          ? 'Reinscripción registrada. El pago está pendiente de confirmación y se envió el correo de acceso.'
+          : 'Matrícula registrada. El pago está pendiente de confirmación y se envió el correo de acceso.')
+        : mensajeCorreoFallido,
       pago: { modo: 'simulado', estado: 'Pendiente', monto: precioReal, confirmadoPorPasarela: false },
     });
   } catch (error) {
@@ -567,65 +710,63 @@ router.post('/checkout', async (req, res) => {
     return res.status(500).json({ error: 'Hubo un problema procesando la inscripción.' });
   } finally {
     if (connection) connection.release();
-
-    /* El correo nunca provoca rollback de una matrícula ya confirmada. */
-    if (correoParaEnviar && datosCorreo && URL_GOOGLE_SCRIPT) {
-      const asunto = datosCorreo.esReinscripcion
-        ? `Reinscripción exitosa - ${datosCorreo.cicloNombre}`
-        : `Bienvenido a AcadeSys - ${datosCorreo.cicloNombre}`;
-
-      let bloqueClave;
-      if (datosCorreo.esReinscripcion) {
-        const tokenRecuperacion = jwt.sign({
-          idUsuario: datosCorreo.idUsuario,
-          correo: correoParaEnviar,
-          proposito: PROPOSITO_RESET,
-          claveVersion: datosCorreo.claveVersion,
-          codigoUsuario: datosCorreo.codigoUsuario,
-        }, process.env.JWT_SECRET, { expiresIn: '15m' });
-        const enlaceRecuperacion = `${API_PUBLIC_URL}/api/matriculas/restablecer-clave?token=${encodeURIComponent(tokenRecuperacion)}`;
-        bloqueClave = `
-          <p>Tu cuenta y código de usuario se conservaron. Para recibir una contraseña temporal nueva, confirma que tienes acceso a este correo.</p>
-          <p style="margin:24px 0;"><a href="${enlaceRecuperacion}" style="background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:8px;display:inline-block;font-weight:bold;">Generar contraseña temporal</a></p>
-          <p>Este enlace vence en 15 minutos y solo puede utilizarse una vez.</p>
-        `;
-      } else {
-        bloqueClave = `<p><strong>Contraseña temporal:</strong> <span style="font-family: monospace;">${datosCorreo.claveSinEncriptar}</span></p><p>Guarda esta contraseña en un lugar seguro.</p>`;
-      }
-
-      const cuerpoHtml = `
-        <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px; max-width: 600px;">
-          <h2 style="color: #2563eb;">¡Hola, ${datosCorreo.nombre}!</h2>
-          <p>Tu ${datosCorreo.esReinscripcion ? 'reinscripción' : 'inscripción'} al <strong>${datosCorreo.cicloNombre}</strong> fue procesada correctamente.</p>
-          <p><strong>Monto de inscripción:</strong> S/ ${Number(datosCorreo.precio || 0).toFixed(2)}</p>
-          <p><strong>Estado del pago:</strong> Pendiente (modo demostración; no se ha confirmado ni realizado un cobro real).</p>
-          <p><strong>Código de usuario:</strong> <span style="font-family: monospace;">${datosCorreo.codigoUsuario}</span></p>
-          ${bloqueClave}
-          <p>Gracias por confiar en AcadeSys.</p>
-        </div>`;
-
-      fetch(URL_GOOGLE_SCRIPT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          to: correoParaEnviar,
-          subject: asunto,
-          htmlBody: cuerpoHtml,
-        }),
-      })
-        .then((response) => response.json().catch(() => ({})))
-        .then((data) => {
-          if (data?.status === 'success') {
-            console.log('✅ Correo de matrícula enviado a:', correoParaEnviar);
-          } else {
-            console.warn('⚠️ El servicio de correo no confirmó éxito para:', correoParaEnviar, data);
-          }
-        })
-        .catch((err) => {
-          console.error('❌ Error enviando correo post-matrícula:', err.message);
-        });
-    }
   }
+}
+
+router.post('/checkout', autenticacionOpcional, (req, res) => procesarCheckout(req, res));
+
+/* El GET solo muestra confirmación; no escribe nada por visitas automáticas de escáneres de correo. */
+router.get('/confirmar-correo-matricula', (req, res) => {
+  const token = String(req.query?.token || '');
+  const datos = verificarTokenVerificacionMatricula(token);
+  if (!datos) {
+    return res.status(400).type('html').send('<!doctype html><html lang="es"><meta charset="utf-8"><title>Enlace inválido</title><body style="font-family:Arial,sans-serif;padding:32px"><h2>El enlace venció o no es válido</h2><p>Vuelve a iniciar la solicitud de matrícula desde AcadeSys.</p></body></html>');
+  }
+
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('Cache-Control', 'no-store');
+  return res.type('html').send(`<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Confirmar correo | AcadeSys</title>
+<style>body{font-family:Arial,sans-serif;background:#f1f5f9;color:#0f172a;display:grid;place-items:center;min-height:100vh;margin:0;padding:20px;box-sizing:border-box}.card{max-width:520px;background:white;border:1px solid #cbd5e1;border-radius:16px;padding:28px;box-shadow:0 15px 45px #0f172a14}button{background:#0d9488;color:white;border:0;border-radius:9px;padding:13px 18px;font-weight:bold;cursor:pointer}button:disabled{opacity:.6}p{line-height:1.6;color:#475569}</style></head>
+<body><main class="card"><h1>AcadeSys</h1><h2>Confirma tu correo</h2><p>Al continuar, comprobaremos la disponibilidad del ciclo. Si el correo no está asociado a una cuenta, se podrá crear la matrícula. Si ya hay una cuenta, tendrás que iniciar sesión. Hasta completar este paso no se ha creado una matrícula ni se ha realizado un cobro.</p><button id="confirmar">Confirmar y continuar</button><p id="resultado" aria-live="polite"></p></main>
+<script>
+const token = ${JSON.stringify(token)};
+const boton = document.getElementById('confirmar');
+const resultado = document.getElementById('resultado');
+boton.addEventListener('click', async () => {
+  if (boton.disabled) return;
+  boton.disabled = true;
+  resultado.textContent = 'Procesando solicitud...';
+  try {
+    const response = await fetch('/api/matriculas/confirmar-correo-matricula', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401 && data.code === 'REINSCRIPCION_REQUIERE_SESION') {
+      resultado.textContent = 'Este correo ya está vinculado a una cuenta. No se creó otra matrícula. Inicia sesión en AcadeSys y realiza la reinscripción desde tu panel.';
+      boton.remove();
+      return;
+    }
+    if (!response.ok) throw new Error(data.error || 'No se pudo completar la solicitud.');
+    resultado.textContent = data.mensaje || 'Solicitud procesada.';
+    boton.textContent = 'Solicitud procesada';
+  } catch (error) {
+    resultado.textContent = error.message || 'Ocurrió un error. Vuelve a solicitar la verificación.';
+    boton.disabled = false;
+  }
+});
+</script></body></html>`);
+});
+
+router.post('/confirmar-correo-matricula', (req, res) => {
+  const token = String(req.body?.token || '');
+  const datos = verificarTokenVerificacionMatricula(token);
+  if (!datos) {
+    return res.status(400).json({ error: 'El enlace venció o no es válido. Inicia de nuevo la solicitud de matrícula.' });
+  }
+  // La identidad sale del token cifrado emitido por el servidor, no del cuerpo del navegador.
+  req.usuario = undefined;
+  req.body = { Nombres: datos.nombres, Apellidos: datos.apellidos, Correo: datos.correo, IdCiclo: datos.idCiclo };
+  return procesarCheckout(req, res, { correoVerificado: true });
 });
 
 /* ============================================================
@@ -727,3 +868,5 @@ router.post('/restablecer-clave', async (req, res) => {
 });
 
 module.exports = router;
+
+

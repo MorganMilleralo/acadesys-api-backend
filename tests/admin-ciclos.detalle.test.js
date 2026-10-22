@@ -183,3 +183,5 @@ test('el tope de capacidad restaurado permite capacidades reales (1..500)', () =
   assert.equal(ciclosModulo.MIN_CAPACIDAD, 1);
   assert.equal(ciclosModulo.MAX_CAPACIDAD, 500);
 });
+
+

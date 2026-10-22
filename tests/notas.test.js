@@ -142,3 +142,5 @@ test('regresion de esquema: rutas activas no requieren columnas retiradas de la 
  const insert=source.match(/INSERT INTO Evaluacion\s*\(([^)]+)\)/);
  assert.ok(insert);assert.doesNotMatch(insert[1],/IdCurso/);
 });
+
+

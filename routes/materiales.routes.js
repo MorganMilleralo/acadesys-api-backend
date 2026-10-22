@@ -223,3 +223,5 @@ router.delete('/:id', requiereRol('Administrador'), async (req, res) => {
 });
 
 module.exports = router;
+
+

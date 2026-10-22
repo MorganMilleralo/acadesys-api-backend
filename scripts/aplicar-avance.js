@@ -40,3 +40,5 @@ fs.writeFileSync(ruta, codigo, 'utf8');
 console.log('Avance RBAC aplicado correctamente a routes/notas.routes.js.');
 console.log(`Respaldo creado: ${respaldo}`);
 console.log('Verifica los endpoints con las pruebas documentadas antes de hacer commit o desplegar.');
+
+

@@ -39,3 +39,5 @@ Cerrar las rutas de lectura de notas que no exigen autorización por rol y evita
 - `GET /api/notas/alumno/:id`: personal académico autenticado con academia válida, o el alumno autenticado consultando su propio ID.
 
 Los `POST` y `PUT` existentes mantienen los controles de rol y el middleware de cierre que ya tenían.
+
+

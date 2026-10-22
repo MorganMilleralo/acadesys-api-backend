@@ -77,3 +77,5 @@ const verificarPeriodoAbierto = async (req, res, next) => {
 };
 
 module.exports = verificarPeriodoAbierto;
+
+

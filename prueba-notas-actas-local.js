@@ -81,3 +81,5 @@ const server=app.listen(0,'127.0.0.1',async()=>{
    console.log(`${pruebas} pruebas locales correctas. Sin Aiven.`);
  }catch(error){console.error('PRUEBA FALLIDA:',error.message);process.exitCode=1;}finally{server.close();server.closeAllConnections();}
 });
+
+

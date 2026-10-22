@@ -51,3 +51,5 @@ async function servir(t, rutas, identidad = { id: 10, idAcademia: 1, rol: 'Admin
   };
 }
 module.exports = { simular, secuencia, servir, eventos, consultas };
+
+

@@ -58,3 +58,5 @@ migración o aplicación de cambios.
 - Validar el flujo de asistencia por ciclo de Morgan, conservado por autorización.
 - Resolver los pendientes funcionales de simulacros, recuperación y pagos.
 - No publicar con Auto-Deploy activo. No se modificó ni activó Render.
+
+

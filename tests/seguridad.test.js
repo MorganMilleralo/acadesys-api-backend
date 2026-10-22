@@ -343,3 +343,5 @@ test('asistencia rechaza ciclo ajeno antes de guardar',async t=>{
   const r=await pedir('POST','/api/auth/login',{usuario:'ficticio',password:'clave-ficticia'});
   assert.equal(r.status,200);assert.equal(r.body.rol,'Estudiante');assert.ok(r.body.token);fin();
  });
+
+

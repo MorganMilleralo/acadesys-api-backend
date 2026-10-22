@@ -783,3 +783,5 @@ router.post('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
   }
 });
 module.exports = router;
+
+

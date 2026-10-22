@@ -4,3 +4,5 @@ const enteroPositivo = (valor) =>
   (typeof valor === 'number' || (typeof valor === 'string' && /^\d+$/.test(valor.trim()))) &&
   Number.isSafeInteger(Number(valor)) && Number(valor) > 0;
 module.exports = { enteroPositivo };
+
+

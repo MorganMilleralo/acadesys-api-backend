@@ -1,4 +1,3 @@
-
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
@@ -408,3 +407,5 @@ router.post("/auth/register", registerHandler);
 router.post("/register", registerHandler);
 
 module.exports = router;
+
+

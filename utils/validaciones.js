@@ -125,3 +125,5 @@ async function rollbackSeguro(connection) {
 }
 
 module.exports = { idPositivo, calificacionEntera, validarDatosUsuario, usuarioDuplicado, bloquearIdentidades, rollbackSeguro };
+
+

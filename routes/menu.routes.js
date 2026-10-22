@@ -187,3 +187,5 @@ router.post("/menus/asignar", requiereRol('Administrador'), async (req, res) => 
 });
 
 module.exports = router;
+
+

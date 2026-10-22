@@ -28,7 +28,8 @@ const pool = {
   },
 };
 // Evitar cualquier salida al proveedor de correo, incluso si el entorno lo configuró.
-process.env.GOOGLE_SCRIPT_URL = '';
+process.env.GOOGLE_SCRIPT_URL = 'https://correo-qa.invalid/endpoint';
+process.env.PUBLIC_REGISTRATION_ACADEMY_ID = '1';
 require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: pool };
 // El Tutor IA lee la clave al cargar el módulo; en las pruebas nunca se llama
 // al proveedor externo: el fallo se provoca antes, en la consulta simulada.
@@ -60,7 +61,8 @@ async function conServidor(fn, rol = 'Administrador') {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
   app.use((req, res, next) => {
-    req.usuario = { id: 10, idUsuario: 10, idAcademia: 1, rol };
+    // rol=null simula una petición pública sin una sesión autenticada.
+    if (rol !== null) req.usuario = { id: 10, idUsuario: 10, idAcademia: 1, rol };
     next();
   });
   for (const [ruta, router] of routers) app.use(ruta, router);
@@ -476,61 +478,86 @@ test('errores JSON: 400 inválido y 413 para cuerpo mayor de 15 MB', async (t) =
   });
 });
 
-test('checkout ignora monto como fuente de verdad y crea pago por precio de BD', async () => {
+test('checkout público verifica el correo antes de crear cuenta, matrícula o pago', async (t) => {
+  const fetchOriginal = globalThis.fetch;
+  const correos = [];
   let montoPersistido;
+  t.mock.method(globalThis, 'fetch', async (url, ...args) => {
+    if (String(url) === 'https://correo-qa.invalid/endpoint') {
+      correos.push(JSON.parse(args[0]?.body || '{}'));
+      return new Response(JSON.stringify({ status: 'success' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return fetchOriginal(url, ...args);
+  });
+
   ejecutar = async (sql, p) => {
-    if (/FROM Academia/.test(sql)) return [[{ IdAcademia: 1 }]];
-    if (/FROM Ciclo c/.test(sql)) return [[{ IdCiclo: 1, IdAcademia: 1, Nombre: 'Ciclo demo', EstadoRegistro: 1, FechaFin: '2099-12-31', Capacidad: 20, Precio: 250 }]];
-    if (/FROM Matricula m/.test(sql) && /FOR UPDATE/.test(sql)) return [[]];
-    if (/FROM Usuario/.test(sql)) return [[]];
-    if (/FROM perfil/.test(sql)) return [[{ IdPerfil: 4 }]];
-    if (/INSERT INTO Usuario_Perfiles/.test(sql)) return [{ affectedRows: 1 }];
-    if (/INSERT INTO Usuario/.test(sql)) return [{ insertId: 10 }];
-    if (/INSERT INTO Matricula/.test(sql)) return [{ insertId: 7 }];
-    if (/INSERT INTO PagosMensualidad/.test(sql)) { montoPersistido = p[2]; return [{ insertId: 4 }]; }
-    if (/COUNT\(\*\) AS TotalAlumnos/.test(sql)) return [[{ TotalAlumnos: 1 }]];
-    throw new Error(`Fixture checkout: ${sql}`);
+    if (/FROM Ciclo c/.test(sql)) return [[{ IdCiclo: 1, IdAcademia: 1, Nombre: 'Ciclo demo', EstadoRegistro: 1, FechaFin: '2099-12-31', Capacidad: 20, TotalAlumnos: 0, Precio: 250 }]];
+    throw new Error(`Preverificación pública no debe leer usuarios ni escribir: ${sql}`);
   };
+
   await conServidor(async (pedir) => {
-    const r = await pedir('/api/matriculas/checkout', 'POST', { idCiclo: 1, nombres: 'Ana', apellidos: 'Pérez', correo: 'ana@example.test', monto: 1 });
-    assert.equal(r.status, 201);
-    assert.equal(r.body.pago.monto, 250);
-    assert.equal(r.body.pago.estado, 'Pendiente');
-  });
+    const primera = await pedir('/api/matriculas/checkout', 'POST', { idCiclo: 1, nombres: 'Ana', apellidos: 'Pérez', correo: 'ana@example.test', monto: 1 });
+    assert.equal(primera.status, 202);
+    assert.equal(primera.body.verificacionRequerida, true);
+    assert.equal(primera.body.matriculaRegistrada, false);
+    assert.equal(primera.body.pago, undefined);
+    assert.equal(tx.begin, 0, 'El primer paso no abre transacción ni crea registros');
+    assert.equal(correos.length, 1);
+    assert.match(correos[0].subject, /Confirma tu correo/);
+    assert.match(correos[0].htmlBody, /no se ha creado una cuenta, matrícula ni pago/i);
+
+    const enlace = correos[0].htmlBody.match(/href="[^"]*\/api\/matriculas\/confirmar-correo-matricula\?token=([^"]+)"/);
+    assert.ok(enlace, 'El correo debe contener el enlace de confirmación de API_PUBLIC_URL');
+    const token = decodeURIComponent(enlace[1]);
+
+    // Tras confirmar el enlace se usa la fixture de transacción: recién aquí se
+    // permite crear el alumno y registrar el pago pendiente al precio de la BD.
+    ejecutar = async (sql, p) => {
+      if (/FROM Academia/.test(sql)) return [[{ IdAcademia: 1 }]];
+      if (/FROM Ciclo c/.test(sql)) return [[{ IdCiclo: 1, IdAcademia: 1, Nombre: 'Ciclo demo', EstadoRegistro: 1, FechaFin: '2099-12-31', Capacidad: 20, Precio: 250 }]];
+      if (/FROM Matricula m/.test(sql) && /FOR UPDATE/.test(sql)) return [[]];
+      if (/FROM Usuario u/.test(sql)) return [[]];
+      if (/FROM Usuario WHERE/.test(sql)) return [[]];
+      if (/FROM perfil/.test(sql)) return [[{ IdPerfil: 4 }]];
+      if (/INSERT INTO Usuario_Perfiles/.test(sql)) return [{ affectedRows: 1 }];
+      if (/INSERT INTO Usuario/.test(sql)) return [{ insertId: 10 }];
+      if (/INSERT INTO Matricula/.test(sql)) return [{ insertId: 7 }];
+      if (/INSERT INTO PagosMensualidad/.test(sql)) { montoPersistido = p[2]; return [{ insertId: 4 }]; }
+      if (/COUNT\(\*\) AS TotalAlumnos/.test(sql)) return [[{ TotalAlumnos: 1 }]];
+      throw new Error(`Fixture checkout confirmación: ${sql}`);
+    };
+
+    const confirmada = await pedir('/api/matriculas/confirmar-correo-matricula', 'POST', { token });
+    assert.equal(confirmada.status, 201);
+    assert.equal(confirmada.body.pago.monto, 250);
+    assert.equal(confirmada.body.pago.estado, 'Pendiente');
+    assert.equal(confirmada.body.pago.confirmadoPorPasarela, false);
+    assert.equal(confirmada.body.correo.estado, 'enviado');
+    assert.equal(tx.commit, 1);
+  }, null);
   assert.equal(montoPersistido, 250);
-  assert.equal(tx.commit, 1);
 });
 
-test('verificar entrega `message` y `mensaje` para el frontend actual', async () => {
+test('verificar no revela si el correo existe; solo confirma disponibilidad de ciclo', async () => {
   ejecutar = async (sql) => {
-    if (/FROM Ciclo c/.test(sql)) return [[{ IdCiclo: 1, IdAcademia: 1, Nombre: 'Ciclo demo', EstadoRegistro: 1, Capacidad: 20 }]];
-    if (/FROM Usuario u/.test(sql)) return [[{ IdUsuario: 10, IdAcademia: 1, NombrePerfil: 'Alumno' }]];
-    if (/FROM Matricula m/.test(sql)) return [[]];
-    throw new Error('SQL inesperado');
-  };
-  await conServidor(async (pedir) => {
-    const r = await pedir('/api/matriculas/verificar', 'POST', { correo: 'ana@example.test', idCiclo: 1 });
-    assert.equal(r.body.message, r.body.mensaje);
-    assert.match(r.body.message, /Ya estás registrado/);
-  });
-});
-
-test('verificar conserva los flags del frontend sin exponer identidad ni IDs privados', async () => {
-  ejecutar = async (sql) => {
-    if (/FROM Ciclo c/.test(sql)) return [[{ IdCiclo: 1, IdAcademia: 1, Nombre: 'Ciclo demo', EstadoRegistro: 1, Capacidad: 20 }]];
-    if (/FROM Usuario u/.test(sql)) return [[{ IdUsuario: 10, IdAcademia: 1, CodigoUsuario: 'PRIVADO', NombrePerfil: 'Alumno', Nombres: 'Privado', ApellidoPaterno: 'Privado' }]];
-    if (/FROM Matricula m/.test(sql)) return [[{ IdCiclo: 2, Nombre: 'Ciclo anterior', IdMatricula: 8 }]];
-    throw new Error('SQL inesperado');
+    if (/FROM Ciclo c/.test(sql)) return [[{ IdCiclo: 1, IdAcademia: 1, Nombre: 'Ciclo demo', EstadoRegistro: 1, FechaFin: '2099-12-31', Capacidad: 20, TotalAlumnos: 3 }]];
+    throw new Error(`El preflight no debe consultar cuentas: ${sql}`);
   };
   await conServidor(async (pedir) => {
     const r = await pedir('/api/matriculas/verificar', 'POST', { correo: 'ana@example.test', idCiclo: 1 });
     assert.equal(r.status, 200);
-    assert.equal(r.body.esAlumno, true);
-    assert.equal(r.body.puedeReinscribirse, true);
-    for (const clave of ['idUsuario', 'codigoUsuario', 'nombreCompleto']) assert.equal(Object.hasOwn(r.body, clave), false);
-    assert.deepEqual(r.body.ciclos, [{ nombre: 'Ciclo anterior' }]);
+    assert.equal(r.body.disponible, true);
+    assert.equal(r.body.idCiclo, 1);
+    assert.match(r.body.mensaje, /disponible/i);
+    for (const clave of ['idUsuario', 'codigoUsuario', 'nombreCompleto', 'existe', 'esAlumno', 'ciclos']) {
+      assert.equal(Object.hasOwn(r.body, clave), false);
+    }
+    assert.equal(consultas.some((q) => /CorreoElectronico|FROM Usuario/i.test(q.sql)), false);
   });
-});
+}, null);
 
 test('pago de inscripción pendiente no se confirma como cobro real', async () => {
   ejecutar = async (sql) => {
@@ -598,3 +625,5 @@ test('comunicado demasiado largo o de tipo inválido se rechaza antes de SQL', a
   });
   assert.equal(consultas.length, 0);
 });
+
+
