@@ -3,18 +3,13 @@ const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
 
-const ESCALAS = {
-  UNMSM: 2000,
-  UNI: 2000,
-  PUCP: 1000,
-  UNFV: 1000,
-  UNAC: 100,
-  UNT: 300,
-  Preuniversitario: 20,
-};
+// Escala por universidad objetivo: fuente unica compartida con notas y
+// Tutor IA (utils/escalas.js). El dashboard normaliza con la MISMA escala
+// que valida el registro de notas.
+const { escalaMaximaPorUniversidad } = require('../utils/escalas');
 
 function maximoPorUniversidad(universidad = '') {
-  return ESCALAS[String(universidad).trim()] || ESCALAS.Preuniversitario;
+  return escalaMaximaPorUniversidad(universidad);
 }
 
 function normalizarPromedio(calificacion, universidad) {

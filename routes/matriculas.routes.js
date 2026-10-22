@@ -11,7 +11,7 @@ const URL_GOOGLE_SCRIPT = process.env.GOOGLE_SCRIPT_URL || '';
 const API_PUBLIC_URL = (process.env.API_PUBLIC_URL || 'https://acadesys-api.onrender.com').replace(/\/+$/, '');
 const PROPOSITO_RESET = 'reinscripcion-password-reset';
 
-const UNIVERSIDADES = new Set(['UNMSM', 'UNI', 'PUCP', 'UNFV', 'UNAC', 'UNT', 'Preuniversitario']);
+const UNIVERSIDADES = new Set(['UNMSM', 'UNI', 'PUCP', 'UNFV', 'UNAC', 'UNT', 'UNALM', 'UPCH', 'ULIMA', 'UPC', 'USMP', 'UTP', 'Preuniversitario']);
 
 function normalizarCorreo(correo = '') {
   return String(correo).trim().toLowerCase();

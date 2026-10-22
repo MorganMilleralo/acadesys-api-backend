@@ -40,7 +40,7 @@ test('Tutor IA mantiene el contexto de main sin consultar Evaluacion.IdCurso', a
   assert.doesNotMatch(prompts[0], /Persona Ficticia|9999/);fin();
 });
 
-test('Tutor IA conserva el fallback de escala de main sin crear un contrato nuevo', async t => {
+test('Tutor IA usa la escala unificada por universidad sin crear un contrato nuevo', async t => {
   const fin = secuencia([
     { sql: /FROM Usuario u/, rows: [identidad] },
     { sql: /FROM Matricula m/, rows: [{ ...matricula, UniversidadObjetivo: 'Sin definir' }] },
@@ -50,7 +50,10 @@ test('Tutor IA conserva el fallback de escala de main sin crear un contrato nuev
   ]);
   const pedir = await servir(t, rutas, alumno);
   const r = await pedir('POST', '/api/tutor-ia', { pregunta: 'Diagnostico' });
-  assert.equal(r.status, 200); assert.equal(r.body.contexto.escalaMaxima, 2000);
+  assert.equal(r.status, 200);
+  // Una universidad sin escala propia usa la escala interna preuniversitaria
+  // (20), la misma que aplican notas y dashboard (utils/escalas.js).
+  assert.equal(r.body.contexto.escalaMaxima, 20);
   assert.equal(r.body.contexto.promedioGeneral,100);fin();
 });
 

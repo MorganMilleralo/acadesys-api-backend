@@ -16,3 +16,6 @@ uploads/materiales/*
 !uploads/materiales/.gitkeep
 uploads/perfiles/*
 !uploads/perfiles/.gitkeep
+
+# Logs de ejecucion local (no se versionan)
+server.log

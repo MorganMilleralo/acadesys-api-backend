@@ -7,25 +7,14 @@ const { requiereGestionNotas, autorizarHistorialAlumno } = require("../middlewar
 const { calificacionEntera, idPositivo, rollbackSeguro } = require('../utils/validaciones');
 
 /* ============================================================
-   🛡️ MAPA DE ESCALAS POR UNIVERSIDAD OBJETIVO (Backend, no se toca)
+   ESCALA POR UNIVERSIDAD OBJETIVO
+   La tabla vive en utils/escalas.js (fuente unica compartida) para que
+   notas, dashboard y Tutor IA usen SIEMPRE la misma escala: la que se
+   muestra, la que se valida y la que se normaliza.
    ============================================================ */
-const ESCALAS_POR_UNIVERSIDAD = {
-  UNMSM: 2000,
-  UNI: 2000,
-  PUCP: 1000,
-  UNFV: 1000,
-  UNAC: 100,
-  UNT: 300,
-  Preuniversitario: 20,
-  // Default por si el ciclo no tiene universidad definida
-  DEFAULT: 2000,
-};
+const { escalaMaximaPorUniversidad } = require('../utils/escalas');
 
-const obtenerMaximoPermitido = (universidad = "") => {
-  const key = String(universidad || "").trim();
-  return Object.hasOwn(ESCALAS_POR_UNIVERSIDAD, key)
-    ? ESCALAS_POR_UNIVERSIDAD[key] : ESCALAS_POR_UNIVERSIDAD.DEFAULT;
-};
+const obtenerMaximoPermitido = (universidad = "") => escalaMaximaPorUniversidad(universidad);
 
 const TIPOS_VALIDOS = ['Practica', 'Evaluacion', 'Examen', 'Simulacro'];
 

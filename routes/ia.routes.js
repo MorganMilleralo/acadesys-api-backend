@@ -11,21 +11,13 @@ const genAI = process.env.GEMINI_API_KEY
   ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
   : null;
 
-const ESCALAS_POR_UNIVERSIDAD = Object.freeze({
-  UNMSM: 2000,
-  UNI: 2000,
-  PUCP: 1000,
-  UNFV: 1000,
-  UNAC: 100,
-  UNT: 300,
-  Preuniversitario: 20,
-  DEFAULT: 2000,
-});
+// Escala por universidad objetivo: fuente unica compartida con notas y
+// dashboard (utils/escalas.js). Asi el Tutor IA nunca discrepa del modulo
+// que registro y valido las notas.
+const { escalaMaximaPorUniversidad } = require('../utils/escalas');
 
 function obtenerMaximoPermitido(universidad = "") {
-  const clave = String(universidad || "").trim();
-  return Object.hasOwn(ESCALAS_POR_UNIVERSIDAD, clave)
-    ? ESCALAS_POR_UNIVERSIDAD[clave] : ESCALAS_POR_UNIVERSIDAD.DEFAULT;
+  return escalaMaximaPorUniversidad(universidad);
 }
 
 function idPositivo(valor) {

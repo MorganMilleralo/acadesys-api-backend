@@ -10,6 +10,12 @@ const UNIVERSIDADES_VALIDAS = new Set([
   'UNFV',
   'UNAC',
   'UNT',
+  'UNALM',
+  'UPCH',
+  'ULIMA',
+  'UPC',
+  'USMP',
+  'UTP',
   'Preuniversitario',
 ]);
 
@@ -32,6 +38,12 @@ function universidadDesdeNombre(nombre = '') {
   if (n.includes('villarreal') || n.includes('unfv')) return 'UNFV';
   if (n.includes('callao') || n.includes('unac')) return 'UNAC';
   if (n.includes('trujillo') || n.includes('unt')) return 'UNT';
+  if (n.includes('agraria') || n.includes('unalm') || n.includes('la molina')) return 'UNALM';
+  if (n.includes('cayetano') || n.includes('upch')) return 'UPCH';
+  if (n.includes('de lima') || n.includes('ulima')) return 'ULIMA';
+  if (/\bupc\b/.test(n) || n.includes('ciencias aplicadas')) return 'UPC';
+  if (n.includes('san martin de porres') || n.includes('usmp')) return 'USMP';
+  if (/\butp\b/.test(n) || n.includes('tecnologica de peru')) return 'UTP';
   return 'Preuniversitario';
 }
 
@@ -85,7 +97,7 @@ function validarNombreCiclo(nombre = '') {
   }
 
   // Se conserva la regla pedida por el profesor: nombres preuniversitarios reconocibles.
-  const regexPre = /(semestral|anual|repaso|verano|veranito|intensivo|ciclo|pre|san\s+marcos|unmsm|\buni\b|pucp|catolica|villarreal|unfv|callao|unac|trujillo|unt|ingenier)/i;
+  const regexPre = /(semestral|anual|repaso|verano|veranito|intensivo|ciclo|pre|san\s+marcos|unmsm|\buni\b|pucp|catolica|villarreal|unfv|callao|unac|trujillo|unt|ingenier|unalm|agraria|molina|upch|cayetano|ulima|\bupc\b|usmp|porres|\butp\b|tecnologica)/i;
   if (!regexPre.test(limpio)) {
     return 'El nombre debe identificar un ciclo preuniversitario (ej. Repaso UNI, Semestral San Marcos o Veranito PUCP).';
   }
@@ -106,6 +118,12 @@ function generarPrefijo(nombre, universidad) {
     UNFV: 'UNFV',
     UNAC: 'UNAC',
     UNT: 'UNT',
+    UNALM: 'UNALM',
+    UPCH: 'UPCH',
+    ULIMA: 'ULIMA',
+    UPC: 'UPC',
+    USMP: 'USMP',
+    UTP: 'UTP',
     Preuniversitario: 'PREU',
   }[universidad] || universidadDesdeNombre(nombre);
 
