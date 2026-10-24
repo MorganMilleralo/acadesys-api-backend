@@ -9,6 +9,7 @@ const pool = require('../config/db');
 const router = express.Router();
 
 const GOOGLE_SCRIPT_URL = String(process.env.GOOGLE_SCRIPT_URL || '').trim();
+const GOOGLE_SCRIPT_TOKEN = String(process.env.GOOGLE_SCRIPT_TOKEN || '').trim();
 const FRONTEND_PUBLIC_URL = String(
   process.env.FRONTEND_PUBLIC_URL || 'https://acadesys-web-frontend.vercel.app',
 ).trim().replace(/\/+$/, '');
@@ -64,7 +65,7 @@ function huellasIguales(a, b) {
 function correoConfigurado() {
   try {
     const url = new URL(GOOGLE_SCRIPT_URL);
-    return url.protocol === 'https:';
+    return url.protocol === 'https:' && GOOGLE_SCRIPT_TOKEN.length >= 32;
   } catch {
     return false;
   }
@@ -72,14 +73,19 @@ function correoConfigurado() {
 
 async function enviarCorreoHtml(destinatario, asunto, htmlBody) {
   if (!correoConfigurado()) {
-    throw new Error('GOOGLE_SCRIPT_URL falta o no es una URL HTTPS válida.');
+    throw new Error('GOOGLE_SCRIPT_URL o GOOGLE_SCRIPT_TOKEN no están configurados correctamente.');
   }
 
   const response = await fetch(GOOGLE_SCRIPT_URL, {
     method: 'POST',
     signal: AbortSignal.timeout(15000),
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ to: destinatario, subject: asunto, htmlBody }),
+    body: JSON.stringify({
+      to: destinatario,
+      subject: asunto,
+      htmlBody,
+      token: GOOGLE_SCRIPT_TOKEN,
+    }),
   });
 
   const resultado = await response.json().catch(() => ({}));

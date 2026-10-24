@@ -24,7 +24,8 @@ const {
   verificarTokenVerificacionMatricula,
 } = require("../utils/token-verificacion-matricula");
 
-const URL_GOOGLE_SCRIPT = process.env.GOOGLE_SCRIPT_URL || "";
+const URL_GOOGLE_SCRIPT = String(process.env.GOOGLE_SCRIPT_URL || "").trim();
+const GOOGLE_SCRIPT_TOKEN = String(process.env.GOOGLE_SCRIPT_TOKEN || "").trim();
 const API_PUBLIC_URL = (
   process.env.API_PUBLIC_URL || "https://acadesys-api.onrender.com"
 ).replace(/\/+$/, "");
@@ -77,12 +78,15 @@ function huellaClave(claveHash) {
 }
 
 async function enviarCorreoHtml(to, subject, htmlBody) {
-  if (!URL_GOOGLE_SCRIPT) throw new Error("Servicio de correo no configurado.");
+  if (!URL_GOOGLE_SCRIPT || !GOOGLE_SCRIPT_TOKEN || GOOGLE_SCRIPT_TOKEN.length < 32) {
+    throw new Error("Servicio de correo no configurado correctamente.");
+  }
+
   const response = await fetch(URL_GOOGLE_SCRIPT, {
     signal: AbortSignal.timeout(15000),
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ to, subject, htmlBody }),
+    body: JSON.stringify({ to, subject, htmlBody, token: GOOGLE_SCRIPT_TOKEN }),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data?.status !== "success") {
