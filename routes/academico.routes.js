@@ -473,7 +473,9 @@ router.get('/horarios', requiereRol(...ROLES_GESTION), async (req, res) => {
               TIME_FORMAT(h.HoraInicio, '%H:%i') AS horaInicio,
               TIME_FORMAT(h.HoraFin, '%H:%i') AS horaFin,
               h.Orden AS orden, h.EstadoRegistro AS estadoRegistro,
-              c.Nombre AS ciclo, cu.Nombre AS curso
+              c.Nombre AS ciclo, cu.Nombre AS curso,
+              c.UniversidadObjetivo AS universidadCiclo,
+              cu.UniversidadObjetivo AS universidadCurso
        FROM HorarioCurso h
        INNER JOIN Ciclo c ON c.IdCiclo = h.IdCiclo
        INNER JOIN Curso cu ON cu.IdCurso = h.IdCurso
@@ -519,17 +521,31 @@ async function guardarHorario(req, res, editar = false) {
     // Serializa también cambios de ciclo para que dos altas concurrentes no se solapen.
     await connection.query('SELECT IdAcademia FROM Academia WHERE IdAcademia = ? FOR UPDATE', [idAcademia]);
     const [[ciclo]] = await connection.query(
-      'SELECT IdCiclo FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1 FOR UPDATE',
+      'SELECT IdCiclo, UniversidadObjetivo FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1 LIMIT 1 FOR UPDATE',
       [idCiclo, idAcademia],
     );
     const [[curso]] = await connection.query(
-      `SELECT cu.IdCurso FROM Curso cu INNER JOIN CicloCurso cc ON cc.IdCurso = cu.IdCurso
+      `SELECT cu.IdCurso, cu.UniversidadObjetivo AS CursoUniversidad FROM Curso cu INNER JOIN CicloCurso cc ON cc.IdCurso = cu.IdCurso
        WHERE cu.IdCurso = ? AND cc.IdCiclo = ? AND cu.EstadoRegistro = 1 AND cc.EstadoRegistro = 1 LIMIT 1 FOR UPDATE`,
       [idCurso, idCiclo],
     );
     if (!ciclo || !curso) {
       await connection.rollback();
       return res.status(400).json({ error: 'El ciclo no pertenece a tu academia o el curso no está activo y vinculado mediante CicloCurso.' });
+    }
+    // La universidad del curso debe coincidir con la del ciclo (campo
+    // estructurado UniversidadObjetivo de cada tabla; los prefijos de código
+    // NUNCA se usan como fuente de verdad). Mismo criterio que el guardado de
+    // ciclos (admin-ciclos.routes.js): mensaje 400 sin modificar relaciones.
+    const universidadCiclo = String(ciclo.UniversidadObjetivo ?? '').trim();
+    const universidadCurso = String(curso.CursoUniversidad ?? '').trim();
+    if (universidadCiclo.toLowerCase() !== universidadCurso.toLowerCase()) {
+      await connection.rollback();
+      return res.status(400).json({
+        error: universidadCurso
+          ? `El curso pertenece a ${universidadCurso} y el ciclo a ${universidadCiclo}: un horario no puede mezclar universidades.`
+          : 'El curso no tiene universidad objetivo asignada: asígnala en Cursos Académicos antes de crear su horario.'
+      });
     }
     if (editar) {
       const [[actual]] = await connection.query(

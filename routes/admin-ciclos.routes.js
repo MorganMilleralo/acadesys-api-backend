@@ -321,7 +321,7 @@ function obtenerCursosSeleccionados(body = {}) {
   return { ids };
 }
 
-async function reemplazarCursosCiclo(connection, idCiclo, ids) {
+async function reemplazarCursosCiclo(connection, idCiclo, ids, universidad) {
   if (ids === null) return;
   const condicion = ids.length ? ` AND IdCurso NOT IN (${ids.map(() => '?').join(',')})` : '';
   const parametros = [];
@@ -339,10 +339,22 @@ async function reemplazarCursosCiclo(connection, idCiclo, ids) {
   if (ids.length) {
     const placeholders = ids.map(() => '?').join(',');
     const [cursosValidos] = await connection.query(
-      `SELECT IdCurso FROM Curso WHERE EstadoRegistro = 1 AND IdCurso IN (${placeholders})`,
+      `SELECT IdCurso, UniversidadObjetivo FROM Curso WHERE EstadoRegistro = 1 AND IdCurso IN (${placeholders})`,
       ids,
     );
     if (cursosValidos.length !== ids.length) { const error = new Error('Uno o más cursos no existen o están inactivos.'); error.code = 'CICLO_CURSOS_INVALIDOS'; throw error; }
+    // Fuente de verdad: Curso.UniversidadObjetivo (campo estructurado del
+    // catálogo; el prefijo del código es solo descriptivo). Un curso no puede
+    // vincularse a un ciclo de otra universidad objetivo: el backend no confía
+    // en el filtro del frontend para garantizar la coherencia Ciclo-Curso.
+    const incompatibles = cursosValidos.filter(
+      (curso) => String(curso.UniversidadObjetivo || '').trim() !== universidad
+    );
+    if (incompatibles.length) {
+      const error = new Error('Uno o más cursos no corresponden a la universidad seleccionada.');
+      error.code = 'CICLO_CURSOS_UNIVERSIDAD';
+      throw error;
+    }
   }
   await connection.query('UPDATE CicloCurso SET EstadoRegistro = 0 WHERE IdCiclo = ? AND EstadoRegistro = 1', [idCiclo]);
   for (let index = 0; index < ids.length; index += 1) {
@@ -409,7 +421,7 @@ router.post('/', async (req, res) => {
       data.capacidad,
     ]);
 
-    await reemplazarCursosCiclo(connection, result.insertId, cursosSeleccionados);
+    await reemplazarCursosCiclo(connection, result.insertId, cursosSeleccionados, data.universidad);
 
     await connection.commit();
 
@@ -422,8 +434,8 @@ router.post('/', async (req, res) => {
     await rollbackSeguro(connection);
     console.error('Error en POST /api/admin/ciclos:', error);
     // Solo los errores de dominio muestran su mensaje; el resto es genérico.
-    const esDominio = error.code === 'CICLO_CURSOS_INVALIDOS' || error.code === 'CICLO_CURSO_EN_USO';
-    const status = error.code === 'CICLO_CURSOS_INVALIDOS' ? 400 : ['CICLO_CURSO_EN_USO', 'ER_DUP_ENTRY'].includes(error.code) ? 409 : 500;
+    const esDominio = error.code === 'CICLO_CURSOS_INVALIDOS' || error.code === 'CICLO_CURSOS_UNIVERSIDAD' || error.code === 'CICLO_CURSO_EN_USO';
+    const status = ['CICLO_CURSOS_INVALIDOS', 'CICLO_CURSOS_UNIVERSIDAD'].includes(error.code) ? 400 : ['CICLO_CURSO_EN_USO', 'ER_DUP_ENTRY'].includes(error.code) ? 409 : 500;
     res.status(status).json({
       error: esDominio ? error.message : status === 409 ? 'Ya existe un ciclo con ese nombre.' : 'No se pudo crear el ciclo.',
     });
@@ -525,7 +537,7 @@ router.put('/:id', async (req, res) => {
       idAcademia,
     ]);
 
-    if (cursosParseados) await reemplazarCursosCiclo(connection, idCiclo, cursosParseados.ids);
+    if (cursosParseados) await reemplazarCursosCiclo(connection, idCiclo, cursosParseados.ids, data.universidad);
 
     await connection.commit();
 
@@ -533,8 +545,8 @@ router.put('/:id', async (req, res) => {
   } catch (error) {
     await rollbackSeguro(connection);
     console.error('Error en PUT /api/admin/ciclos/:id:', error);
-    const esDominio = error.code === 'CICLO_CURSOS_INVALIDOS' || error.code === 'CICLO_CURSO_EN_USO';
-    const status = error.code === 'CICLO_CURSOS_INVALIDOS' ? 400 : ['CICLO_CURSO_EN_USO', 'ER_DUP_ENTRY'].includes(error.code) ? 409 : 500;
+    const esDominio = error.code === 'CICLO_CURSOS_INVALIDOS' || error.code === 'CICLO_CURSOS_UNIVERSIDAD' || error.code === 'CICLO_CURSO_EN_USO';
+    const status = ['CICLO_CURSOS_INVALIDOS', 'CICLO_CURSOS_UNIVERSIDAD'].includes(error.code) ? 400 : ['CICLO_CURSO_EN_USO', 'ER_DUP_ENTRY'].includes(error.code) ? 409 : 500;
     res.status(status).json({ error: status === 500 ? 'No se pudo actualizar el ciclo.' : error.code === 'ER_DUP_ENTRY' ? 'Existe un ciclo duplicado.' : error.message });
   } finally {
     if (connection) connection.release();
