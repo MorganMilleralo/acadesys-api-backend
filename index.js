@@ -34,8 +34,10 @@ if (faltantes.length > 0) {
   process.exit(1);
 }
 
-if (String(process.env.JWT_SECRET || '').length < 32) {
-  console.error('❌ JWT_SECRET debe tener al menos 32 caracteres. Configura un secreto largo y único en el entorno.');
+if (String(process.env.JWT_SECRET || "").length < 32) {
+  console.error(
+    "❌ JWT_SECRET debe tener al menos 32 caracteres. Configura un secreto largo y único en el entorno.",
+  );
   process.exit(1);
 }
 
@@ -43,12 +45,12 @@ if (String(process.env.JWT_SECRET || '').length < 32) {
 // 2. CONFIGURACIÓN GENERAL DE EXPRESS
 // ============================================================
 
-app.set("trust proxy", 1);
-
 // Whitelist CORS explícita y centralizada (ver config/cors.js).
 // Incluye el frontend local (5173/5174), el frontend de producción y los
 // orígenes extra de la variable de entorno CORS_ORIGINS. Nunca usa "*".
-const { corsOptions } = require('./config/cors');
+app.set("trust proxy", 1);
+
+const { corsOptions } = require("./config/cors");
 
 app.use(cors(corsOptions));
 
@@ -75,6 +77,9 @@ const verificarToken = require("./middlewares/auth.middleware");
 // ============================================================
 
 const authRoutes = require("./routes/auth.routes");
+
+// NUEVO: rutas públicas de recuperación y restablecimiento
+const recuperacionRoutes = require("./routes/recuperacion.routes");
 
 const matriculasRoutes = require("./routes/matriculas.routes");
 
@@ -110,12 +115,17 @@ const ciclosRoutes = ciclosRoutesModule.router || ciclosRoutesModule;
 // - visitantes consulten detalles;
 // - visitantes verifiquen su correo;
 // - visitantes puedan iniciar checkout;
+// - usuarios sin sesión soliciten recuperar su contraseña.
 //
 // SIN iniciar sesión.
 // ============================================================
 
 // Autenticación
 app.use("/api", authRoutes);
+
+// NUEVO: recuperación de contraseña sin exigir sesión Bearer.
+// Debe permanecer antes del middleware JWT global.
+app.use("/api/auth", recuperacionRoutes);
 
 // Catálogo público de ciclos
 app.use("/api/ciclos", ciclosRoutes);
@@ -244,7 +254,7 @@ app.use("/api", (req, res) => {
 // 11. MANEJO GLOBAL DE ERRORES
 // ============================================================
 
-app.use(require('./middlewares/error.middleware'));
+app.use(require("./middlewares/error.middleware"));
 
 // ============================================================
 // 12. ARRANQUE DEL SERVIDOR
@@ -263,5 +273,3 @@ const server = app.listen(port, () => {
 });
 
 module.exports = { app, server };
-
-
