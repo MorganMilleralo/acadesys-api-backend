@@ -48,8 +48,15 @@ const pool = {
     return connection;
   },
 };
-// Evitar cualquier salida al proveedor de correo, incluso si el entorno lo configuró.
-process.env.GOOGLE_SCRIPT_URL = "https://correo-qa.invalid/endpoint";
+process.env.GOOGLE_SCRIPT_URL =
+  "https://correo-qa.invalid/endpoint";
+
+process.env.GOOGLE_SCRIPT_TOKEN =
+  "token-ficticio-solo-para-pruebas-locales-no-usar-en-produccion";
+
+process.env.JWT_SECRET =
+  "clave-ficticia-solo-para-pruebas-locales-no-usar-en-produccion-2026";
+
 process.env.PUBLIC_REGISTRATION_ACADEMY_ID = "1";
 require.cache[dbPath] = {
   id: dbPath,
