@@ -66,6 +66,9 @@ function verificarTokenVerificacionMatricula(token, env = process.env, ahoraMs =
     const etiqueta = Buffer.from(etiquetaTexto, 'base64url');
     const cifrado = Buffer.from(cifradoTexto, 'base64url');
     if (iv.length !== 12 || etiqueta.length !== 16 || cifrado.length === 0 || cifrado.length > 2048) return null;
+    // Exigir codificación base64url canónica evita que cambios en bits de relleno
+    // se acepten como el mismo token descifrado. Buffer.from es permisivo con esas variantes.
+    if (iv.toString('base64url') !== ivTexto || etiqueta.toString('base64url') !== etiquetaTexto || cifrado.toString('base64url') !== cifradoTexto) return null;
 
     const descifrador = crypto.createDecipheriv('aes-256-gcm', obtenerClave(env), iv);
     descifrador.setAuthTag(etiqueta);

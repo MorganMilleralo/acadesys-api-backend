@@ -1023,10 +1023,14 @@ test("checkout público verifica el correo antes de crear cuenta, matrícula o p
         return [{ affectedRows: 1 }];
       if (/INSERT INTO Usuario/.test(sql)) return [{ insertId: 10 }];
       if (/INSERT INTO Matricula/.test(sql)) return [{ insertId: 7 }];
+      if (/FROM PagosMensualidad/.test(sql) && /LOWER\(TRIM\(Mes\)\) = 'inscripcion'/i.test(sql)) {
+        return [[]];
+      }
       if (/INSERT INTO PagosMensualidad/.test(sql)) {
         montoPersistido = p[2];
         return [{ insertId: 4 }];
       }
+      if (/INSERT INTO PagoAuditoria/.test(sql)) return [{ insertId: 1, affectedRows: 1 }];
       if (/COUNT\(\*\) AS TotalAlumnos/.test(sql))
         return [[{ TotalAlumnos: 1 }]];
       throw new Error(`Fixture checkout confirmación: ${sql}`);
@@ -1210,4 +1214,150 @@ test("comunicado demasiado largo o de tipo inválido se rechaza antes de SQL", a
     );
   });
   assert.equal(consultas.length, 0);
+});
+
+test('alumno consulta únicamente su lista de cuotas y resumen desde la API', async () => {
+  ejecutar = async (sql, p) => {
+    if (/FROM PagosMensualidad p/.test(sql)) {
+      assert.match(sql, /p\.IdUsuario = \?/);
+      assert.match(sql, /u\.IdAcademia = \?/);
+      assert.deepEqual(p, [10, 10, 1, 1]);
+      return [[{
+        IdPago: 88,
+        IdUsuario: 10,
+        IdCiclo: 2,
+        Ciclo: 'Semestral San Marcos',
+        Mes: '2026-10',
+        Monto: '300.00',
+        Estado: 'Pendiente',
+        FechaPago: null,
+        FechaVencimiento: '2026-10-31',
+        IdComprobante: null,
+      }]];
+    }
+    throw new Error(`SQL inesperado en pagos del alumno: ${sql}`);
+  };
+
+  await conServidor(async (pedir) => {
+    const r = await pedir('/api/alumno/pagos');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.cuotas.length, 1);
+    assert.equal(r.body.cuotas[0].idPago, 88);
+    assert.equal(r.body.cuotas[0].monto, 300);
+    assert.equal(r.body.cuotas[0].estado, 'Pendiente');
+    assert.equal(r.body.resumen.montoPendiente, 300);
+  }, 'Alumno');
+});
+
+test('alumno registra referencia de comprobante, pero el pago sigue pendiente', async () => {
+  let comprobanteInsertado = false;
+  ejecutar = async (sql, p) => {
+    if (/FROM PagosMensualidad p/.test(sql) && /FOR UPDATE/.test(sql)) {
+      assert.match(sql, /p\.IdUsuario = \?/);
+      assert.deepEqual(p, [88, 10, 1]);
+      return [[{ IdPago: 88, IdUsuario: 10, IdCiclo: 2, Estado: 'Pendiente', Monto: '300.00', IdAcademia: 1 }]];
+    }
+    if (/FROM PagoComprobante/.test(sql) && /Referencia = \?/.test(sql)) return [[]];
+    if (/FROM PagoComprobante/.test(sql) && /EstadoRevision = 'EN_REVISION'/.test(sql)) return [[]];
+    if (/INSERT INTO PagoComprobante/.test(sql)) {
+      assert.deepEqual(p, [88, 10, 1, 'OP-12345678', null]);
+      comprobanteInsertado = true;
+      return [{ insertId: 900, affectedRows: 1 }];
+    }
+    if (/INSERT INTO PagoAuditoria/.test(sql)) return [{ insertId: 901, affectedRows: 1 }];
+    throw new Error(`SQL inesperado en comprobante del alumno: ${sql}`);
+  };
+
+  await conServidor(async (pedir) => {
+    const r = await pedir('/api/alumno/pagos/88/comprobante', 'POST', { referencia: 'OP-12345678' });
+    assert.equal(r.status, 201);
+    assert.equal(r.body.idComprobante, 900);
+    assert.equal(r.body.estadoComprobante, 'EN_REVISION');
+    assert.equal(r.body.estadoPago, 'Pendiente');
+    assert.match(r.body.mensaje, /sigue pendiente/i);
+  }, 'Alumno');
+  assert.equal(comprobanteInsertado, true);
+  assert.equal(tx.commit, 1);
+});
+
+test('administración aprueba comprobante y confirma el mismo registro de pago', async () => {
+  const actualizaciones = [];
+  ejecutar = async (sql, p) => {
+    if (/FROM PagoComprobante pc/.test(sql) && /FOR UPDATE/.test(sql)) {
+      assert.deepEqual(p, [900, 1]);
+      return [[{
+        IdComprobante: 900,
+        IdPago: 88,
+        IdUsuario: 10,
+        EstadoRevision: 'EN_REVISION',
+        EstadoPago: 'Pendiente',
+        Monto: '300.00',
+        FechaPago: null,
+        IdAcademia: 1,
+      }]];
+    }
+    if (/UPDATE PagoComprobante/.test(sql)) {
+      assert.deepEqual(p, ['APROBADO', null, 10, 900, 1]);
+      actualizaciones.push('comprobante');
+      return [{ affectedRows: 1 }];
+    }
+    if (/UPDATE PagosMensualidad p/.test(sql) && /SET p\.Estado = 'Pagado'/.test(sql)) {
+      assert.deepEqual(p, [88, 10, 1]);
+      actualizaciones.push('pago');
+      return [{ affectedRows: 1 }];
+    }
+    if (/INSERT INTO PagoAuditoria/.test(sql)) return [{ insertId: 902, affectedRows: 1 }];
+    throw new Error(`SQL inesperado al aprobar comprobante: ${sql}`);
+  };
+
+  await conServidor(async (pedir) => {
+    const r = await pedir('/api/pagos/comprobantes/900/estado', 'PUT', { Estado: 'APROBADO' });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.estadoComprobante, 'APROBADO');
+    assert.equal(r.body.estadoPago, 'Pagado');
+    assert.deepEqual(actualizaciones, ['comprobante', 'pago']);
+  }, 'Administrador');
+  assert.equal(tx.commit, 1);
+});
+
+test('generar mensualidades usa precio mensual del ciclo y no duplica periodo', async () => {
+  const pagos = new Set();
+  let inserts = 0;
+  ejecutar = async (sql, p) => {
+    if (/SELECT IdCiclo, IdAcademia, Nombre, PrecioMensual/.test(sql)) {
+      assert.deepEqual(p, [2, 1]);
+      return [[{ IdCiclo: 2, IdAcademia: 1, Nombre: 'Semestral San Marcos', PrecioMensual: '300.00' }]];
+    }
+    if (/FROM Matricula m/.test(sql) && /FOR UPDATE/.test(sql)) {
+      assert.deepEqual(p, [2, 1]);
+      return [[{ IdUsuario: 10 }, { IdUsuario: 11 }, { IdUsuario: 10 }]];
+    }
+    if (/SELECT IdPago, Estado, Monto\s+FROM PagosMensualidad/.test(sql)) {
+      const key = `${p[0]}|${p[1]}|${p[2]}`;
+      return pagos.has(key) ? [[{ IdPago: 500 + Number(p[0]), Estado: 'Pendiente', Monto: '300.00' }]] : [[]];
+    }
+    if (/INSERT INTO PagosMensualidad/.test(sql)) {
+      assert.equal(p[2], '2026-10');
+      assert.equal(p[3], 300);
+      const key = `${p[0]}|${p[1]}|${p[2]}`;
+      pagos.add(key);
+      inserts += 1;
+      return [{ insertId: 500 + Number(p[0]), affectedRows: 1 }];
+    }
+    if (/INSERT INTO PagoAuditoria/.test(sql)) return [{ insertId: 600 + inserts, affectedRows: 1 }];
+    throw new Error(`SQL inesperado al generar mensualidades: ${sql}`);
+  };
+
+  await conServidor(async (pedir) => {
+    const body = { periodo: '2026-10', fechaVencimiento: '2026-10-31' };
+    const primera = await pedir('/api/pagos/ciclo/2/mensualidades', 'POST', body);
+    assert.equal(primera.status, 201);
+    assert.equal(primera.body.cuotasCreadas, 2);
+    assert.equal(primera.body.cuotasYaExistentes, 0);
+    const segunda = await pedir('/api/pagos/ciclo/2/mensualidades', 'POST', body);
+    assert.equal(segunda.status, 201);
+    assert.equal(segunda.body.cuotasCreadas, 0);
+    assert.equal(segunda.body.cuotasYaExistentes, 2);
+  }, 'Administrador');
+  assert.equal(inserts, 2);
 });

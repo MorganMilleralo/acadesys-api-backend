@@ -16,6 +16,278 @@ const universidadDesdeNombre = (nombre = '') => {
 
 router.use(requiereRol('Alumno', 'Estudiante'));
 
+
+const { idPositivo, rollbackSeguro } = require('../utils/validaciones');
+const {
+  normalizarReferenciaPago,
+  normalizarUrlComprobante,
+  esEstadoPago,
+} = require('../utils/pagos');
+
+const idUsuarioSesion = (req) => idPositivo(req.usuario?.idUsuario ?? req.usuario?.id);
+const idAcademiaSesion = (req) => idPositivo(req.usuario?.idAcademia);
+
+async function auditarAccionPago(connection, datos) {
+  await connection.query(
+    `INSERT INTO PagoAuditoria
+      (IdPago, IdComprobante, IdUsuarioActor, IdAcademia, Evento,
+       EstadoAnterior, EstadoNuevo, MontoAnterior, MontoNuevo, Motivo, FechaCreacion)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+    [
+      datos.idPago,
+      datos.idComprobante ?? null,
+      datos.idUsuarioActor,
+      datos.idAcademia,
+      datos.evento,
+      datos.estadoAnterior ?? null,
+      datos.estadoNuevo ?? null,
+      datos.montoAnterior ?? null,
+      datos.montoNuevo ?? null,
+      datos.motivo ?? null,
+    ],
+  );
+}
+
+// GET /api/alumno/pagos — solo cuotas del alumno autenticado.
+router.get('/pagos', async (req, res) => {
+  const idUsuario = idUsuarioSesion(req);
+  const idAcademia = idAcademiaSesion(req);
+  if (!idUsuario || !idAcademia) {
+    return res.status(401).json({ error: 'No fue posible identificar al alumno autenticado.' });
+  }
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT p.IdPago, p.IdUsuario, p.IdCiclo, c.Nombre AS Ciclo,
+              p.Mes, p.Monto, p.Estado, p.FechaPago, p.FechaVencimiento,
+              pc.IdComprobante, pc.Referencia AS ReferenciaComprobante,
+              pc.UrlComprobante, pc.EstadoRevision AS EstadoRevisionComprobante,
+              pc.MotivoRevision, pc.FechaCreacion AS FechaSolicitudComprobante,
+              pc.FechaRevision
+       FROM PagosMensualidad p
+       INNER JOIN Usuario u ON u.IdUsuario = p.IdUsuario
+       INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = u.IdAcademia
+       LEFT JOIN PagoComprobante pc ON pc.IdComprobante = (
+         SELECT MAX(pc2.IdComprobante)
+         FROM PagoComprobante pc2
+         WHERE pc2.IdPago = p.IdPago AND pc2.IdUsuario = p.IdUsuario
+           AND pc2.IdAcademia = u.IdAcademia AND pc2.EstadoRegistro = 1
+       )
+       WHERE p.IdUsuario = ? AND u.IdUsuario = ? AND u.IdAcademia = ?
+         AND c.IdAcademia = ? AND p.EstadoRegistro = 1 AND u.EstadoRegistro = 1
+       ORDER BY p.IdCiclo DESC, p.Mes DESC, p.IdPago DESC`,
+      [idUsuario, idUsuario, idAcademia, idAcademia],
+    );
+
+    const cuotas = rows.map((row) => ({
+      idPago: Number(row.IdPago),
+      idCiclo: Number(row.IdCiclo),
+      ciclo: row.Ciclo,
+      concepto: String(row.Mes || '').trim().toLowerCase() === 'inscripcion' ? 'Inscripción' : 'Mensualidad',
+      periodo: row.Mes,
+      monto: Number(row.Monto || 0),
+      estado: row.Estado || 'Pendiente',
+      fechaPago: row.FechaPago,
+      fechaVencimiento: row.FechaVencimiento,
+      comprobante: row.IdComprobante ? {
+        idComprobante: Number(row.IdComprobante),
+        referencia: row.ReferenciaComprobante,
+        url: row.UrlComprobante,
+        estado: row.EstadoRevisionComprobante,
+        motivoRevision: row.MotivoRevision,
+        fechaEnvio: row.FechaSolicitudComprobante,
+        fechaRevision: row.FechaRevision,
+      } : null,
+    }));
+
+    const totalPagado = cuotas.filter((c) => esEstadoPago(c.estado, 'Pagado')).reduce((sum, c) => sum + c.monto, 0);
+    const pendientes = cuotas.filter((c) => !esEstadoPago(c.estado, 'Pagado'));
+    res.json({
+      cuotas,
+      resumen: {
+        cantidad: cuotas.length,
+        pagadas: cuotas.filter((c) => esEstadoPago(c.estado, 'Pagado')).length,
+        pendientes: pendientes.length,
+        montoPagado: Number(totalPagado.toFixed(2)),
+        montoPendiente: Number(pendientes.reduce((sum, c) => sum + c.monto, 0).toFixed(2)),
+      },
+    });
+  } catch (error) {
+    console.error('Error en GET /api/alumno/pagos:', error?.name || 'Error');
+    res.status(500).json({ error: 'No se pudieron consultar tus pagos.' });
+  }
+});
+
+// POST /api/alumno/pagos/:idPago/iniciar — devuelve instrucciones; no cobra ni marca Pagado.
+router.post('/pagos/:idPago/iniciar', async (req, res) => {
+  const idPago = idPositivo(req.params.idPago);
+  const idUsuario = idUsuarioSesion(req);
+  const idAcademia = idAcademiaSesion(req);
+  if (!idPago) return res.status(400).json({ error: 'El IdPago no es válido.' });
+  if (!idUsuario || !idAcademia) return res.status(401).json({ error: 'La sesión del alumno no es válida.' });
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT p.IdPago, p.IdCiclo, p.Mes, p.Monto, p.Estado, p.FechaVencimiento,
+              c.Nombre AS Ciclo
+       FROM PagosMensualidad p
+       INNER JOIN Usuario u ON u.IdUsuario = p.IdUsuario
+       INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = u.IdAcademia
+       WHERE p.IdPago = ? AND p.IdUsuario = ? AND u.IdAcademia = ?
+         AND p.EstadoRegistro = 1 AND u.EstadoRegistro = 1
+       LIMIT 1`,
+      [idPago, idUsuario, idAcademia],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'La cuota no existe en tu cuenta.' });
+    const pago = rows[0];
+    if (esEstadoPago(pago.Estado, 'Pagado')) {
+      return res.status(409).json({ error: 'Esta cuota ya está pagada.', estado: 'Pagado' });
+    }
+    const [comprobantes] = await pool.query(
+      `SELECT IdComprobante, EstadoRevision
+       FROM PagoComprobante
+       WHERE IdPago = ? AND IdUsuario = ? AND IdAcademia = ?
+         AND EstadoRegistro = 1 AND EstadoRevision = 'EN_REVISION'
+       ORDER BY IdComprobante DESC LIMIT 1`,
+      [idPago, idUsuario, idAcademia],
+    );
+    // Estos datos de entorno solo pueden usarse para la academia explícitamente configurada.
+    // En una instalación multiacademia, cada academia debe tener su propia configuración; nunca
+    // mostrar la cuenta de una academia a estudiantes de otra.
+    const academiaConfiguradaParaPago = idPositivo(process.env.PAYMENT_ACADEMY_ID);
+    const permiteMostrarDatosBancarios = academiaConfiguradaParaPago === idAcademia;
+    const configuracionPago = {
+      entidad: permiteMostrarDatosBancarios ? (process.env.PAYMENT_BANK_NAME || null) : null,
+      titular: permiteMostrarDatosBancarios ? (process.env.PAYMENT_ACCOUNT_HOLDER || null) : null,
+      cuenta: permiteMostrarDatosBancarios ? (process.env.PAYMENT_ACCOUNT_NUMBER || null) : null,
+      cci: permiteMostrarDatosBancarios ? (process.env.PAYMENT_CCI || null) : null,
+      instrucciones: permiteMostrarDatosBancarios
+        ? (process.env.PAYMENT_INSTRUCTIONS || 'Realiza la transferencia solo a la cuenta oficial de la academia.')
+        : 'Solicita a la administración los datos oficiales de transferencia de tu academia antes de enviar dinero.',
+    };
+    const instruccionesDisponibles = Boolean(permiteMostrarDatosBancarios && configuracionPago.entidad && configuracionPago.titular && (configuracionPago.cuenta || configuracionPago.cci));
+    return res.json({
+      idPago: Number(pago.IdPago),
+      ciclo: pago.Ciclo,
+      concepto: String(pago.Mes || '').trim().toLowerCase() === 'inscripcion' ? 'Inscripción' : 'Mensualidad',
+      periodo: pago.Mes,
+      monto: Number(pago.Monto || 0),
+      estado: pago.Estado || 'Pendiente',
+      fechaVencimiento: pago.FechaVencimiento,
+      modo: 'transferencia_manual',
+      cobroProcesado: false,
+      comprobanteEnRevision: Boolean(comprobantes.length),
+      instruccionesDisponibles,
+      instrucciones: configuracionPago,
+      mensaje: comprobantes.length
+        ? 'Ya existe un comprobante en revisión para esta cuota.'
+        : instruccionesDisponibles
+          ? 'Realiza la transferencia fuera de AcadeSys y luego registra la referencia. La cuota seguirá pendiente hasta la aprobación administrativa.'
+          : 'El sistema no tiene configurados los datos de transferencia. Contacta a la administración; no se realizó ningún cobro.',
+    });
+  } catch (error) {
+    console.error('Error en POST /api/alumno/pagos/:idPago/iniciar:', error?.name || 'Error');
+    res.status(500).json({ error: 'No se pudo iniciar la solicitud de pago.' });
+  }
+});
+
+// POST /api/alumno/pagos/:idPago/comprobante — presenta la referencia para revisión.
+router.post('/pagos/:idPago/comprobante', async (req, res) => {
+  const idPago = idPositivo(req.params.idPago);
+  const idUsuario = idUsuarioSesion(req);
+  const idAcademia = idAcademiaSesion(req);
+  const referencia = normalizarReferenciaPago(req.body?.referencia ?? req.body?.Referencia);
+  const urlResultado = normalizarUrlComprobante(req.body?.urlComprobante ?? req.body?.UrlComprobante);
+
+  if (!idPago) return res.status(400).json({ error: 'El IdPago no es válido.' });
+  if (!idUsuario || !idAcademia) return res.status(401).json({ error: 'La sesión del alumno no es válida.' });
+  if (!referencia) return res.status(400).json({ error: 'La referencia debe tener entre 4 y 120 caracteres válidos.' });
+  if (!urlResultado.valida) return res.status(400).json({ error: 'El comprobante debe ser una ruta local válida de /uploads/comprobantes/.' });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [rows] = await connection.query(
+      `SELECT p.IdPago, p.IdUsuario, p.IdCiclo, p.Estado, p.Monto, u.IdAcademia
+       FROM PagosMensualidad p
+       INNER JOIN Usuario u ON u.IdUsuario = p.IdUsuario
+       INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = u.IdAcademia
+       WHERE p.IdPago = ? AND p.IdUsuario = ? AND u.IdAcademia = ?
+         AND p.EstadoRegistro = 1 AND u.EstadoRegistro = 1
+       LIMIT 1 FOR UPDATE`,
+      [idPago, idUsuario, idAcademia],
+    );
+    if (!rows.length) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'La cuota no existe en tu cuenta.' });
+    }
+    const pago = rows[0];
+    if (esEstadoPago(pago.Estado, 'Pagado')) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'No puedes registrar un comprobante para una cuota ya pagada.' });
+    }
+
+    const [duplicados] = await connection.query(
+      `SELECT IdComprobante FROM PagoComprobante
+       WHERE IdPago = ? AND IdUsuario = ? AND IdAcademia = ? AND Referencia = ? AND EstadoRegistro = 1
+       LIMIT 1 FOR UPDATE`,
+      [idPago, idUsuario, idAcademia, referencia],
+    );
+    if (duplicados.length) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'Esta referencia ya fue registrada para la cuota.' });
+    }
+
+    const [pendientes] = await connection.query(
+      `SELECT IdComprobante FROM PagoComprobante
+       WHERE IdPago = ? AND IdUsuario = ? AND IdAcademia = ?
+         AND EstadoRevision = 'EN_REVISION' AND EstadoRegistro = 1
+       LIMIT 1 FOR UPDATE`,
+      [idPago, idUsuario, idAcademia],
+    );
+    if (pendientes.length) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'Ya existe un comprobante en revisión para esta cuota.' });
+    }
+
+    const [insertado] = await connection.query(
+      `INSERT INTO PagoComprobante
+        (IdPago, IdUsuario, IdAcademia, Referencia, UrlComprobante,
+         EstadoRevision, MotivoRevision, FechaCreacion, EstadoRegistro)
+       VALUES (?, ?, ?, ?, ?, 'EN_REVISION', NULL, NOW(), 1)`,
+      [idPago, idUsuario, idAcademia, referencia, urlResultado.valor],
+    );
+    await auditarAccionPago(connection, {
+      idPago,
+      idComprobante: insertado.insertId,
+      idUsuarioActor: idUsuario,
+      idAcademia,
+      evento: 'COMPROBANTE_ENVIADO',
+      estadoAnterior: pago.Estado,
+      estadoNuevo: pago.Estado,
+      montoAnterior: Number(pago.Monto),
+      montoNuevo: Number(pago.Monto),
+      motivo: 'El alumno presentó una referencia para revisión administrativa.',
+    });
+    await connection.commit();
+    return res.status(201).json({
+      exito: true,
+      idComprobante: insertado.insertId,
+      idPago,
+      estadoComprobante: 'EN_REVISION',
+      estadoPago: pago.Estado || 'Pendiente',
+      mensaje: 'Comprobante recibido. El pago sigue pendiente hasta que la administración lo revise.',
+    });
+  } catch (error) {
+    await rollbackSeguro(connection);
+    console.error('Error en POST /api/alumno/pagos/:idPago/comprobante:', error?.name || 'Error');
+    return res.status(500).json({ error: 'No se pudo registrar el comprobante.' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 router.get('/me', async (req, res) => {
   try {
     const idUsuario = req.usuario?.idUsuario || req.usuario?.id;
@@ -278,5 +550,3 @@ router.get('/me', async (req, res) => {
 });
 
 module.exports = router;
-
-
