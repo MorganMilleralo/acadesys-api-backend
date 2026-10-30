@@ -19,9 +19,8 @@ const UNIVERSIDADES_VALIDAS = new Set([
   'Preuniversitario',
 ]);
 
-const MIN_CAPACIDAD = 1;
-const MAX_CAPACIDAD = 500;
-const MAX_PRECIO = 9999.99;
+const { MIN_CAPACIDAD, MAX_CAPACIDAD, disponibilidadCiclo } = require('../utils/capacidad-ciclo');
+const { MAX_PRECIO, salidaPrecios } = require('../utils/precios-ciclo');
 
 function idAcademiaRegistroPublico() {
   const raw = process.env.PUBLIC_REGISTRATION_ACADEMY_ID;
@@ -138,8 +137,7 @@ function generarPrefijo(nombre, universidad) {
 
 function normalizarSalida(ciclo) {
   const horario = ciclo.Horario || horarioDesdeTurno(ciclo.Turno);
-  // Capacidad real configurada por el administrador (hasta MAX_CAPACIDAD).
-  // Una capacidad 0/null se interpreta como "sin límite definido".
+  // Se conserva el dato histórico; no se habilitan nuevas matrículas hasta revisarlo.
   const capacidad = Number(ciclo.Capacidad || 0);
   const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
 
@@ -154,12 +152,11 @@ function normalizarSalida(ciclo) {
     universidadObjetivo: ciclo.UniversidadObjetivo || universidadDesdeNombre(ciclo.Nombre),
     fechaInicio: ciclo.FechaInicio,
     fechaFin: ciclo.FechaFin,
-    precio: ciclo.Precio === null || ciclo.Precio === undefined || String(ciclo.Precio).trim() === '' ? null : Number(ciclo.Precio),
+    ...salidaPrecios(ciclo),
     capacidad,
     totalAlumnos,
-    vacantesDisponibles: capacidad > 0 ? Math.max(capacidad - totalAlumnos, 0) : null,
+    ...disponibilidadCiclo(ciclo.Capacidad, totalAlumnos),
     totalCursos: Number(ciclo.TotalCursos || 0),
-    disponible: capacidad === 0 || totalAlumnos < capacidad,
     estadoRegistro: Number(ciclo.EstadoRegistro),
   };
 }
@@ -191,6 +188,8 @@ router.get('/publicos', async (req, res) => {
         c.FechaInicio,
         c.FechaFin,
         c.Precio,
+        c.PrecioInscripcion,
+        c.PrecioMensual,
         c.Capacidad,
         c.EstadoRegistro,
         (
@@ -259,6 +258,8 @@ router.get('/publicos/:id/detalle', async (req, res) => {
         c.FechaInicio,
         c.FechaFin,
         c.Precio,
+        c.PrecioInscripcion,
+        c.PrecioMensual,
         c.Capacidad,
         c.EstadoRegistro,
         (

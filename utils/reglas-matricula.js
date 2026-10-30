@@ -1,4 +1,5 @@
 'use strict';
+const { disponibilidadCiclo } = require('./capacidad-ciclo');
 
 /**
  * Reglas puras de matrícula que pueden probarse sin MySQL ni credenciales.
@@ -55,14 +56,7 @@ function obtenerPrecioCiclo(valor) {
 }
 
 function capacidadPermiteMatricula(total, capacidad) {
-  const totalNumerico = Number(total);
-  const capacidadNumerica = capacidad === null || capacidad === undefined || capacidad === ''
-    ? 0
-    : Number(capacidad);
-  if (!Number.isFinite(totalNumerico) || totalNumerico < 0) return false;
-  if (!Number.isFinite(capacidadNumerica) || capacidadNumerica < 0) return false;
-  // Por contrato actual, capacidad 0/null significa que no se configuró un límite.
-  return capacidadNumerica === 0 || totalNumerico < capacidadNumerica;
+  return disponibilidadCiclo(capacidad, total).disponible;
 }
 
 function idPositivoSeguro(valor) {

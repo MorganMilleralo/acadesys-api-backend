@@ -97,11 +97,12 @@ test('notas expone exactamente la escala de la tabla compartida', async t => {
   }
 });
 
-test('el dashboard normaliza el promedio con la MISMA escala que valida notas', async t => {
+test('el dashboard no inventa un promedio semanal aunque la universidad tenga escala', async t => {
   const pedir = await servir(t, [['/api/admin', 'dashboard.routes']]);
 
   for (const [universidad, escala] of UNIVERSIDADES) {
     simular((sql) => {
+      if (/AS TieneDocente/.test(sql)) return [[]];
       if (/AS TotalEstudiantes/.test(sql)) return [[{ TotalEstudiantes: 1 }]];
       if (/AS MatriculasActivas/.test(sql)) return [[{ MatriculasActivas: 1 }]];
       if (/AS TotalEvaluaciones/.test(sql)) {
@@ -121,11 +122,10 @@ test('el dashboard normaliza el promedio con la MISMA escala que valida notas', 
       throw new Error('Fixture dashboard: ' + sql);
     });
 
-    const r = await pedir('GET', '/api/admin/dashboard/overview');
+    const r = await pedir('GET', '/api/admin/dashboard/overview?idCiclo=1&periodo=Semana1');
     assert.equal(r.status, 200);
-    // normalizarPromedio(escala, universidad) = (escala / escala) * 20 = 20.
-    // Si el dashboard usara otra escala, este valor no seria 20.
-    assert.equal(r.body.rendimientoPorCiclo[0].promedio, 20, 'dashboard / ' + universidad);
+    assert.deepEqual(r.body.rendimientoPorCiclo, [], 'dashboard / ' + universidad);
+    assert.equal(r.body.rendimientoEstado.comparable, false);
   }
 });
 
@@ -157,7 +157,7 @@ test('el Tutor IA expone la MISMA escala que notas y dashboard', async t => {
   }
 });
 
-test('notas, dashboard y Tutor IA coinciden para la misma universidad', async t => {
+test('notas y Tutor IA conservan su escala; dashboard exige identificación semanal verificada', async t => {
   const pedirNotas = await servir(t, [['/api/notas', 'notas.routes']]);
   const pedirDashboard = await servir(t, [['/api/admin', 'dashboard.routes']]);
   const pedirIa = await servir(t, [['/api', 'ia.routes']], alumno);
@@ -169,6 +169,7 @@ test('notas, dashboard y Tutor IA coinciden para la misma universidad', async t 
 
     // dashboard
     simular((sql) => {
+      if (/AS TieneDocente/.test(sql)) return [[]];
       if (/AS TotalEstudiantes/.test(sql)) return [[{ TotalEstudiantes: 1 }]];
       if (/AS MatriculasActivas/.test(sql)) return [[{ MatriculasActivas: 1 }]];
       if (/AS TotalEvaluaciones/.test(sql)) {
@@ -187,7 +188,7 @@ test('notas, dashboard y Tutor IA coinciden para la misma universidad', async t 
       }
       throw new Error('Fixture dashboard: ' + sql);
     });
-    const dashboard = await pedirDashboard('GET', '/api/admin/dashboard/overview');
+    const dashboard = await pedirDashboard('GET', '/api/admin/dashboard/overview?idCiclo=1&periodo=Semana1');
 
     // tutor ia
     simular((sql) => {
@@ -215,11 +216,10 @@ test('notas, dashboard y Tutor IA coinciden para la misma universidad', async t 
 
     assert.equal(notas.body.escalaMaxima, escala, 'notas / ' + universidad);
     assert.equal(ia.body.contexto.escalaMaxima, escala, 'tutor ia / ' + universidad);
-    // El dashboard normaliza siempre a base 20: con la escala correcta, un
-    // promedio igual a la escala maxima se convierte en 20.
-    assert.equal(dashboard.body.rendimientoPorCiclo[0].promedio, 20, 'dashboard / ' + universidad);
+    assert.deepEqual(dashboard.body.rendimientoPorCiclo, [], 'dashboard / ' + universidad);
+    assert.equal(dashboard.body.rendimientoEstado.comparable, false);
 
-    // Y las tres rutas comparten la MISMA funcion de escala.
+    // No se cambian escalas de los módulos de otros responsables.
     assert.equal(
       notas.body.escalaMaxima,
       ia.body.contexto.escalaMaxima,

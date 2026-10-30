@@ -3,6 +3,8 @@ const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
 const { esAdministrativo } = requiereRol;
 const { rollbackSeguro, idPositivo } = require('../utils/validaciones');
+const { consultarCobertura } = require('../utils/cobertura-docente');
+const { conflictoAsignacion, conflictoHorario } = require('../utils/conflictos-docentes');
 
 const router = express.Router();
 const ROLES_GESTION = ['Administrador', 'Docente', 'Tutor de Aula'];
@@ -318,6 +320,21 @@ router.get('/asignaciones', requiereRol(...ROLES_GESTION), async (req, res) => {
   }
 });
 
+router.get('/ciclos/:id/cobertura', requiereRol('Administrador'), async (req, res) => {
+  const idAcademia = academiaDelUsuario(req, res);
+  if (!idAcademia) return;
+  const idCiclo = idPositivo(req.params.id);
+  if (!idCiclo) return res.status(400).json({ error: 'El ciclo no es válido.' });
+  try {
+    const [[ciclo]] = await pool.query('SELECT IdCiclo FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ?', [idCiclo, idAcademia]);
+    if (!ciclo) return res.status(404).json({ error: 'Ciclo no encontrado.' });
+    res.json({ idCiclo, ...await consultarCobertura(pool, idAcademia, idCiclo) });
+  } catch (error) {
+    console.error('GET cobertura:', error);
+    res.status(500).json({ error: 'No se pudo consultar la cobertura docente.' });
+  }
+});
+
 router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
   const idAcademia = academiaDelUsuario(req, res);
   if (!idAcademia) return;
@@ -338,6 +355,7 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
   try {
     connection = await pool.getConnection();
     await connection.beginTransaction();
+    await connection.query('SELECT IdAcademia FROM Academia WHERE IdAcademia = ? FOR UPDATE', [idAcademia]);
     const [[docente]] = await connection.query(
       `SELECT u.IdUsuario
        FROM Usuario u
@@ -371,6 +389,11 @@ router.post('/asignaciones', requiereRol('Administrador'), async (req, res) => {
     if (!cicloCurso) {
       await connection.rollback();
       return res.status(400).json({ error: 'El curso seleccionado no pertenece al ciclo indicado.' });
+    }
+
+    if (await conflictoAsignacion(connection, idAcademia, idUsuario, idCiclo, idCurso, idAulaSolicitada)) {
+      await connection.rollback();
+      return res.status(409).json({ code: 'CONFLICTO_HORARIO_ASIGNACION', error: 'El docente o el aula ya tiene una clase en ese horario.' });
     }
 
     // Aula interna de compatibilidad. En pantalla la organización es por ciclo,
@@ -546,6 +569,10 @@ async function guardarHorario(req, res, editar = false) {
     if (solapados.length) {
       await connection.rollback();
       return res.status(409).json({ error: 'El horario se solapa con otro del mismo ciclo y día.' });
+    }
+    if (await conflictoHorario(connection, idAcademia, idCiclo, idCurso, idHorario, diaNumero, inicio, fin)) {
+      await connection.rollback();
+      return res.status(409).json({ code: 'CONFLICTO_HORARIO_ASIGNACION', error: 'Un docente o aula del curso ya tiene una clase en ese horario.' });
     }
     let result;
     if (editar) {

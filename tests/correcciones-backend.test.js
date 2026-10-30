@@ -431,6 +431,7 @@ const horario = {
 };
 function fixtureHorario({ vinculado = true, solapado = false } = {}) {
   ejecutar = async (sql, p) => {
+    if (/AS ConflictoDocente/.test(sql)) return [[]];
     if (/FROM Academia/.test(sql)) return [[{ IdAcademia: 1 }]];
     if (/FROM Ciclo WHERE/.test(sql)) return [[{ IdCiclo: 1 }]];
     if (/FROM Curso cu INNER JOIN CicloCurso/.test(sql))
@@ -683,8 +684,9 @@ test("intranet conserva nota cerrada/cero, ranking y datos reales del curso/doce
   }, "Alumno");
 });
 
-test("overview contabiliza evaluaciones cerradas y su promedio", async () => {
+test("overview conserva evaluaciones cerradas sin calcular promedio institucional", async () => {
   ejecutar = async (sql) => {
+    if (/AS TieneDocente/.test(sql)) return [[]];
     if (/AS TotalEstudiantes/.test(sql)) return [[{ TotalEstudiantes: 1 }]];
     if (/AS MatriculasActivas/.test(sql)) return [[{ MatriculasActivas: 1 }]];
     if (/AS TotalEvaluaciones/.test(sql)) {
@@ -725,7 +727,8 @@ test("overview contabiliza evaluaciones cerradas y su promedio", async () => {
     const r = await pedir("/api/admin/dashboard/overview");
     assert.equal(r.status, 200);
     assert.equal(r.body.ciclos[0].totalEvaluaciones, 1);
-    assert.equal(r.body.resumen.promedioInstitucional, 12);
+    assert.equal(r.body.resumen.promedioInstitucional, null);
+    assert.deepEqual(r.body.rendimientoPorCiclo, []);
   });
 });
 
@@ -1049,6 +1052,53 @@ test("checkout público verifica el correo antes de crear cuenta, matrícula o p
     assert.equal(tx.commit, 1);
   }, null);
   assert.equal(montoPersistido, 250);
+});
+
+test('AC-05 dos confirmaciones concurrentes compiten por la última vacante (locks simulados)', async t => {
+  const { crearTokenVerificacionMatricula } = require('../utils/token-verificacion-matricula');
+  const originalFetch = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', async (url, ...args) => {
+    if (String(url) === 'https://correo-qa.invalid/endpoint') return new Response(JSON.stringify({ status: 'success' }));
+    return originalFetch(url, ...args);
+  });
+  let cola = Promise.resolve();
+  let matriculas = 0;
+  let pagos = 0;
+  ejecutar = async (sql, p, connection) => {
+    if (/FROM Academia/.test(sql)) {
+      const anterior = cola;
+      cola = new Promise(resolve => { connection.desbloquear = resolve; });
+      await anterior;
+      return [[{ IdAcademia: 1 }]];
+    }
+    if (/FROM Ciclo c/.test(sql)) {
+      assert.match(sql, /FOR UPDATE/);
+      return [[{ IdCiclo: 1, IdAcademia: 1, Nombre: 'Ciclo prueba', EstadoRegistro: 1,
+        FechaFin: '2099-12-31', Capacidad: 1, PrecioInscripcion: 250 }]];
+    }
+    if (/FROM Matricula m/.test(sql) && /FOR UPDATE/.test(sql)) return [matriculas ? [{ IdMatricula: 7 }] : []];
+    if (/FROM Usuario/.test(sql)) return [[]];
+    if (/FROM perfil/.test(sql)) return [[{ IdPerfil: 4 }]];
+    if (/INSERT INTO Usuario_Perfiles/.test(sql)) return [{ affectedRows: 1 }];
+    if (/INSERT INTO Usuario/.test(sql)) return [{ insertId: 20 }];
+    if (/INSERT INTO Matricula/.test(sql)) { matriculas++; return [{ insertId: 7 }]; }
+    if (/FROM PagosMensualidad/.test(sql)) return [[]];
+    if (/INSERT INTO PagosMensualidad/.test(sql)) { pagos++; assert.equal(p[2], 250); return [{ insertId: 5 }]; }
+    if (/INSERT INTO PagoAuditoria/.test(sql)) return [{ insertId: 1 }];
+    if (/COUNT\(\*\) AS TotalAlumnos/.test(sql)) return [[{ TotalAlumnos: matriculas }]];
+    throw new Error('Fixture última vacante: ' + sql);
+  };
+  await conServidor(async pedir => {
+    const resultados = await Promise.all(['ana', 'juan'].map(nombre => pedir('/api/matriculas/confirmar-correo-matricula', 'POST', {
+      token: crearTokenVerificacionMatricula({ nombres: nombre, apellidos: 'Prueba', correo: nombre + '@example.test', idCiclo: 1 }),
+    })));
+    assert.deepEqual(resultados.map(r => r.status).sort(), [201, 409]);
+    assert.match(resultados.find(r => r.status === 409).body.error, /capacidad/);
+    assert.equal(matriculas, 1);
+    assert.equal(pagos, 1);
+    assert.equal(tx.commit, 1);
+    assert.equal(tx.rollback, 1);
+  }, null);
 });
 
 test(

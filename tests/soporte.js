@@ -37,7 +37,10 @@ async function servir(t, rutas, identidad = { id: 10, idAcademia: 1, rol: 'Admin
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => { req.usuario = identidad; next(); });
-  for (const [prefijo, archivo] of rutas) app.use(prefijo, require('../routes/' + archivo));
+  for (const [prefijo, archivo] of rutas) {
+    const modulo = require('../routes/' + archivo);
+    app.use(prefijo, modulo.router || modulo);
+  }
   const server = await new Promise(resolve => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });

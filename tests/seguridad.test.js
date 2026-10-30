@@ -616,6 +616,7 @@ test("CRUD de horarios conserva el validador requerido por los nuevos endpoints"
       rows: [{ IdCurso: 3 }],
     },
     { sql: /SELECT IdHorario FROM HorarioCurso/, rows: [] },
+    { sql: /AS ConflictoDocente/, rows: [] },
     {
       sql: /INSERT INTO HorarioCurso/,
       params: [7, 3, 1, "Lunes", "08:00:00", "10:00:00", 1],
@@ -626,6 +627,7 @@ test("CRUD de horarios conserva el validador requerido por los nuevos endpoints"
     { sql: /FROM Curso cu INNER JOIN CicloCurso/, rows: [{ IdCurso: 3 }] },
     { sql: /SELECT h.IdHorario FROM HorarioCurso/, rows: [{ IdHorario: 5 }] },
     { sql: /SELECT IdHorario FROM HorarioCurso/, rows: [] },
+    { sql: /AS ConflictoDocente/, rows: [] },
     {
       sql: /UPDATE HorarioCurso.*WHERE IdHorario = \?/,
       params: [7, 3, 1, "Lunes", "08:00:00", "10:00:00", 1, 5],
