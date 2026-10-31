@@ -1,0 +1,117 @@
+﻿{
+    "fecha":  "2026-10-31",
+    "fuente":  "https://acadesys-api.onrender.com/api/ciclos/publicos",
+    "alcance":  "Catalogo publico; no acredita precios canonicos almacenados, ciclos ocultos, DDL ni version desplegada",
+    "ciclos":  [
+                   {
+                       "IdCiclo":  1,
+                       "IdAcademia":  1,
+                       "Nombre":  "Semestral San Marcos",
+                       "UniversidadObjetivo":  "UNMSM",
+                       "PrecioPublicado":  350,
+                       "Capacidad":  100,
+                       "IncluyePrecioInscripcion":  false,
+                       "IncluyePrecioMensual":  false
+                   },
+                   {
+                       "IdCiclo":  13,
+                       "IdAcademia":  1,
+                       "Nombre":  "Ciclo Semestral UNFV 2026",
+                       "UniversidadObjetivo":  "UNFV",
+                       "PrecioPublicado":  0,
+                       "Capacidad":  250,
+                       "IncluyePrecioInscripcion":  false,
+                       "IncluyePrecioMensual":  false
+                   },
+                   {
+                       "IdCiclo":  6,
+                       "IdAcademia":  1,
+                       "Nombre":  "Semestral Callao (UNAC)",
+                       "UniversidadObjetivo":  "UNAC",
+                       "PrecioPublicado":  450,
+                       "Capacidad":  0,
+                       "IncluyePrecioInscripcion":  false,
+                       "IncluyePrecioMensual":  false
+                   },
+                   {
+                       "IdCiclo":  2,
+                       "IdAcademia":  1,
+                       "Nombre":  "Repaso UNI",
+                       "UniversidadObjetivo":  "UNI",
+                       "PrecioPublicado":  400,
+                       "Capacidad":  0,
+                       "IncluyePrecioInscripcion":  false,
+                       "IncluyePrecioMensual":  false
+                   },
+                   {
+                       "IdCiclo":  10,
+                       "IdAcademia":  1,
+                       "Nombre":  "Repaso San Marcos",
+                       "UniversidadObjetivo":  "UNMSM",
+                       "PrecioPublicado":  1,
+                       "Capacidad":  0,
+                       "IncluyePrecioInscripcion":  false,
+                       "IncluyePrecioMensual":  false
+                   },
+                   {
+                       "IdCiclo":  11,
+                       "IdAcademia":  1,
+                       "Nombre":  "Anual UNI",
+                       "UniversidadObjetivo":  "UNI",
+                       "PrecioPublicado":  1,
+                       "Capacidad":  0,
+                       "IncluyePrecioInscripcion":  false,
+                       "IncluyePrecioMensual":  false
+                   },
+                   {
+                       "IdCiclo":  14,
+                       "IdAcademia":  1,
+                       "Nombre":  "Ciclo UNFV 2026",
+                       "UniversidadObjetivo":  "UNFV",
+                       "PrecioPublicado":  1000,
+                       "Capacidad":  100,
+                       "IncluyePrecioInscripcion":  false,
+                       "IncluyePrecioMensual":  false
+                   },
+                   {
+                       "IdCiclo":  15,
+                       "IdAcademia":  1,
+                       "Nombre":  "Ciclo UNMSM 2026",
+                       "UniversidadObjetivo":  "UNMSM",
+                       "PrecioPublicado":  100,
+                       "Capacidad":  250,
+                       "IncluyePrecioInscripcion":  false,
+                       "IncluyePrecioMensual":  false
+                   },
+                   {
+                       "IdCiclo":  5,
+                       "IdAcademia":  1,
+                       "Nombre":  "Anual Católica (PUCP)",
+                       "UniversidadObjetivo":  "PUCP",
+                       "PrecioPublicado":  800,
+                       "Capacidad":  0,
+                       "IncluyePrecioInscripcion":  false,
+                       "IncluyePrecioMensual":  false
+                   },
+                   {
+                       "IdCiclo":  12,
+                       "IdAcademia":  1,
+                       "Nombre":  "Veranito San Marcos (II)",
+                       "UniversidadObjetivo":  "UNMSM",
+                       "PrecioPublicado":  1050,
+                       "Capacidad":  80,
+                       "IncluyePrecioInscripcion":  false,
+                       "IncluyePrecioMensual":  false
+                   },
+                   {
+                       "IdCiclo":  3,
+                       "IdAcademia":  1,
+                       "Nombre":  "Veranito San Marcos",
+                       "UniversidadObjetivo":  "UNMSM",
+                       "PrecioPublicado":  300,
+                       "Capacidad":  0,
+                       "IncluyePrecioInscripcion":  false,
+                       "IncluyePrecioMensual":  false
+                   }
+               ]
+}

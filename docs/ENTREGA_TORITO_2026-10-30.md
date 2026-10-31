@@ -1,6 +1,8 @@
 ﻿# Entrega local de Torito — 30/10/2026
 
-Informe vigente de las cinco responsabilidades de la sección 5.2. Sustituye los estados anteriores de esquema desconocido y capacidad propuesta. Rama `david/torito-ciclos-oferta`, base integrada `6944740`. Tras `git fetch origin`, no hay commits nuevos de `origin/main` por integrar. La referencia local `main` sigue en `2e24822`; esto no acredita qué versión está desplegada.
+**Actualización del 31/10:** ver [cierre e integración final](CIERRE_TORITO_2026-10-31.md), que registra las tarifas ya aprobadas, la evidencia pública por ID, 217 pruebas y el bloqueo de publicación confirmado por el usuario. El contenido siguiente conserva la entrega del 30/10 y sus contratos; los pendientes comerciales y la autorización de publicación deben interpretarse según la actualización.
+
+Informe de las cinco responsabilidades de la sección 5.2 al 30/10. Sustituye los estados anteriores de esquema desconocido y capacidad propuesta. Rama `david/torito-ciclos-oferta`, base integrada `6944740`. Tras `git fetch origin`, no hay commits nuevos de `origin/main` por integrar. La referencia local `main` sigue en `2e24822`; esto no acredita qué versión está desplegada.
 
 El mensaje más reciente y su archivo adjunto autorizan completar backend y generar un commit **local** después de validar. No autorizan push, despliegue, frontend ni escrituras en Aiven. La aprobación técnica del usuario no sustituye la aprobación formal del Product Backlog por Morgan.
 

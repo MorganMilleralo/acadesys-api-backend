@@ -6,6 +6,15 @@ Se contrastó con el Plan Integral v1.0 del 26/10 y el código `6944740`.
 Los enlaces siguientes proceden del DOCX; **no se consultó ni cambió el tablero
 en vivo**. DONE es un estado histórico del documento, no una certificación de QA.
 
+Actualización del 31/10: el usuario confirma delegación de Morgan y tarifas
+exactas por universidad/modalidad e IdCiclo. Ya no falta definir esos importes.
+Se preparó SQL protegido para los diez IDs propuestos: nueve identidades
+contrastadas con el catálogo público, Id 4 sin identidad comprobada y excluido
+hasta revisión. Ids 14/15 siguen sin modalidad. Ver [cierre vigente](CIERRE_TORITO_2026-10-31.md).
+El usuario confirmó que no hay evidencia actual de Auto-Deploy ni integración
+React/MySQL; publicación condicionada y no realizada. Aprobación de tarifas no
+equivale a aceptación de historias ni autorización para escribir Aiven.
+
 Los criterios se identifican por su orden en cada ficha; no se inventan nuevos
 IDs de aceptación ni se interpretan términos generales como aprobación de una
 regla numérica, esquema o proceso financiero concreto.
@@ -39,8 +48,9 @@ regularizaciones sobre datos reales.
 2. **Dos precios por concepto.** Ampliar HU-09/HU-20 (o crear historia separada)
    con nombres, tipos, cero/null, conservación de importes emitidos y compatibilidad
    de `Precio`. DDL confirmado por usuario el 30/10: ambos campos existen como
-   DECIMAL(8,2) NULL. Backend completado; importes exactos por ciclo y aceptación
-   formal del contrato de alias/NULL siguen pendientes.
+   DECIMAL(8,2) NULL. Backend completado e importes propuestos aprobados el 31/10;
+   falta aplicación controlada tras validar identidad (en particular Id 4), QA
+   de checkout y aceptación formal del contrato de alias/NULL.
 3. **Cuotas, comprobantes y reparación histórica.** Precisar nuevas historias o
    criterios financieros. HU-03 aún describe una matrícula condicionada a éxito
    de simulación, mientras el contrato reciente de Morgan registra inscripción
@@ -76,7 +86,9 @@ ni el contrato de cierres.
   importes es una decisión de negocio pendiente, no una consecuencia de HU-20.
 - Precios: CRUD/catálogo completados contra columnas confirmadas; conservan
   Precio histórico, importes emitidos y respaldo de inscripción de Morgan.
-  Mensualidad NULL no hereda Precio. La propuesta comercial por IdCiclo depende
-  del inventario real y aprobación de importes; no se activaron estimaciones.
+  Mensualidad NULL no hereda Precio. La propuesta comercial por IdCiclo ya tiene
+  importes aprobados y SQL preparado; no se aplicó sobre datos. El catálogo
+  público no expone los precios nuevos, por lo que faltan exportación/QA de
+  valores canónicos y validación de Id 4. No se activaron estimaciones.
 - Los contratos nuevos de respuesta y ruta siguen sujetos a revisión con el equipo;
   no se publicó ni integró nada en main.

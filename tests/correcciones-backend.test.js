@@ -1054,6 +1054,34 @@ test("checkout público verifica el correo antes de crear cuenta, matrícula o p
   assert.equal(montoPersistido, 250);
 });
 
+test('checkout sin inscripción ni precio legado rechaza solicitud y confirmación sin crear pagos', async () => {
+  const { crearTokenVerificacionMatricula } = require('../utils/token-verificacion-matricula');
+  ejecutar = async sql => {
+    if (/FROM Academia/.test(sql)) return [[{ IdAcademia: 1 }]];
+    if (/FROM Ciclo c/.test(sql)) return [[{ IdCiclo: 1, IdAcademia: 1,
+      Nombre: 'Ciclo prueba', EstadoRegistro: 1, FechaFin: '2099-12-31',
+      Capacidad: 100, TotalAlumnos: 0, Precio: null, PrecioInscripcion: null, PrecioMensual: null }]];
+    if (/FROM Matricula m/.test(sql) && /FOR UPDATE/.test(sql)) return [[]];
+    throw new Error('No debe consultar usuarios ni escribir sin precio: ' + sql);
+  };
+  await conServidor(async pedir => {
+    const datos = { nombres: 'Ana', apellidos: 'Prueba', correo: 'ana@example.test', idCiclo: 1 };
+    const solicitud = await pedir('/api/matriculas/checkout', 'POST', { ...datos, monto: 200 });
+    assert.equal(solicitud.status, 409);
+    assert.equal(solicitud.body.code, 'CICLO_PRECIO_NO_CONFIGURADO');
+    assert.equal(tx.begin, 0);
+    const confirmacion = await pedir('/api/matriculas/confirmar-correo-matricula', 'POST', {
+      token: crearTokenVerificacionMatricula(datos),
+    });
+    assert.equal(confirmacion.status, 409);
+    assert.equal(confirmacion.body.code, 'CICLO_PRECIO_NO_CONFIGURADO');
+    assert.equal(confirmacion.body.pago, undefined);
+    assert.equal(tx.commit, 0);
+    assert.equal(tx.rollback, 1);
+    assert.ok(!consultas.some(({ sql }) => /^\s*(INSERT|UPDATE|DELETE)\b/.test(sql)));
+  }, null);
+});
+
 test('AC-05 dos confirmaciones concurrentes compiten por la última vacante (locks simulados)', async t => {
   const { crearTokenVerificacionMatricula } = require('../utils/token-verificacion-matricula');
   const originalFetch = globalThis.fetch;
@@ -1373,10 +1401,11 @@ test('administración aprueba comprobante y confirma el mismo registro de pago',
 test('generar mensualidades usa precio mensual del ciclo y no duplica periodo', async () => {
   const pagos = new Set();
   let inserts = 0;
+  let tarifaMensual = '300.00';
   ejecutar = async (sql, p) => {
     if (/SELECT IdCiclo, IdAcademia, Nombre, PrecioMensual/.test(sql)) {
       assert.deepEqual(p, [2, 1]);
-      return [[{ IdCiclo: 2, IdAcademia: 1, Nombre: 'Semestral San Marcos', PrecioMensual: '300.00' }]];
+      return [[{ IdCiclo: 2, IdAcademia: 1, Nombre: 'Semestral San Marcos', PrecioMensual: tarifaMensual }]];
     }
     if (/FROM Matricula m/.test(sql) && /FOR UPDATE/.test(sql)) {
       assert.deepEqual(p, [2, 1]);
@@ -1404,10 +1433,13 @@ test('generar mensualidades usa precio mensual del ciclo y no duplica periodo', 
     assert.equal(primera.status, 201);
     assert.equal(primera.body.cuotasCreadas, 2);
     assert.equal(primera.body.cuotasYaExistentes, 0);
+    // Cambiar la tarifa del ciclo no debe actualizar cuotas emitidas a 300.
+    tarifaMensual = '500.00';
     const segunda = await pedir('/api/pagos/ciclo/2/mensualidades', 'POST', body);
     assert.equal(segunda.status, 201);
     assert.equal(segunda.body.cuotasCreadas, 0);
     assert.equal(segunda.body.cuotasYaExistentes, 2);
+    assert.ok(!consultas.some(({ sql }) => /UPDATE\s+PagosMensualidad/.test(sql)));
   }, 'Administrador');
   assert.equal(inserts, 2);
 });
