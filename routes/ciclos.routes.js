@@ -137,7 +137,7 @@ function generarPrefijo(nombre, universidad) {
 
 function normalizarSalida(ciclo) {
   const horario = ciclo.Horario || horarioDesdeTurno(ciclo.Turno);
-  // Se conserva el dato histórico; no se habilitan nuevas matrículas hasta revisarlo.
+  // Se conservan el dato histórico y su disponibilidad; el aviso no cambia su operación.
   const capacidad = Number(ciclo.Capacidad || 0);
   const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
 

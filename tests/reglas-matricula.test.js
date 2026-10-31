@@ -38,14 +38,16 @@ test('precio debe venir configurado y ser finito/no negativo', () => {
   for (const value of [null, undefined, '', 'abc', -1, Infinity, NaN]) assert.equal(obtenerPrecioCiclo(value), null);
 });
 
-test('capacidad inválida no permite nuevas matrículas; el límite impide sobreventa', () => {
-  for (const capacidad of [0, null, undefined, -1, 1.5, 121, 500, '', true, [100], {}]) {
+test('capacidad histórica conserva operación; datos malformados y aforo lleno no admiten matrícula', () => {
+  for (const capacidad of [undefined, -1, 1.5, '', true, [100], {}]) {
     assert.equal(capacidadPermiteMatricula(0, capacidad), false);
   }
   for (const total of [null, '', false, 0.5, -1]) assert.equal(capacidadPermiteMatricula(total, 100), false);
   assert.equal(capacidadPermiteMatricula(49, 50), true);
   assert.equal(capacidadPermiteMatricula(50, 50), false);
   assert.equal(capacidadPermiteMatricula(-1, 50), false);
+  for (const capacidad of [0, null, 121, 250, 500]) assert.equal(capacidadPermiteMatricula(100, capacidad), true);
+  assert.equal(capacidadPermiteMatricula(250, 250), false);
 });
 
 test('la academia pública proviene de la configuración y se valida', () => {

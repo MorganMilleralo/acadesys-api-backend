@@ -166,14 +166,14 @@ test('el detalle devuelve la capacidad real (250), sin recortarla a 100', async 
   });
 });
 
-test('el listado conserva capacidad histórica 250 y exige revisión antes de ofrecer vacantes', async () => {
+test('el listado conserva capacidad histórica 250, sus vacantes y el aviso de revisión', async () => {
   await conServidor(async (base, ruta) => {
     const res = await fetch(`${base}${ruta}`);
     assert.equal(res.status, 200);
     const filas = await res.json();
     const c13 = filas.find((c) => c.IdCiclo === 13);
     assert.equal(c13.Capacidad, 250);
-    assert.equal(c13.VacantesDisponibles, 0);
+    assert.equal(c13.VacantesDisponibles, 249);
     assert.equal(c13.RequiereRevisionCapacidad, true);
     const c1 = filas.find((c) => c.IdCiclo === 1);
     assert.equal(c1.VacantesDisponibles, 94);

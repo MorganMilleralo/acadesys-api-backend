@@ -37,7 +37,7 @@ function validarRangoHorario(horario) {
   return fin > inicio;
 }
 
-const { CAPACIDAD_DEFAULT, capacidadValida, disponibilidadCiclo } = require('../utils/capacidad-ciclo');
+const { CAPACIDAD_DEFAULT, capacidadValida, capacidadHistoricaValida, disponibilidadCiclo } = require('../utils/capacidad-ciclo');
 
 function prepararCiclo(body = {}, existente = null) {
   const nombre = String(body.nombre ?? existente?.Nombre ?? '').trim().replace(/\s+/g, ' ');
@@ -52,7 +52,11 @@ function prepararCiclo(body = {}, existente = null) {
 
   const capacidadRaw = Object.hasOwn(body, 'capacidad') ? body.capacidad
     : existente ? existente.Capacidad : CAPACIDAD_DEFAULT;
-  const capacidadModificada = !existente || Object.hasOwn(body, 'capacidad');
+  const capacidadSinCambio = existente && capacidadHistoricaValida(capacidadRaw)
+    && capacidadHistoricaValida(existente.Capacidad)
+    && (capacidadRaw === null ? existente.Capacidad === null
+      : existente.Capacidad !== null && Number(capacidadRaw) === Number(existente.Capacidad));
+  const capacidadModificada = !existente || (Object.hasOwn(body, 'capacidad') && !capacidadSinCambio);
   const capacidad = capacidadModificada
     ? capacidadValida(capacidadRaw) ? Number(capacidadRaw) : NaN
     : existente.Capacidad;
@@ -230,7 +234,7 @@ router.get('/', async (req, res) => {
 
     res.json(rows.map((c) => ({
       ...c,
-      // Históricos visibles sin recortar; las vacantes operativas exigen capacidad válida.
+      // Históricos visibles y operativos según su aforo anterior, sin recortar inscritos.
       Capacidad: Number(c.Capacidad || 0),
       ...salidaPreciosAdmin(c),
       TotalAlumnos: Number(c.TotalAlumnos || 0),
@@ -599,11 +603,10 @@ router.patch('/:id/estado', async (req, res) => {
       }
 
       const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
-      if (!capacidadValida(ciclo.Capacidad)) {
-        return res.status(409).json({ code: 'CAPACIDAD_REQUIERE_REVISION', error: 'Revisa la capacidad histórica: debe ser un entero entre 1 y 120. No se han cambiado los inscritos.' });
+      if (!capacidadHistoricaValida(ciclo.Capacidad)) {
+        return res.status(409).json({ code: 'CAPACIDAD_REQUIERE_REVISION', error: 'La capacidad histórica no es válida. No se han cambiado los inscritos.' });
       }
-      const capacidad = Number(ciclo.Capacidad);
-      if (totalAlumnos >= capacidad) {
+      if (!disponibilidadCiclo(ciclo.Capacidad, totalAlumnos).disponible) {
         return res.status(409).json({ error: 'No se puede reabrir el ciclo porque su capacidad ya está completa.' });
       }
     }

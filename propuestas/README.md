@@ -1,5 +1,9 @@
 # Evidencia de la propuesta anterior
 
+La instrucción final del usuario del 31/10 conserva la operación de capacidades
+históricas; sustituye el bloqueo descrito más abajo. Ver
+[registro vigente](../docs/PUBLICACION_TORITO_2026-10-31.md).
+
 `CAPACIDAD_120_PENDIENTE_MORGAN.patch` se conserva íntegro para no perder el
 trabajo anterior. **No volver a aplicarlo:** su implementación y cuatro pruebas
 se incorporaron y adaptaron al árbol activo el 30/10/2026 por instrucción expresa

@@ -36,7 +36,7 @@ test('AC-05 edición no reduce por debajo de inscritos ni corrige históricos au
   }
 });
 
-test('AC-05 catálogo conserva históricos y no anuncia disponibilidad ilimitada', async t => {
+test('AC-05 catálogo conserva disponibilidad histórica sin actualizar capacidad', async t => {
   const anterior = process.env.PUBLIC_REGISTRATION_ACADEMY_ID;
   process.env.PUBLIC_REGISTRATION_ACADEMY_ID = '1';
   t.after(() => { if (anterior === undefined) delete process.env.PUBLIC_REGISTRATION_ACADEMY_ID; else process.env.PUBLIC_REGISTRATION_ACADEMY_ID = anterior; });
@@ -47,19 +47,38 @@ test('AC-05 catálogo conserva históricos y no anuncia disponibilidad ilimitada
     assert.equal(r.status, 200);
     const salida = r.body[0];
     assert.equal(salida.capacidad, capacidad ?? 0);
-    assert.equal(salida.disponible, false);
-    assert.equal(salida.vacantesDisponibles, 0);
+    assert.equal(salida.disponible, true);
+    assert.equal(salida.vacantesDisponibles, capacidad === 250 ? 244 : null);
     assert.equal(salida.requiereRevisionCapacidad, true);
   }
   simular(() => [[{ Capacidad: 100, TotalAlumnos: 6 }]]);
   assert.equal((await pedir('GET', '/api/ciclos/publicos')).body[0].vacantesDisponibles, 94);
 });
 
-test('AC-05 reapertura de histórico inválido no cambia estado', async t => {
+test('AC-05 reapertura conserva históricos y rechaza aforo lleno sin cambiar capacidades', async t => {
   const pedir = await servir(t, [['/api/admin/ciclos', 'admin-ciclos.routes']]);
-  simular(() => [[{ IdCiclo: 7, Capacidad: null, TotalAlumnos: 1 }]]);
-  const r = await pedir('PATCH', '/api/admin/ciclos/7/estado', { estado: 'abrir' });
-  assert.equal(r.status, 409);
-  assert.equal(r.body.code, 'CAPACIDAD_REQUIERE_REVISION');
-  assert.ok(!consultas.some(({ q }) => /UPDATE/.test(q)));
+  for (const capacidad of [null, 0, 250]) {
+    simular(() => [[{ IdCiclo: 7, Capacidad: capacidad, TotalAlumnos: 1 }]]);
+    assert.equal((await pedir('PATCH', '/api/admin/ciclos/7/estado', { estado: 'abrir' })).status, 200);
+    assert.ok(consultas.some(({ q }) => /UPDATE Ciclo SET EstadoRegistro/.test(q)));
+    assert.ok(!consultas.some(({ q }) => /SET Capacidad/.test(q)));
+  }
+  simular(() => [[{ IdCiclo: 7, Capacidad: 250, TotalAlumnos: 250 }]]);
+  assert.equal((await pedir('PATCH', '/api/admin/ciclos/7/estado', { estado: 'abrir' })).status, 409);
+  assert.ok(!consultas.some(({ q }) => /^UPDATE/.test(q)));
+});
+
+test('AC-05 editar histórico reenviando su mismo aforo lo conserva; no permite otro aforo fuera de rango', async t => {
+  const pedir = await servir(t, [['/api/admin/ciclos', 'admin-ciclos.routes']]);
+  for (const capacidad of [0, null, 250]) {
+    simular((sql, params) => {
+      if (/FROM Ciclo c/.test(sql)) return [[{ IdCiclo: 7, Nombre: base.nombre,
+        UniversidadObjetivo: 'UNI', Precio: 200, Capacidad: capacidad, TotalAlumnos: 130 }]];
+      if (/UPDATE Ciclo SET/.test(sql)) assert.equal(params[11], capacidad);
+      return [[]];
+    });
+    assert.equal((await pedir('PUT', '/api/admin/ciclos/7', { capacidad })).status, 200);
+    assert.deepEqual(eventos, ['begin', 'commit', 'release']);
+    assert.equal((await pedir('PUT', '/api/admin/ciclos/7', { capacidad: 300 })).status, 400);
+  }
 });

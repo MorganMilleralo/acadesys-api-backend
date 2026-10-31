@@ -1,5 +1,11 @@
 # Cierre e integración de Torito — 31/10/2026
 
+**Actualización posterior de la misma fecha:** el usuario confirmó tarifas en
+DBeaver y autorizó el posible despliegue automático del push. También pidió
+conservar la operación histórica de capacidad. Ver
+[registro de publicación](PUBLICACION_TORITO_2026-10-31.md). El bloqueo y la
+política de históricos descritos a continuación son el estado anterior.
+
 Estado: **backend preparado para revisión e integración; publicación bloqueada**.
 Se conserva íntegramente el commit `d16a183` en `david/torito-ciclos-oferta`.
 La autorización más reciente solicita publicar en main solo cuando estén

@@ -1,5 +1,13 @@
 # Trazabilidad de las cinco tareas de Torito
 
+**Instrucción final del 31/10:** el usuario confirmó las tarifas en DBeaver y
+autorizó publicar en main, incluido el posible Auto-Deploy. La capacidad 1–120
+se exige para altas y cambios; los registros históricos conservan su operación
+anterior (0/NULL sin límite configurado, >120 con su aforo), sin actualizarlos.
+Esto sustituye la propuesta anterior de bloquearlos. El aviso de revisión sigue
+siendo diagnóstico. Ver [registro vigente](PUBLICACION_TORITO_2026-10-31.md).
+La aceptación formal de criterios por el PO no se infiere de las pruebas.
+
 Fuente leída: `Product_Backlog_AcadeSys_Formato_Academico_Equipo9.docx`,
 en Descargas del usuario. Inventario documental de 20 HU, consolidado al 21/10/2026.
 Se contrastó con el Plan Integral v1.0 del 26/10 y el código `6944740`.
