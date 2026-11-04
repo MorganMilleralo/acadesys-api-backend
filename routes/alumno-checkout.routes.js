@@ -29,6 +29,7 @@ router.post('/pagos/:idPago/checkout', async (req, res) => {
 
   let reserva;
   try {
+    pasarela.verificarConfiguracion();
     reserva = await reservarCheckoutAlumno({ idPago, idUsuario, idAcademia });
     if (reserva.reutilizada && reserva.checkoutUrl) {
       return res.status(200).json({

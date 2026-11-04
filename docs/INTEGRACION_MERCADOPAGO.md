@@ -1,5 +1,11 @@
 # Integración de Mercado Pago — entrega local, 2026-11-03
 
+La revisión posterior para publicar el código sin habilitar cobros está en
+[VERIFICACION_PUBLICACION_MERCADOPAGO.md](VERIFICACION_PUBLICACION_MERCADOPAGO.md).
+Ese informe registra la comprobación previa de credenciales, las 318 pruebas
+finales y la condición pendiente de Auto-Deploy. Los resultados y condiciones
+de esta entrega original describen el commit `747e758`.
+
 Implementación preparada para QA con simulaciones. No se hicieron cobros, conexiones
 a Aiven, migraciones, push ni despliegues. La validación oficial de cuenta y pagos
 sigue pendiente de credenciales y un entorno de QA independiente.

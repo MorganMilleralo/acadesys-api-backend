@@ -15,6 +15,12 @@ function configuracion() {
     sellerId: env.MERCADOPAGO_SELLER_ID, modo };
 }
 
+// Preflight local: también bloquea reutilizar URLs guardadas al deshabilitar
+// la pasarela. No consulta al proveedor ni necesita las tablas de pagos.
+function verificarConfiguracion() {
+  configuracion();
+}
+
 function cliente(config) {
   // Sin reintentos automáticos. El límite integral se aplica en llamadaProveedor.
   return new MercadoPagoConfig({ accessToken: config.accessToken,
@@ -177,4 +183,4 @@ async function consultarPagoVerificado(id) {
     estado: estados[pago.status], fechaActualizacionProveedor: fecha };
 }
 
-module.exports = { crearOrdenPago, validarNotificacion, consultarPagoVerificado };
+module.exports = { verificarConfiguracion, crearOrdenPago, validarNotificacion, consultarPagoVerificado };

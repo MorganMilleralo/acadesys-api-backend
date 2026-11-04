@@ -54,12 +54,41 @@ test('MP cuota ajena, pagada y ausencia de sesión no crean transacciones', asyn
   assert.equal(db.state.transacciones.length, 0); assert.equal(mp.llamadas.length, 0);
 });
 
-test('MP configuración ausente retorna 503 y libera solo la reserva sin orden', async t => {
+test('MP configuración ausente retorna 503 sin reservar ni modificar la cuota', async t => {
   const { db, mp, http } = await preparar(t, false); delete process.env.MERCADOPAGO_ACCESS_TOKEN;
   const r = await http('POST', checkout, { headers: sesion });
   assert.equal(r.status, 503); assert.equal(r.body.code, 'PASARELA_NO_CONFIGURADA');
-  assert.equal(db.state.transacciones[0].Estado, 'ERROR'); assert.equal(db.state.cuota.Estado, 'Pendiente');
+  assert.equal(db.state.transacciones.length, 0); assert.equal(db.state.cuota.Estado, 'Pendiente');
+  assert.equal(db.queries.length, 0);
   assert.equal(mp.llamadas.length, 0);
+});
+
+test('MP sin credenciales no devuelve un checkout existente ni toca la BD', async t => {
+  const { db, mp, http } = await preparar(t);
+  const inicial = structuredClone(db.state);
+  for (const nombre of ['MERCADOPAGO_ACCESS_TOKEN', 'MERCADOPAGO_WEBHOOK_SECRET', 'MERCADOPAGO_SELLER_ID']) {
+    const anterior = process.env[nombre]; delete process.env[nombre];
+    const r = await http('POST', checkout, { headers: sesion });
+    assert.equal(r.status, 503); assert.equal(r.body.code, 'PASARELA_NO_CONFIGURADA');
+    assert.equal(r.body.checkoutUrl, undefined);
+    process.env[nombre] = anterior;
+  }
+  assert.deepEqual(db.state, inicial);
+  assert.equal(db.queries.length, 0); assert.equal(mp.llamadas.length, 0);
+  const disponible = await http('POST', checkout, { headers: sesion });
+  assert.equal(disponible.status, 200); assert.equal(disponible.body.reutilizada, true);
+  assert.equal(disponible.body.checkoutUrl, inicial.transacciones[0].UrlCheckout);
+  assert.deepEqual(db.state, inicial); assert.equal(mp.llamadas.length, 0);
+});
+
+test('MP deshabilitado no depende de consultar el esquema de pagos', async t => {
+  const { db, mp, http } = await preparar(t, false);
+  for (const nombre of ['MERCADOPAGO_ACCESS_TOKEN', 'MERCADOPAGO_WEBHOOK_SECRET', 'MERCADOPAGO_SELLER_ID']) delete process.env[nombre];
+  db.fault = () => { throw new Error('La tabla de pagos no está disponible en esta simulación'); };
+  const r = await http('POST', checkout, { headers: sesion });
+  assert.equal(r.status, 503); assert.equal(r.body.code, 'PASARELA_NO_CONFIGURADA');
+  assert.equal(db.state.cuota.Estado, 'Pendiente'); assert.equal(db.state.transacciones.length, 0);
+  assert.equal(db.queries.length, 0); assert.equal(mp.llamadas.length, 0);
 });
 
 test('MP error ambiguo mantiene CREANDO y bloquea un segundo POST al proveedor', async t => {
