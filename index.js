@@ -30,7 +30,6 @@ if (faltantes.length > 0) {
   console.error(
     `❌ Faltan variables de entorno obligatorias: ${faltantes.join(", ")}`,
   );
-
   process.exit(1);
 }
 
@@ -46,30 +45,17 @@ if (String(process.env.JWT_SECRET || "").length < 32) {
 // ============================================================
 
 // Whitelist CORS explícita y centralizada (ver config/cors.js).
-// Incluye el frontend local (5173/5174), el frontend de producción y los
-// orígenes extra de la variable de entorno CORS_ORIGINS. Nunca usa "*".
 app.set("trust proxy", 1);
 
 const { corsOptions } = require("./config/cors");
-
 app.use(cors(corsOptions));
-
-app.use(
-  express.json({
-    limit: "15mb",
-  }),
-);
-
-// Carpeta pública de archivos
+app.use(express.json({ limit: "15mb" }));
 app.use("/uploads", express.static(UPLOADS_DIR));
 
 // ============================================================
-// 3. IMPORTACIÓN DE MIDDLEWARE JWT
+// 3. IMPORTACIÓN DEL MIDDLEWARE JWT
 // ============================================================
 
-// IMPORTANTE:
-// Este middleware NO se modifica.
-// Su función es validar el Bearer Token.
 const verificarToken = require("./middlewares/auth.middleware");
 
 // ============================================================
@@ -77,60 +63,20 @@ const verificarToken = require("./middlewares/auth.middleware");
 // ============================================================
 
 const authRoutes = require("./routes/auth.routes");
-
-// NUEVO: rutas públicas de recuperación y restablecimiento
 const recuperacionRoutes = require("./routes/recuperacion.routes");
-
 const matriculasRoutes = require("./routes/matriculas.routes");
 
-// ------------------------------------------------------------
-// CICLOS
-// ------------------------------------------------------------
-// El nuevo ciclos.routes.js de Morgan exporta un OBJETO:
-//
-// {
-//    router,
-//    validarNombreCiclo,
-//    ...
-// }
-//
-// Por eso obtenemos específicamente .router.
-//
-// El "|| ciclosRoutesModule" mantiene compatibilidad por si
-// posteriormente volvemos a exportar solo el router.
-// ------------------------------------------------------------
-
+// ciclos.routes.js exporta un router o un objeto que contiene .router.
 const ciclosRoutesModule = require("./routes/ciclos.routes");
-
 const ciclosRoutes = ciclosRoutesModule.router || ciclosRoutesModule;
 
 // ============================================================
 // 5. RUTAS PÚBLICAS
 // ============================================================
-//
-// Estas rutas se montan ANTES del middleware JWT.
-//
-// Eso permite que:
-// - visitantes consulten ciclos;
-// - visitantes consulten detalles;
-// - visitantes verifiquen su correo;
-// - visitantes puedan iniciar checkout;
-// - usuarios sin sesión soliciten recuperar su contraseña.
-//
-// SIN iniciar sesión.
-// ============================================================
 
-// Autenticación
 app.use("/api", authRoutes);
-
-// NUEVO: recuperación de contraseña sin exigir sesión Bearer.
-// Debe permanecer antes del middleware JWT global.
 app.use("/api/auth", recuperacionRoutes);
-
-// Catálogo público de ciclos
 app.use("/api/ciclos", ciclosRoutes);
-
-// Matrículas / reinscripción / checkout
 app.use("/api/matriculas", matriculasRoutes);
 
 // ============================================================
@@ -149,99 +95,41 @@ app.get("/ping", (req, res) => {
 // ============================================================
 // 7. CANDADO GLOBAL JWT
 // ============================================================
-//
-// Desde aquí hacia abajo:
-// TODA petición /api requiere:
-//
-// Authorization: Bearer <TOKEN>
-//
-// Excepto las rutas públicas declaradas anteriormente.
-// ============================================================
-
+// Todas las rutas /api declaradas después de este punto requieren JWT.
 app.use("/api", verificarToken);
 
 // ============================================================
 // 8. RUTAS PRIVADAS ADMINISTRATIVAS
 // ============================================================
 
-// ------------------------------------------------------------
-// GESTIÓN DE CICLOS
-// ------------------------------------------------------------
-// Incluye:
-//
-// GET    /api/admin/ciclos
-// GET    /api/admin/ciclos/:id
-// POST   /api/admin/ciclos
-// PUT    /api/admin/ciclos/:id
-// PATCH  /api/admin/ciclos/:id/estado
-// DELETE /api/admin/ciclos/:id
-//
-// El propio archivo admin-ciclos.routes.js valida:
-//
-// requiereRol('Administrador')
-//
-// Por eso NO agregamos otro middleware de rol aquí.
-// ------------------------------------------------------------
-
 app.use("/api/admin/ciclos", require("./routes/admin-ciclos.routes"));
-
-// ------------------------------------------------------------
-// DASHBOARD ADMINISTRATIVO
-// ------------------------------------------------------------
-//
-// El endpoint final será:
-//
-// GET /api/admin/dashboard/overview
-//
-// También queda protegido por:
-// 1. auth.middleware.js
-// 2. roles.middleware.js dentro de dashboard.routes.js
-// ------------------------------------------------------------
-
 app.use("/api/admin", require("./routes/dashboard.routes"));
 
 // ============================================================
 // 9. RUTAS PRIVADAS EXISTENTES
 // ============================================================
 
-// Aulas, cursos, asignaciones y asistencia (rutas privadas protegidas por JWT)
 app.use("/api", require("./routes/academico.routes"));
-
-// Perfiles y permisos
 app.use("/api", require("./routes/perfil.routes"));
-
-// Menús
 app.use("/api", require("./routes/menu.routes"));
-
-// Usuarios
 app.use("/api", require("./routes/usuario.routes"));
-
-// Notas
 app.use("/api/notas", require("./routes/notas.routes"));
-
-// Actas
 app.use("/api", require("./routes/actas.routes"));
-
-// Pagos
 app.use("/api", require("./routes/pagos.routes"));
-
-// Tutor IA
 app.use("/api", require("./routes/ia.routes"));
 
-// Intranet del alumno
+// Intranet y pagos manuales del alumno (rutas existentes).
 app.use("/api/alumno", require("./routes/alumno.routes"));
 
-// Materiales académicos
-app.use("/api/materiales", require("./routes/materiales.routes"));
+// NUEVO: checkout online de mensualidades (responsabilidad Morgan).
+// Debe permanecer después del middleware JWT porque exige sesión de alumno.
+app.use("/api/alumno", require("./routes/alumno-checkout.routes"));
 
-// Comunicados institucionales
+app.use("/api/materiales", require("./routes/materiales.routes"));
 app.use("/api", require("./routes/comunicados.routes"));
 
 // ============================================================
 // 10. RUTA API NO ENCONTRADA
-// ============================================================
-//
-// Si ninguna ruta anterior coincide, respondemos 404.
 // ============================================================
 
 app.use("/api", (req, res) => {
@@ -262,14 +150,10 @@ app.use(require("./middlewares/error.middleware"));
 
 const server = app.listen(port, () => {
   console.log(`🚀 AcadeSys API corriendo en el puerto ${port}`);
-
-  console.log("📚 Catálogo público:", `/api/ciclos/publicos`);
-
-  console.log("📝 Matrículas:", `/api/matriculas/checkout`);
-
-  console.log("🔐 Administración de ciclos:", `/api/admin/ciclos`);
-
-  console.log("📊 Dashboard:", `/api/admin/dashboard/overview`);
+  console.log("📚 Catálogo público:", "/api/ciclos/publicos");
+  console.log("📝 Matrículas:", "/api/matriculas/checkout");
+  console.log("🔐 Administración de ciclos:", "/api/admin/ciclos");
+  console.log("📊 Dashboard:", "/api/admin/dashboard/overview");
 });
 
 module.exports = { app, server };
