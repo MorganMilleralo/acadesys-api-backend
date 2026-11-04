@@ -49,6 +49,9 @@ app.set("trust proxy", 1);
 
 const { corsOptions } = require("./config/cors");
 app.use(cors(corsOptions));
+// Firma del proveedor y cuerpo acotado; antes del parser general y JWT.
+const mercadopagoWebhook = require('./routes/mercadopago-webhook.routes');
+app.use('/api/webhooks', express.json({ limit: '32kb' }), mercadopagoWebhook, mercadopagoWebhook.errorHandler);
 app.use(express.json({ limit: "15mb" }));
 app.use("/uploads", express.static(UPLOADS_DIR));
 

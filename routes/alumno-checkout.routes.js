@@ -4,6 +4,7 @@ const express = require('express');
 const router = express.Router();
 const requiereRol = require('../middlewares/roles.middleware');
 const { idPositivo } = require('../utils/validaciones');
+const { ErrorPago } = require('../utils/pagos-proveedor');
 const pasarela = require('../services/mercadopago.adapter');
 const {
   reservarCheckoutAlumno,
@@ -89,13 +90,14 @@ router.post('/pagos/:idPago/checkout', async (req, res) => {
     if (reserva?.idTransaccion && error?.safeToMarkError === true) {
       try { await marcarErrorCreacion(reserva.idTransaccion); } catch { /* conservar error original */ }
     }
-    const status = Number(error?.status) >= 400 && Number(error?.status) <= 599 ? Number(error.status) : 500;
-    if (status >= 500) console.error('Error al crear checkout de alumno:', error?.code || error?.name || 'Error');
+    const conocido = error instanceof ErrorPago;
+    const status = conocido ? error.status : 500;
+    if (status >= 500) console.error('Error al crear checkout de alumno:', conocido ? error.code : 'CHECKOUT_NO_DISPONIBLE');
     return res.status(status).json({
-      code: error?.code || 'CHECKOUT_NO_DISPONIBLE',
+      code: conocido ? error.code : 'CHECKOUT_NO_DISPONIBLE',
       error: status === 503
         ? 'El pago online todavía no está disponible. Puedes usar el medio manual habilitado por la academia.'
-        : (error?.message || 'No se pudo iniciar el checkout.'),
+        : (conocido ? error.message : 'No se pudo iniciar el checkout.'),
     });
   }
 });
@@ -111,9 +113,11 @@ router.get('/pagos/:idPago/estado', async (req, res) => {
     });
     return res.json(data);
   } catch (error) {
-    const status = Number(error?.status) >= 400 && Number(error.status) <= 599 ? Number(error.status) : 500;
-    if (status >= 500) console.error('Error al consultar estado de checkout:', error?.code || error?.name || 'Error');
-    return res.status(status).json({ code: error?.code || 'ESTADO_PAGO_NO_DISPONIBLE', error: error?.message || 'No se pudo consultar el estado del pago.' });
+    const conocido = error instanceof ErrorPago;
+    const status = conocido ? error.status : 500;
+    if (status >= 500) console.error('Error al consultar estado de checkout:', conocido ? error.code : 'ESTADO_PAGO_NO_DISPONIBLE');
+    return res.status(status).json({ code: conocido ? error.code : 'ESTADO_PAGO_NO_DISPONIBLE',
+      error: conocido ? error.message : 'No se pudo consultar el estado del pago.' });
   }
 });
 

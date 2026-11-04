@@ -4,7 +4,10 @@
 
 Morgan implementa la reserva de transacción interna, valida la titularidad de la cuota, toma el importe desde MySQL, evita checkouts duplicados, expone el estado al alumno y actualiza la mensualidad/auditoría cuando recibe una confirmación ya verificada.
 
-Torito implementa el adaptador real de Mercado Pago y el endpoint de webhook público. El adaptador provisional incluido aquí devuelve 503 intencionalmente: no crea órdenes ficticias ni simula pagos.
+Torito implementa el adaptador real de Mercado Pago y el endpoint de webhook público.
+La entrega local del 2026-11-03 usa Checkout Pro Preferences con SDK oficial 3.6.1.
+El detalle vigente de seguridad, estados, pruebas y configuración está en
+[INTEGRACION_MERCADOPAGO.md](INTEGRACION_MERCADOPAGO.md). Sin configuración sigue devolviendo 503.
 
 ## Contrato requerido para el adaptador de Torito
 
@@ -27,7 +30,7 @@ async function crearOrdenPago({
   returnUrl,          // URL de retorno del frontend
 }) {
   return {
-    idOrdenProveedor: 'identificador real de Mercado Pago',
+    idOrdenProveedor: 'ID de la preferencia de Mercado Pago',
     checkoutUrl: 'https://checkout-proveedor/...',
     estado: 'pending',
   };
@@ -65,10 +68,20 @@ await confirmarPagoProveedor({
   monto,
   moneda: 'PEN',
   estadoProveedor: 'approved',
+  estado: 'APROBADA',
+  idPagoProveedor,                // Payment.id; NO es el ID de preferencia
+  idTransaccion,                 // Contrastado con metadata de Preference
+  fechaActualizacionProveedor,   // Payment.date_last_updated en milisegundos
 });
 ```
 
-Si el proveedor informa que el pago no fue aprobado, Torito puede llamar `actualizarEstadoNoAprobado({ referenciaInterna, estado, estadoProveedor })`, usando únicamente los estados admitidos: `PENDIENTE`, `RECHAZADA`, `CANCELADA` o `EXPIRADA`.
+Si el proveedor informa que el pago no fue aprobado, se llama a
+`actualizarEstadoNoAprobado` con el mismo conjunto de datos verificados, incluyendo
+preferencia, pago, transacción, monto, moneda y versión. Estos campos son obligatorios
+para poder deduplicar y ordenar sin inventar columnas. El adaptador normaliza a
+`PENDIENTE`, `RECHAZADA` o `CANCELADA`; reembolsos/contracargos generan revisión auditada
+y no revierten una mensualidad pagada. No hay otro consumidor de estas funciones
+en el repositorio ni se expone un endpoint para invocarlas desde React.
 
 El endpoint de webhook debe montarse antes de `app.use('/api', verificarToken)` porque el proveedor no envía el JWT de un alumno. Debe responder 200/201 cuando procese correctamente o cuando la notificación ya se haya procesado; así evita reintentos innecesarios.
 
