@@ -131,14 +131,22 @@ async function conServidor(fn) {
   }
 }
 
+// Fechas relativas al día de ejecución: la regla de negocio exige que un ciclo
+// nuevo empiece hoy o después. Con fechas fijas la suite caducaba con el tiempo.
+function fechaRelativa(dias) {
+  const fecha = new Date();
+  fecha.setUTCDate(fecha.getUTCDate() + dias);
+  return fecha.toISOString().slice(0, 10);
+}
+
 function cuerpoCiclo(universidad, cursos, extra = {}) {
   return {
     nombre: 'Ciclo Regular San Marcos Demo',
     universidadObjetivo: universidad,
     turno: 'Mañana',
     horario: '08:00 - 13:00',
-    fechaInicio: '2026-11-02',
-    fechaFin: '2027-03-01',
+    fechaInicio: fechaRelativa(30),
+    fechaFin: fechaRelativa(180),
     capacidad: 100,
     precio: 100,
     diasClase: 'Lunes a Sábado',

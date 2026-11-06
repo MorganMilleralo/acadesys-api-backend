@@ -28,7 +28,11 @@ test('token vencido se rechaza', () => {
 
 test('token manipulado y token de formato incorrecto se rechazan', () => {
   const token = crearTokenVerificacionMatricula(datos, env, ahora);
-  assert.equal(verificarTokenVerificacionMatricula(`${token.slice(0, -1)}A`, env, ahora), null);
+  // Cambia el último carácter por uno distinto: usar siempre "A" hacía la
+  // prueba intermitente cuando el token ya terminaba en "A".
+  const ultimo = token.slice(-1);
+  const alterado = `${token.slice(0, -1)}${ultimo === 'A' ? 'B' : 'A'}`;
+  assert.equal(verificarTokenVerificacionMatricula(alterado, env, ahora), null);
   assert.equal(verificarTokenVerificacionMatricula('v1.invalid.invalid.invalid', env, ahora), null);
   assert.equal(verificarTokenVerificacionMatricula({ token }, env, ahora), null);
 });

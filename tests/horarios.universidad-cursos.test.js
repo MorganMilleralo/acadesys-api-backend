@@ -83,6 +83,10 @@ async function consulta(sql, params = []) {
   // Solape por ciclo/día
   if (/SELECT IdHorario FROM HorarioCurso WHERE IdCiclo = \? AND DiaNumero/i.test(q)) return [[]];
 
+  // Conflicto de docente/aula entre ciclos (utils/conflictos-docentes.js).
+  // El catálogo de prueba no define asignaciones, así que no hay conflicto.
+  if (/SELECT h\.IdHorario AS ConflictoDocente FROM Asignacion_Aula actual/i.test(q)) return [[]];
+
   // Escrituras simuladas
   if (/INSERT INTO HorarioCurso/i.test(q)) {
     const idHorario = 900 + HORARIOS_GUARDADOS.length;
