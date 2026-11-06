@@ -46,3 +46,5 @@
 - Confirmar que `PUT /api/pagos/:id/estado` rechaza con 409 la modificación manual de un registro `Mes = 'Inscripcion'` y `Estado = 'Pendiente'`.
 - El cierre por curso queda fuera de alcance. Confirmar con el DDL real el cierre
   de un simulacro semanal sin depender de Evaluacion.IdCurso o Matricula.IdCurso.
+
+

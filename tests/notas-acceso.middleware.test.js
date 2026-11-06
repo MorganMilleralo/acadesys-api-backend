@@ -1,4 +1,3 @@
-
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
@@ -109,3 +108,5 @@ test('notas e historial: equivalencia administrativa exacta, sin alias ni subcad
     }
   }
 });
+
+

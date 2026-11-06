@@ -1,4 +1,3 @@
-
 # Copias de seguridad
 *.bak-*
 
@@ -19,3 +18,5 @@ uploads/perfiles/*
 
 # Logs de ejecucion local (no se versionan)
 server.log
+
+

@@ -98,3 +98,5 @@ ON DUPLICATE KEY UPDATE CorreoElectronico = VALUES(CorreoElectronico);
 INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro)
 VALUES (1, 1, 1)
 ON DUPLICATE KEY UPDATE EstadoRegistro = VALUES(EstadoRegistro);
+
+

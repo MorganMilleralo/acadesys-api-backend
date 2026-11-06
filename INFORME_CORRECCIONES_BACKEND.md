@@ -294,3 +294,5 @@ El backend está **listo para integrarse con el frontend corregido**, con estas 
    limpien los duplicados históricos.
 4. Verificar manualmente el flujo de notas, cierre de actas y horarios, que son los cambios con
    mayor impacto observable.
+
+

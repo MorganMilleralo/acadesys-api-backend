@@ -75,3 +75,5 @@ test('genera un nombre seguro, sin ruta ni nombre original', () => {
   assert.match(generarNombreSeguro(1134, 'png'), /\.png$/);
   assert.match(generarNombreSeguro(1134, 'webp'), /\.webp$/);
 });
+
+

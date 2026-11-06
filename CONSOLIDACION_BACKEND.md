@@ -231,3 +231,5 @@ Pendientes antes de considerar main/despliegue:
   validar carreras entre solicitudes; los mocks no demuestran exclusión real.
 - No se ha confirmado qué rama despliega Render. No se autoriza ni recomienda
   publicar basándose únicamente en esta integración y sus pruebas simuladas.
+
+

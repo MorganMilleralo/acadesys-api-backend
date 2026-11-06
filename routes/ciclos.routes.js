@@ -19,9 +19,14 @@ const UNIVERSIDADES_VALIDAS = new Set([
   'Preuniversitario',
 ]);
 
-const MIN_CAPACIDAD = 1;
-const MAX_CAPACIDAD = 500;
-const MAX_PRECIO = 9999.99;
+const { MIN_CAPACIDAD, MAX_CAPACIDAD, disponibilidadCiclo } = require('../utils/capacidad-ciclo');
+const { MAX_PRECIO, salidaPrecios } = require('../utils/precios-ciclo');
+
+function idAcademiaRegistroPublico() {
+  const raw = process.env.PUBLIC_REGISTRATION_ACADEMY_ID;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  return idPositivo(String(raw).trim());
+}
 
 function normalizarTexto(valor = '') {
   return String(valor)
@@ -132,13 +137,13 @@ function generarPrefijo(nombre, universidad) {
 
 function normalizarSalida(ciclo) {
   const horario = ciclo.Horario || horarioDesdeTurno(ciclo.Turno);
-  // Capacidad real configurada por el administrador (hasta MAX_CAPACIDAD).
-  // Una capacidad 0/null se interpreta como "sin límite definido".
+  // Se conservan el dato histórico y su disponibilidad; el aviso no cambia su operación.
   const capacidad = Number(ciclo.Capacidad || 0);
   const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
 
   return {
     idCiclo: ciclo.IdCiclo,
+    idAcademia: ciclo.IdAcademia == null ? null : Number(ciclo.IdAcademia),
     nombre: ciclo.Nombre,
     prefijo: ciclo.PrefijoCodigo,
     turno: ciclo.Turno || turnoDesdeHorario(horario),
@@ -147,12 +152,11 @@ function normalizarSalida(ciclo) {
     universidadObjetivo: ciclo.UniversidadObjetivo || universidadDesdeNombre(ciclo.Nombre),
     fechaInicio: ciclo.FechaInicio,
     fechaFin: ciclo.FechaFin,
-    precio: Number(ciclo.Precio || 0),
+    ...salidaPrecios(ciclo),
     capacidad,
     totalAlumnos,
-    vacantesDisponibles: capacidad > 0 ? Math.max(capacidad - totalAlumnos, 0) : null,
+    ...disponibilidadCiclo(ciclo.Capacidad, totalAlumnos),
     totalCursos: Number(ciclo.TotalCursos || 0),
-    disponible: capacidad === 0 || totalAlumnos < capacidad,
     estadoRegistro: Number(ciclo.EstadoRegistro),
   };
 }
@@ -162,10 +166,19 @@ function normalizarSalida(ciclo) {
    Vitrina pública: SOLO ciclos visibles/activos.
    ============================================================ */
 router.get('/publicos', async (req, res) => {
+  const idAcademia = idAcademiaRegistroPublico();
+  if (!idAcademia) {
+    return res.status(503).json({
+      code: 'CONFIGURACION_ACADEMIA_PUBLICA_INVALIDA',
+      error: 'La oferta académica pública no está configurada correctamente.',
+    });
+  }
+
   try {
     const [ciclos] = await pool.query(`
       SELECT
         c.IdCiclo,
+        c.IdAcademia,
         c.Nombre,
         c.PrefijoCodigo,
         c.Turno,
@@ -175,6 +188,8 @@ router.get('/publicos', async (req, res) => {
         c.FechaInicio,
         c.FechaFin,
         c.Precio,
+        c.PrecioInscripcion,
+        c.PrecioMensual,
         c.Capacidad,
         c.EstadoRegistro,
         (
@@ -184,6 +199,7 @@ router.get('/publicos', async (req, res) => {
           WHERE m.IdCiclo = c.IdCiclo
             AND m.EstadoRegistro = 1
             AND u.EstadoRegistro = 1
+            AND u.IdAcademia = c.IdAcademia
         ) AS TotalAlumnos,
         (
           SELECT COUNT(*)
@@ -194,12 +210,13 @@ router.get('/publicos', async (req, res) => {
             AND cu.EstadoRegistro = 1
         ) AS TotalCursos
       FROM Ciclo c
-      WHERE c.EstadoRegistro = 1
+      WHERE c.IdAcademia = ?
+        AND c.EstadoRegistro = 1
       ORDER BY
         CASE WHEN c.FechaInicio IS NULL THEN 1 ELSE 0 END,
         c.FechaInicio ASC,
         c.IdCiclo ASC
-    `);
+    `, [idAcademia]);
 
     const salida = ciclos.map(normalizarSalida);
     res.status(200).json(salida);
@@ -219,10 +236,19 @@ router.get('/publicos/:id/detalle', async (req, res) => {
     return res.status(400).json({ error: 'El IdCiclo no es válido.' });
   }
 
+  const idAcademia = idAcademiaRegistroPublico();
+  if (!idAcademia) {
+    return res.status(503).json({
+      code: 'CONFIGURACION_ACADEMIA_PUBLICA_INVALIDA',
+      error: 'La oferta académica pública no está configurada correctamente.',
+    });
+  }
+
   try {
     const [ciclos] = await pool.query(`
       SELECT
         c.IdCiclo,
+        c.IdAcademia,
         c.Nombre,
         c.PrefijoCodigo,
         c.Turno,
@@ -232,6 +258,8 @@ router.get('/publicos/:id/detalle', async (req, res) => {
         c.FechaInicio,
         c.FechaFin,
         c.Precio,
+        c.PrecioInscripcion,
+        c.PrecioMensual,
         c.Capacidad,
         c.EstadoRegistro,
         (
@@ -241,6 +269,7 @@ router.get('/publicos/:id/detalle', async (req, res) => {
           WHERE m.IdCiclo = c.IdCiclo
             AND m.EstadoRegistro = 1
             AND u.EstadoRegistro = 1
+            AND u.IdAcademia = c.IdAcademia
         ) AS TotalAlumnos,
         (
           SELECT COUNT(*)
@@ -252,9 +281,10 @@ router.get('/publicos/:id/detalle', async (req, res) => {
         ) AS TotalCursos
       FROM Ciclo c
       WHERE c.IdCiclo = ?
+        AND c.IdAcademia = ?
         AND c.EstadoRegistro = 1
       LIMIT 1
-    `, [idCiclo]);
+    `, [idCiclo, idAcademia]);
 
     if (ciclos.length === 0) {
       return res.status(404).json({ error: 'El ciclo no existe o ya no está publicado.' });
@@ -357,6 +387,14 @@ router.get('/:id/cursos', async (req, res) => {
     return res.status(400).json({ error: 'El IdCiclo no es válido.' });
   }
 
+  const idAcademia = idAcademiaRegistroPublico();
+  if (!idAcademia) {
+    return res.status(503).json({
+      code: 'CONFIGURACION_ACADEMIA_PUBLICA_INVALIDA',
+      error: 'La oferta académica pública no está configurada correctamente.',
+    });
+  }
+
   try {
     const [rows] = await pool.query(`
       SELECT
@@ -367,7 +405,8 @@ router.get('/:id/cursos', async (req, res) => {
         cu.Codigo,
         cu.Descripcion,
         doc.Docentes
-      FROM CicloCurso cc
+      FROM Ciclo ci
+      INNER JOIN CicloCurso cc ON cc.IdCiclo = ci.IdCiclo
       INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
       LEFT JOIN (
         SELECT
@@ -388,10 +427,12 @@ router.get('/:id/cursos', async (req, res) => {
         ON doc.IdCiclo = cc.IdCiclo
        AND doc.IdCurso = cc.IdCurso
       WHERE cc.IdCiclo = ?
+        AND ci.IdAcademia = ?
+        AND ci.EstadoRegistro = 1
         AND cc.EstadoRegistro = 1
         AND cu.EstadoRegistro = 1
       ORDER BY cc.Orden ASC, cu.Nombre ASC
-    `, [idCiclo]);
+    `, [idCiclo, idAcademia]);
 
     res.json(rows);
   } catch (error) {
@@ -414,3 +455,5 @@ module.exports = {
   MAX_CAPACIDAD,
   MAX_PRECIO,
 };
+
+

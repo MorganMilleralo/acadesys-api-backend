@@ -1,4 +1,3 @@
-
 process.env.JWT_SECRET = "clave-exclusiva-prueba-local-123456789";
 
 const jwt = require("jsonwebtoken");
@@ -102,3 +101,5 @@ async function ejecutar() {
 }
 
 ejecutar().catch((error) => { console.error(error); process.exitCode = 1; });
+
+

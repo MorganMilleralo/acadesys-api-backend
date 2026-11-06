@@ -1,4 +1,3 @@
-
 /*
  * ACADESYS - AUTORIZACION POR ROLES
  *
@@ -65,3 +64,5 @@ const requiereRol = (...rolesPermitidos) => {
 module.exports = requiereRol;
 module.exports.normalizarRol = normalizarRol;
 module.exports.esAdministrativo = (rol) => ROLES_ADMINISTRATIVOS.has(normalizarRol(rol));
+
+

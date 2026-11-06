@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
 const { rollbackSeguro, bloquearIdentidades } = require('../utils/validaciones');
+const { prepararPrecios, salidaPreciosAdmin } = require('../utils/precios-ciclo');
 
 const {
   validarNombreCiclo,
@@ -15,7 +16,6 @@ const {
   UNIVERSIDADES_VALIDAS,
   MIN_CAPACIDAD,
   MAX_CAPACIDAD,
-  MAX_PRECIO,
 } = require('./ciclos.routes');
 
 router.use(requiereRol('Administrador'));
@@ -37,6 +37,8 @@ function validarRangoHorario(horario) {
   return fin > inicio;
 }
 
+const { CAPACIDAD_DEFAULT, capacidadValida, capacidadHistoricaValida, disponibilidadCiclo } = require('../utils/capacidad-ciclo');
+
 function prepararCiclo(body = {}, existente = null) {
   const nombre = String(body.nombre ?? existente?.Nombre ?? '').trim().replace(/\s+/g, ' ');
   const universidad = String(
@@ -48,11 +50,16 @@ function prepararCiclo(body = {}, existente = null) {
   const turno = turnoSolicitado || turnoDesdeHorario(horarioSolicitado);
   const horario = horarioSolicitado || horarioDesdeTurno(turno);
 
-  const capacidadRaw = body.capacidad ?? existente?.Capacidad ?? '';
-  const precioRaw = body.precio ?? existente?.Precio ?? '';
-
-  const capacidad = Number(capacidadRaw);
-  const precio = Number(precioRaw);
+  const capacidadRaw = Object.hasOwn(body, 'capacidad') ? body.capacidad
+    : existente ? existente.Capacidad : CAPACIDAD_DEFAULT;
+  const capacidadSinCambio = existente && capacidadHistoricaValida(capacidadRaw)
+    && capacidadHistoricaValida(existente.Capacidad)
+    && (capacidadRaw === null ? existente.Capacidad === null
+      : existente.Capacidad !== null && Number(capacidadRaw) === Number(existente.Capacidad));
+  const capacidadModificada = !existente || (Object.hasOwn(body, 'capacidad') && !capacidadSinCambio);
+  const capacidad = capacidadModificada
+    ? capacidadValida(capacidadRaw) ? Number(capacidadRaw) : NaN
+    : existente.Capacidad;
 
   const fechaInicio = body.fechaInicio ?? existente?.FechaInicio ?? null;
   const fechaFin = body.fechaFin ?? existente?.FechaFin ?? null;
@@ -67,7 +74,8 @@ function prepararCiclo(body = {}, existente = null) {
     turno,
     horario,
     capacidad,
-    precio,
+    capacidadModificada,
+    ...prepararPrecios(body, existente),
     fechaInicio,
     fechaFin,
     diasClase,
@@ -113,13 +121,11 @@ function validarDatosCiclo(data, { esCreacion = true } = {}) {
     }
   }
 
-  if (!Number.isInteger(data.capacidad) || data.capacidad < MIN_CAPACIDAD || data.capacidad > MAX_CAPACIDAD) {
+  if (data.capacidadModificada && (!Number.isInteger(data.capacidad) || data.capacidad < MIN_CAPACIDAD || data.capacidad > MAX_CAPACIDAD)) {
     return `La capacidad debe ser un número entero entre ${MIN_CAPACIDAD} y ${MAX_CAPACIDAD}.`;
   }
 
-  if (!Number.isFinite(data.precio) || data.precio < 0 || data.precio > MAX_PRECIO) {
-    return `El precio debe estar entre S/ 0.00 y S/ ${MAX_PRECIO.toFixed(2)}.`;
-  }
+  if (data.preciosError) return data.preciosError;
 
   if (!/^\d{1,2}:?/.test(data.horario)) {
     return 'El horario no tiene un formato válido.';
@@ -149,6 +155,8 @@ async function obtenerCicloAcademia(idCiclo, idAcademia, connection = pool) {
       c.Turno,
       c.Horario,
       c.Precio,
+      c.PrecioInscripcion,
+      c.PrecioMensual,
       c.DiasClase,
       c.UniversidadObjetivo,
       c.Capacidad,
@@ -159,6 +167,7 @@ async function obtenerCicloAcademia(idCiclo, idAcademia, connection = pool) {
         WHERE m.IdCiclo = c.IdCiclo
           AND m.EstadoRegistro = 1
           AND u.EstadoRegistro = 1
+          AND u.IdAcademia = c.IdAcademia
       ) AS TotalAlumnos,
       (
         SELECT COUNT(*)
@@ -195,6 +204,8 @@ router.get('/', async (req, res) => {
         c.Turno,
         c.Horario,
         c.Precio,
+        c.PrecioInscripcion,
+        c.PrecioMensual,
         c.DiasClase,
         c.UniversidadObjetivo,
         c.Capacidad,
@@ -205,6 +216,7 @@ router.get('/', async (req, res) => {
           WHERE m.IdCiclo = c.IdCiclo
             AND m.EstadoRegistro = 1
             AND u.EstadoRegistro = 1
+            AND u.IdAcademia = c.IdAcademia
         ) AS TotalAlumnos,
         (
           SELECT COUNT(*)
@@ -222,12 +234,13 @@ router.get('/', async (req, res) => {
 
     res.json(rows.map((c) => ({
       ...c,
-      // Capacidad real configurada (0/null => sin límite definido).
+      // Históricos visibles y operativos según su aforo anterior, sin recortar inscritos.
       Capacidad: Number(c.Capacidad || 0),
-      Precio: Number(c.Precio || 0),
+      ...salidaPreciosAdmin(c),
       TotalAlumnos: Number(c.TotalAlumnos || 0),
       TotalCursos: Number(c.TotalCursos || 0),
-      VacantesDisponibles: Number(c.Capacidad || 0) > 0 ? Math.max(Number(c.Capacidad) - Number(c.TotalAlumnos || 0), 0) : null,
+      VacantesDisponibles: disponibilidadCiclo(c.Capacidad, c.TotalAlumnos).vacantesDisponibles,
+      RequiereRevisionCapacidad: disponibilidadCiclo(c.Capacidad, c.TotalAlumnos).requiereRevisionCapacidad,
       Estado: Number(c.EstadoRegistro) === 1 ? 'Activo / Visible' : 'Cerrado / Oculto',
     })));
   } catch (error) {
@@ -302,7 +315,7 @@ router.get('/:id', async (req, res) => {
     `, [idCiclo]);
 
     res.json({
-      ciclo,
+      ciclo: { ...ciclo, ...salidaPreciosAdmin(ciclo), RequiereRevisionCapacidad: disponibilidadCiclo(ciclo.Capacidad, ciclo.TotalAlumnos).requiereRevisionCapacidad },
       cursos,
       horarios,
     });
@@ -404,8 +417,8 @@ router.post('/', async (req, res) => {
     const [result] = await connection.query(`
       INSERT INTO Ciclo
         (IdAcademia, Nombre, PrefijoCodigo, FechaInicio, FechaFin, EstadoRegistro,
-         Turno, Horario, Precio, DiasClase, UniversidadObjetivo, Capacidad)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         Turno, Horario, Precio, PrecioInscripcion, PrecioMensual, DiasClase, UniversidadObjetivo, Capacidad)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       idAcademia,
       data.nombre,
@@ -416,6 +429,8 @@ router.post('/', async (req, res) => {
       data.turno,
       data.horario,
       data.precio,
+      data.precioInscripcion,
+      data.precioMensual,
       data.diasClase,
       data.universidad,
       data.capacidad,
@@ -476,7 +491,7 @@ router.put('/:id', async (req, res) => {
     }
 
     const totalAlumnos = Number(existente.TotalAlumnos || 0);
-    if (data.capacidad < totalAlumnos) {
+    if (data.capacidadModificada && data.capacidad < totalAlumnos) {
       await connection.rollback();
       return res.status(409).json({
         error: `No puedes establecer una capacidad de ${data.capacidad} porque ya existen ${totalAlumnos} matrículas activas en el ciclo.`,
@@ -517,6 +532,8 @@ router.put('/:id', async (req, res) => {
         Turno = ?,
         Horario = ?,
         Precio = ?,
+        PrecioInscripcion = ?,
+        PrecioMensual = ?,
         DiasClase = ?,
         UniversidadObjetivo = ?,
         Capacidad = ?
@@ -530,6 +547,8 @@ router.put('/:id', async (req, res) => {
       data.turno,
       data.horario,
       data.precio,
+      data.precioInscripcion,
+      data.precioMensual,
       data.diasClase,
       data.universidad,
       data.capacidad,
@@ -596,8 +615,10 @@ router.patch('/:id/estado', async (req, res) => {
       }
 
       const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
-      const capacidad = Number(ciclo.Capacidad || 0);
-      if (capacidad > 0 && totalAlumnos >= capacidad) {
+      if (!capacidadHistoricaValida(ciclo.Capacidad)) {
+        return res.status(409).json({ code: 'CAPACIDAD_REQUIERE_REVISION', error: 'La capacidad histórica no es válida. No se han cambiado los inscritos.' });
+      }
+      if (!disponibilidadCiclo(ciclo.Capacidad, totalAlumnos).disponible) {
         return res.status(409).json({ error: 'No se puede reabrir el ciclo porque su capacidad ya está completa.' });
       }
     }
@@ -652,3 +673,5 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
+
+

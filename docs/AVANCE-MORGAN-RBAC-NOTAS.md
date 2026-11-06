@@ -32,3 +32,5 @@ Las pruebas unitarias verifican acceso del docente, bloqueo al alumno en el list
 - No se ha probado con la base de datos real de Aiven ni en despliegue de producción.
 - Se debe confirmar que los perfiles de alumno están representados como `Alumno` o `Estudiante` en la tabla de perfiles. Si la base usa otro nombre, debe ajustarse la lista permitida de forma explícita; no debe habilitarse acceso por defecto a cualquier rol.
 - Para revisar datos ajenos a la academia, el middleware autoriza el rol académico, pero cada consulta SQL debe seguir llevando el filtro `IdAcademia` autenticado, como ya hace la ruta de historial compartida.
+
+

@@ -1,4 +1,3 @@
-
 const { normalizarRol: normalizarTexto, esAdministrativo } = require('./roles.middleware');
 const { enteroPositivo } = require('../utils/evaluaciones');
 
@@ -89,3 +88,5 @@ module.exports = {
   requiereGestionNotas,
   autorizarHistorialAlumno,
 };
+
+

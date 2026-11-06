@@ -64,3 +64,5 @@ module.exports = {
   ESCALA_POR_DEFECTO,
   escalaMaximaPorUniversidad,
 };
+
+

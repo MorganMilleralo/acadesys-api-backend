@@ -671,3 +671,4 @@ de los cuales impide el funcionamiento básico de una demostración con cuentas 
 
 **Recomendación:** Proseguir con la demo configurando `GOOGLE_SCRIPT_URL` y realizando las
 verificaciones manuales recomendadas de notas, actas y horarios. Ningún bloqueo P0 encuentra.
+

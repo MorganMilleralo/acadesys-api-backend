@@ -9,3 +9,5 @@ Module._load = function (nombre, ...args) {
   return cargar.call(this, nombre, ...args);
 };
 process.env.JWT_SECRET = 'secreto-ficticio-exclusivo-pruebas-locales';
+
+

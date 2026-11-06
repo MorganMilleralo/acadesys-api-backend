@@ -206,3 +206,5 @@ router.put('/comunicados/:id/lectura', async (req, res) => {
 });
 
 module.exports = router;
+
+

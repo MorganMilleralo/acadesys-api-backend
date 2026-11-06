@@ -6,3 +6,5 @@ module.exports = (err, req, res, next) => {
     : status === 400 ? 'El cuerpo JSON no es válido.' : 'Error interno del servidor.';
   return res.status(status).json({ error });
 };
+
+

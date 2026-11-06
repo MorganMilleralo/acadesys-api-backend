@@ -36,3 +36,5 @@ const pool = require('../config/db');
     await pool.end();
   }
 })();
+
+

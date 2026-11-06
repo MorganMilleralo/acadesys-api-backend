@@ -379,3 +379,5 @@ router.post("/tutor-ia", requiereRol("Alumno", "Estudiante"), tutorHandler);
 router.post("/tutor-ia/diagnostico", requiereRol("Alumno", "Estudiante"), tutorHandler);
 
 module.exports = router;
+
+

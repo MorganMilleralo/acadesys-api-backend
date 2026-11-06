@@ -326,3 +326,5 @@ router.delete("/perfiles/:id", requiereRol("Administrador"), async (req, res) =>
 });
 
 module.exports = router;
+
+

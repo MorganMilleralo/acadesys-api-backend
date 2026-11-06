@@ -1,4 +1,3 @@
-
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
 const { enteroPositivo } = require("../utils/evaluaciones");
@@ -115,3 +114,5 @@ const verificarToken = async (req, res, next) => {
 };
 
 module.exports = verificarToken;
+
+

@@ -22,3 +22,5 @@ for (const archivo of archivos) {
 }
 console.log(fallos === 0 ? `node --check correcto en ${archivos.length} archivo(s) JS.` : `Fallos de sintaxis: ${fallos}`);
 process.exitCode = fallos === 0 ? 0 : 1;
+
+

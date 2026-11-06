@@ -1,0 +1,289 @@
+diff --git a/routes/admin-ciclos.routes.js b/routes/admin-ciclos.routes.js
+index a145a69..d776f1f 100644
+--- a/routes/admin-ciclos.routes.js
++++ b/routes/admin-ciclos.routes.js
+@@ -37,6 +37,8 @@ function validarRangoHorario(horario) {
+   return fin > inicio;
+ }
+ 
++const { CAPACIDAD_DEFAULT, capacidadValida, disponibilidadCiclo } = require('../utils/capacidad-ciclo');
++
+ function prepararCiclo(body = {}, existente = null) {
+   const nombre = String(body.nombre ?? existente?.Nombre ?? '').trim().replace(/\s+/g, ' ');
+   const universidad = String(
+@@ -48,10 +50,11 @@ function prepararCiclo(body = {}, existente = null) {
+   const turno = turnoSolicitado || turnoDesdeHorario(horarioSolicitado);
+   const horario = horarioSolicitado || horarioDesdeTurno(turno);
+ 
+-  const capacidadRaw = body.capacidad ?? existente?.Capacidad ?? '';
++  const capacidadRaw = Object.hasOwn(body, 'capacidad') ? body.capacidad
++    : existente ? existente.Capacidad : CAPACIDAD_DEFAULT;
+   const precioRaw = body.precio ?? existente?.Precio ?? '';
+ 
+-  const capacidad = Number(capacidadRaw);
++  const capacidad = capacidadValida(capacidadRaw) ? Number(capacidadRaw) : NaN;
+   const precio = Number(precioRaw);
+ 
+   const fechaInicio = body.fechaInicio ?? existente?.FechaInicio ?? null;
+@@ -222,12 +225,13 @@ router.get('/', async (req, res) => {
+ 
+     res.json(rows.map((c) => ({
+       ...c,
+-      // Capacidad real configurada (0/null => sin límite definido).
++      // Históricos visibles sin recortar; las vacantes operativas exigen capacidad válida.
+       Capacidad: Number(c.Capacidad || 0),
+       Precio: Number(c.Precio || 0),
+       TotalAlumnos: Number(c.TotalAlumnos || 0),
+       TotalCursos: Number(c.TotalCursos || 0),
+-      VacantesDisponibles: Number(c.Capacidad || 0) > 0 ? Math.max(Number(c.Capacidad) - Number(c.TotalAlumnos || 0), 0) : null,
++      VacantesDisponibles: disponibilidadCiclo(c.Capacidad, c.TotalAlumnos).vacantesDisponibles,
++      RequiereRevisionCapacidad: disponibilidadCiclo(c.Capacidad, c.TotalAlumnos).requiereRevisionCapacidad,
+       Estado: Number(c.EstadoRegistro) === 1 ? 'Activo / Visible' : 'Cerrado / Oculto',
+     })));
+   } catch (error) {
+@@ -302,7 +306,7 @@ router.get('/:id', async (req, res) => {
+     `, [idCiclo]);
+ 
+     res.json({
+-      ciclo,
++      ciclo: { ...ciclo, RequiereRevisionCapacidad: disponibilidadCiclo(ciclo.Capacidad, ciclo.TotalAlumnos).requiereRevisionCapacidad },
+       cursos,
+       horarios,
+     });
+@@ -584,8 +588,11 @@ router.patch('/:id/estado', async (req, res) => {
+       }
+ 
+       const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
+-      const capacidad = Number(ciclo.Capacidad || 0);
+-      if (capacidad > 0 && totalAlumnos >= capacidad) {
++      if (!capacidadValida(ciclo.Capacidad)) {
++        return res.status(409).json({ code: 'CAPACIDAD_REQUIERE_REVISION', error: 'Revisa la capacidad histórica: debe ser un entero entre 1 y 120. No se han cambiado los inscritos.' });
++      }
++      const capacidad = Number(ciclo.Capacidad);
++      if (totalAlumnos >= capacidad) {
+         return res.status(409).json({ error: 'No se puede reabrir el ciclo porque su capacidad ya está completa.' });
+       }
+     }
+diff --git a/routes/ciclos.routes.js b/routes/ciclos.routes.js
+index 7911c1d..9740bbc 100644
+--- a/routes/ciclos.routes.js
++++ b/routes/ciclos.routes.js
+@@ -19,8 +19,7 @@ const UNIVERSIDADES_VALIDAS = new Set([
+   'Preuniversitario',
+ ]);
+ 
+-const MIN_CAPACIDAD = 1;
+-const MAX_CAPACIDAD = 500;
++const { MIN_CAPACIDAD, MAX_CAPACIDAD, disponibilidadCiclo } = require('../utils/capacidad-ciclo');
+ const MAX_PRECIO = 9999.99;
+ 
+ function idAcademiaRegistroPublico() {
+@@ -138,8 +137,7 @@ function generarPrefijo(nombre, universidad) {
+ 
+ function normalizarSalida(ciclo) {
+   const horario = ciclo.Horario || horarioDesdeTurno(ciclo.Turno);
+-  // Capacidad real configurada por el administrador (hasta MAX_CAPACIDAD).
+-  // Una capacidad 0/null se interpreta como "sin límite definido".
++  // Se conserva el dato histórico; no se habilitan nuevas matrículas hasta revisarlo.
+   const capacidad = Number(ciclo.Capacidad || 0);
+   const totalAlumnos = Number(ciclo.TotalAlumnos || 0);
+ 
+@@ -157,9 +155,8 @@ function normalizarSalida(ciclo) {
+     precio: ciclo.Precio === null || ciclo.Precio === undefined || String(ciclo.Precio).trim() === '' ? null : Number(ciclo.Precio),
+     capacidad,
+     totalAlumnos,
+-    vacantesDisponibles: capacidad > 0 ? Math.max(capacidad - totalAlumnos, 0) : null,
++    ...disponibilidadCiclo(ciclo.Capacidad, totalAlumnos),
+     totalCursos: Number(ciclo.TotalCursos || 0),
+-    disponible: capacidad === 0 || totalAlumnos < capacidad,
+     estadoRegistro: Number(ciclo.EstadoRegistro),
+   };
+ }
+diff --git a/tests/admin-ciclos.detalle.test.js b/tests/admin-ciclos.detalle.test.js
+index 1273299..d31b2ce 100644
+--- a/tests/admin-ciclos.detalle.test.js
++++ b/tests/admin-ciclos.detalle.test.js
+@@ -154,7 +154,7 @@ test('GET /api/admin/ciclos/:id sin rol autorizado responde 403', async () => {
+ 
+ // ---------------------------------------------------------------------------
+ // Regresión de capacidad: el commit 4c36c12 recortaba toda capacidad a 100.
+-// Se restauró el modelo real (hasta 500; 0/null => sin límite definido).
++// Plan 26/10, AC-05: límite nuevo 120; los históricos no se recortan ni se ocultan.
+ // ---------------------------------------------------------------------------
+ 
+ test('el detalle devuelve la capacidad real (250), sin recortarla a 100', async () => {
+@@ -166,22 +166,23 @@ test('el detalle devuelve la capacidad real (250), sin recortarla a 100', async
+   });
+ });
+ 
+-test('el listado devuelve capacidad real y vacantes reales (250 - 1 = 249)', async () => {
++test('el listado conserva capacidad histórica 250 y exige revisión antes de ofrecer vacantes', async () => {
+   await conServidor(async (base, ruta) => {
+     const res = await fetch(`${base}${ruta}`);
+     assert.equal(res.status, 200);
+     const filas = await res.json();
+     const c13 = filas.find((c) => c.IdCiclo === 13);
+     assert.equal(c13.Capacidad, 250);
+-    assert.equal(c13.VacantesDisponibles, 249);
++    assert.equal(c13.VacantesDisponibles, 0);
++    assert.equal(c13.RequiereRevisionCapacidad, true);
+     const c1 = filas.find((c) => c.IdCiclo === 1);
+     assert.equal(c1.VacantesDisponibles, 94);
+   });
+ });
+ 
+-test('el tope de capacidad restaurado permite capacidades reales (1..500)', () => {
++test('el tope de nuevas capacidades corresponde al plan AC-05 (1..120)', () => {
+   assert.equal(ciclosModulo.MIN_CAPACIDAD, 1);
+-  assert.equal(ciclosModulo.MAX_CAPACIDAD, 500);
++  assert.equal(ciclosModulo.MAX_CAPACIDAD, 120);
+ });
+ 
+ 
+diff --git a/tests/reglas-matricula.test.js b/tests/reglas-matricula.test.js
+index 7dd08b5..92c150f 100644
+--- a/tests/reglas-matricula.test.js
++++ b/tests/reglas-matricula.test.js
+@@ -38,8 +38,11 @@ test('precio debe venir configurado y ser finito/no negativo', () => {
+   for (const value of [null, undefined, '', 'abc', -1, Infinity, NaN]) assert.equal(obtenerPrecioCiclo(value), null);
+ });
+ 
+-test('capacidad 0 es ilimitada; con límite se rechaza cuando está lleno', () => {
+-  assert.equal(capacidadPermiteMatricula(0, 0), true);
++test('capacidad inválida no permite nuevas matrículas; el límite impide sobreventa', () => {
++  for (const capacidad of [0, null, undefined, -1, 1.5, 121, 500, '', true, [100], {}]) {
++    assert.equal(capacidadPermiteMatricula(0, capacidad), false);
++  }
++  for (const total of [null, '', false, 0.5, -1]) assert.equal(capacidadPermiteMatricula(total, 100), false);
+   assert.equal(capacidadPermiteMatricula(49, 50), true);
+   assert.equal(capacidadPermiteMatricula(50, 50), false);
+   assert.equal(capacidadPermiteMatricula(-1, 50), false);
+diff --git a/utils/reglas-matricula.js b/utils/reglas-matricula.js
+index 22770af..9d1ac44 100644
+--- a/utils/reglas-matricula.js
++++ b/utils/reglas-matricula.js
+@@ -1,4 +1,5 @@
+ 'use strict';
++const { disponibilidadCiclo } = require('./capacidad-ciclo');
+ 
+ /**
+  * Reglas puras de matrícula que pueden probarse sin MySQL ni credenciales.
+@@ -55,14 +56,7 @@ function obtenerPrecioCiclo(valor) {
+ }
+ 
+ function capacidadPermiteMatricula(total, capacidad) {
+-  const totalNumerico = Number(total);
+-  const capacidadNumerica = capacidad === null || capacidad === undefined || capacidad === ''
+-    ? 0
+-    : Number(capacidad);
+-  if (!Number.isFinite(totalNumerico) || totalNumerico < 0) return false;
+-  if (!Number.isFinite(capacidadNumerica) || capacidadNumerica < 0) return false;
+-  // Por contrato actual, capacidad 0/null significa que no se configuró un límite.
+-  return capacidadNumerica === 0 || totalNumerico < capacidadNumerica;
++  return disponibilidadCiclo(capacidad, total).disponible;
+ }
+ 
+ function idPositivoSeguro(valor) {
+diff --git a/utils/capacidad-ciclo.js b/utils/capacidad-ciclo.js
+new file mode 100644
+--- /dev/null
++++ b/utils/capacidad-ciclo.js
+@@ -0,0 +1,26 @@
++'use strict';
++
++const MIN_CAPACIDAD = 1;
++const MAX_CAPACIDAD = 120;
++const CAPACIDAD_DEFAULT = 100;
++
++function capacidadValida(valor) {
++  if (!['number', 'string'].includes(typeof valor)) return false;
++  if (typeof valor === 'string' && !/^\d+$/.test(valor.trim())) return false;
++  const numero = Number(valor);
++  return Number.isSafeInteger(numero) && numero >= MIN_CAPACIDAD && numero <= MAX_CAPACIDAD;
++}
++
++function disponibilidadCiclo(capacidad, total) {
++  const totalValido = ['number', 'string'].includes(typeof total)
++    && /^\d+$/.test(String(total).trim()) && Number.isSafeInteger(Number(total));
++  const valida = capacidadValida(capacidad) && totalValido;
++  return {
++    capacidadValida: valida,
++    requiereRevisionCapacidad: !valida || Number(total) > Number(capacidad),
++    vacantesDisponibles: valida ? Math.max(Number(capacidad) - Number(total), 0) : 0,
++    disponible: valida && Number(total) < Number(capacidad),
++  };
++}
++
++module.exports = { MIN_CAPACIDAD, MAX_CAPACIDAD, CAPACIDAD_DEFAULT, capacidadValida, disponibilidadCiclo };
+diff --git a/tests/torito-capacidad-propuesta.test.js b/tests/torito-capacidad-propuesta.test.js
+new file mode 100644
+--- /dev/null
++++ b/tests/torito-capacidad-propuesta.test.js
+@@ -0,0 +1,67 @@
++'use strict';
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { simular, servir, eventos, consultas } = require('./soporte');
++const { prepararPlan } = require('../scripts/plan-regularizacion-pagos');
++const base = { nombre: 'Ciclo Semestral UNI', universidadObjetivo: 'UNI', precio: 200, publicar: false };
++
++test('AC-05 creación usa 100 solo al omitir capacidad; acepta 1 y 120 y rechaza coerciones', async t => {
++  const pedir = await servir(t, [['/api/admin/ciclos', 'admin-ciclos.routes']]);
++  for (const capacidad of [undefined, 1, 100, 120, '120']) {
++    let persistida;
++    simular((sql, params) => {
++      if (/INSERT INTO Ciclo /.test(sql)) { persistida = params.at(-1); return [{ insertId: 7 }]; }
++      return [[]];
++    });
++    assert.equal((await pedir('POST', '/api/admin/ciclos', { ...base, capacidad })).status, 201);
++    assert.equal(persistida, capacidad === undefined ? 100 : Number(capacidad));
++    assert.deepEqual(eventos, ['begin', 'commit', 'release']);
++  }
++  for (const capacidad of [null, 0, -1, 1.5, 121, 500, '', true, [100], {}, '1e2']) {
++    simular();
++    assert.equal((await pedir('POST', '/api/admin/ciclos', { ...base, capacidad })).status, 400);
++    assert.equal(consultas.length, 0);
++  }
++});
++
++test('AC-05 edición no reduce por debajo de inscritos ni corrige históricos automáticamente', async t => {
++  const pedir = await servir(t, [['/api/admin/ciclos', 'admin-ciclos.routes']]);
++  for (const capacidad of [50, 120]) {
++    simular(sql => /FROM Ciclo c/.test(sql) ? [[{
++      IdCiclo: 7, Nombre: base.nombre, UniversidadObjetivo: 'UNI', Precio: 200,
++      Capacidad: 250, TotalAlumnos: 130,
++    }]] : [[]]);
++    assert.equal((await pedir('PUT', '/api/admin/ciclos/7', { capacidad })).status, 409);
++    assert.ok(!consultas.some(({ q }) => /^(UPDATE|INSERT|DELETE)/.test(q)));
++    assert.deepEqual(eventos, ['begin', 'rollback', 'release']);
++  }
++});
++
++test('AC-05 catálogo conserva históricos y no anuncia disponibilidad ilimitada', async t => {
++  const anterior = process.env.PUBLIC_REGISTRATION_ACADEMY_ID;
++  process.env.PUBLIC_REGISTRATION_ACADEMY_ID = '1';
++  t.after(() => { if (anterior === undefined) delete process.env.PUBLIC_REGISTRATION_ACADEMY_ID; else process.env.PUBLIC_REGISTRATION_ACADEMY_ID = anterior; });
++  const pedir = await servir(t, [['/api/ciclos', 'ciclos.routes']]);
++  for (const capacidad of [null, 0, 250]) {
++    simular(() => [[{ IdCiclo: 1, Capacidad: capacidad, TotalAlumnos: 6 }]]);
++    const r = await pedir('GET', '/api/ciclos/publicos');
++    assert.equal(r.status, 200);
++    const salida = r.body[0];
++    assert.equal(salida.capacidad, capacidad ?? 0);
++    assert.equal(salida.disponible, false);
++    assert.equal(salida.vacantesDisponibles, 0);
++    assert.equal(salida.requiereRevisionCapacidad, true);
++  }
++  simular(() => [[{ Capacidad: 100, TotalAlumnos: 6 }]]);
++  assert.equal((await pedir('GET', '/api/ciclos/publicos')).body[0].vacantesDisponibles, 94);
++});
++
++test('AC-05 reapertura de histórico inválido no cambia estado', async t => {
++  const pedir = await servir(t, [['/api/admin/ciclos', 'admin-ciclos.routes']]);
++  simular(() => [[{ IdCiclo: 7, Capacidad: null, TotalAlumnos: 1 }]]);
++  const r = await pedir('PATCH', '/api/admin/ciclos/7/estado', { estado: 'abrir' });
++  assert.equal(r.status, 409);
++  assert.equal(r.body.code, 'CAPACIDAD_REQUIERE_REVISION');
++  assert.ok(!consultas.some(({ q }) => /UPDATE/.test(q)));
++});
++
