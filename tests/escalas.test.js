@@ -1,3 +1,4 @@
+
 // ============================================================================
 // PRUEBAS DE ESCALA POR UNIVERSIDAD OBJETIVO
 // ----------------------------------------------------------------------------
@@ -8,7 +9,7 @@
 // una escala y el servidor validaria otra.
 //
 // Estas pruebas son 100% aisladas: no hay MySQL real (tests/aislamiento.js
-// bloquea mysql2 y dotenv) y el SDK de Gemini se sustituye por un doble local,
+// bloquea mysql2 y dotenv) y la API REST de Gemini se sustituye por un doble local,
 // asi que no se llama a ningun proveedor externo.
 // ============================================================================
 
@@ -21,17 +22,20 @@ const {
   escalaMaximaPorUniversidad,
 } = require('../utils/escalas');
 
-// Doble local del SDK de Gemini: este archivo nunca llama al proveedor real.
-const sdk = require.resolve('@google/generative-ai');
-require.cache[sdk] = { id: sdk, filename: sdk, loaded: true, exports: {
-  GoogleGenerativeAI: class {
-    getGenerativeModel() {
-      return { async generateContent() {
-        return { response: { text: () => JSON.stringify({ respuesta: 'Respuesta simulada', planEstudio: [] }) } };
-      } };
-    }
-  },
-} };
+// Doble local de la API REST de Gemini. Nunca se llama al proveedor real.
+const fetchOriginal = global.fetch;
+global.fetch = async (url, options = {}) => {
+  if (String(url).startsWith('https://generativelanguage.googleapis.com/')) {
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { candidates: [{ content: { parts: [{ text: JSON.stringify({ respuesta: 'Respuesta simulada' }) }] } }] };
+      },
+    };
+  }
+  return fetchOriginal(url, options);
+};
 process.env.GEMINI_API_KEY = 'clave-ficticia-sin-acceso-a-proveedor';
 
 // Escala esperada por universidad (contrato unico del sistema).
@@ -227,5 +231,3 @@ test('notas y Tutor IA conservan su escala; dashboard exige identificación sema
     );
   }
 });
-
-

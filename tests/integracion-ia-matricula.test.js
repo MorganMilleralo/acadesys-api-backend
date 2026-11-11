@@ -1,18 +1,27 @@
+
 ﻿const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { simular, secuencia, servir, consultas } = require('./soporte');
-const sdk = require.resolve('@google/generative-ai');
 const prompts = [];
-require.cache[sdk] = { id: sdk, filename: sdk, loaded: true, exports: {
-  GoogleGenerativeAI: class {
-    getGenerativeModel() {
-      return { async generateContent(prompt) {
-        prompts.push(prompt);
-        return { response: { text: () => JSON.stringify({ respuesta: 'Respuesta simulada', planEstudio: [] }) } };
-      } };
-    }
-  },
-} };
+const fetchOriginal = global.fetch;
+global.fetch = async (url, options = {}) => {
+  if (String(url).startsWith('https://generativelanguage.googleapis.com/')) {
+    const body = JSON.parse(options.body || '{}');
+    const instrucciones = body.systemInstruction?.parts?.map((part) => part.text || '').join('\n') || '';
+    const conversacion = (body.contents || []).flatMap((turno) =>
+      (turno.parts || []).map((part) => part.text || '')
+    ).join('\n');
+    prompts.push(`${instrucciones}\n${conversacion}`);
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { candidates: [{ content: { parts: [{ text: JSON.stringify({ respuesta: 'Respuesta simulada', planEstudio: [] }) }] } }] };
+      },
+    };
+  }
+  return fetchOriginal(url, options);
+};
 process.env.GEMINI_API_KEY = 'clave-ficticia-sin-acceso-a-proveedor';
 const alumno = { id: 10, idAcademia: 1, rol: 'Alumno' };
 const rutas = [['/api', 'ia.routes']];
@@ -77,5 +86,3 @@ test('recuperacion publica rechaza tokens invalidos antes de consultar o enviar 
   const r = await pedir('POST', '/api/matriculas/restablecer-clave', { token: 'invalido-ficticio' });
   assert.equal(r.status, 400); assert.equal(consultas.length, 0);
 });
-
-
