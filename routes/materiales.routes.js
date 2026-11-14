@@ -181,6 +181,80 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
   }
 });
 
+const ROLES_ADMIN = new Set(['administrador', 'recursos humanos']);
+const rolNormalizado = (rol) => String(rol ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  .trim().toLowerCase().replace(/\s+/g, ' ');
+
+// Ruta física del PDF a partir de UrlArchivo, siempre dentro de UPLOAD_DIR.
+function archivoDelMaterial(urlArchivo) {
+  const url = String(urlArchivo || '');
+  let nombre = '';
+  try { nombre = path.basename(decodeURIComponent(url.split('?')[0].split('/').pop() || '')); } catch { return null; }
+  if (!nombre || nombre === '.' || nombre === '..') return null;
+  const archivo = path.join(UPLOAD_DIR, nombre);
+  return path.dirname(archivo) === UPLOAD_DIR ? archivo : null;
+}
+
+// GET /api/materiales/:id/descargar (HU-19)
+// Administración: materiales de su academia. Alumno: solo con matrícula
+// activa en el ciclo del material. Docente: solo si está asignado a ese
+// ciclo y curso. Cualquier otro caso responde 404 para no revelar si existe.
+router.get('/:id/descargar', async (req, res) => {
+  const idMaterial = idPositivo(req.params.id);
+  const idAcademia = idPositivo(req.usuario?.idAcademia);
+  const idUsuario = idPositivo(req.usuario?.idUsuario ?? req.usuario?.id);
+  if (!idMaterial) return res.status(400).json({ error: 'IdMaterial no válido.' });
+  if (!idAcademia || !idUsuario) return res.status(401).json({ error: 'Sesión inválida.' });
+  const rol = rolNormalizado(req.usuario?.rol);
+  try {
+    const [rows] = await pool.query(`
+      SELECT ma.IdMaterial, ma.IdCiclo, ma.IdCurso, ma.NombreArchivo, ma.UrlArchivo
+      FROM MaterialAcademico ma
+      INNER JOIN Ciclo c ON c.IdCiclo = ma.IdCiclo
+      WHERE ma.IdMaterial = ? AND ma.EstadoRegistro = 1 AND c.IdAcademia = ?
+      LIMIT 1
+    `, [idMaterial, idAcademia]);
+    const material = rows[0];
+    if (!material) return res.status(404).json({ error: 'Material no encontrado.' });
+
+    let autorizado = ROLES_ADMIN.has(rol);
+    if (!autorizado && rol === 'alumno') {
+      const [matriculas] = await pool.query(`
+        SELECT m.IdMatricula FROM Matricula m
+        INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
+        WHERE m.IdUsuario = ? AND m.IdCiclo = ? AND m.EstadoRegistro = 1
+          AND u.IdAcademia = ? AND u.EstadoRegistro = 1
+        LIMIT 1
+      `, [idUsuario, material.IdCiclo, idAcademia]);
+      autorizado = matriculas.length > 0;
+    } else if (!autorizado && rol === 'docente') {
+      const [asignaciones] = await pool.query(`
+        SELECT aa.IdAsignacion FROM Asignacion_Aula aa
+        WHERE aa.IdUsuario = ? AND aa.IdCiclo = ? AND aa.IdCurso = ?
+          AND aa.IdAcademia = ? AND aa.EstadoRegistro = 1
+        LIMIT 1
+      `, [idUsuario, material.IdCiclo, material.IdCurso, idAcademia]);
+      autorizado = asignaciones.length > 0;
+    }
+    if (!autorizado) return res.status(404).json({ error: 'Material no encontrado.' });
+
+    const archivo = archivoDelMaterial(material.UrlArchivo);
+    if (!archivo || !fs.existsSync(archivo)) {
+      return res.status(404).json({ code: 'ARCHIVO_NO_DISPONIBLE', error: 'El archivo del material no está disponible en el servidor.' });
+    }
+    res.set('Cache-Control', 'private, no-store');
+    res.set('X-Content-Type-Options', 'nosniff');
+    return res.download(archivo, limpiarNombreArchivo(material.NombreArchivo || 'material.pdf'), {
+      headers: { 'Content-Type': 'application/pdf' },
+    }, (error) => {
+      if (error && !res.headersSent) res.status(500).json({ error: 'No se pudo descargar el material.' });
+    });
+  } catch (error) {
+    console.error('Error en GET /api/materiales/:id/descargar:', error.message);
+    return res.status(500).json({ error: 'No se pudo descargar el material.' });
+  }
+});
+
 router.delete('/:id', requiereRol('Administrador'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -206,10 +280,8 @@ router.delete('/:id', requiereRol('Administrador'), async (req, res) => {
     );
 
     try {
-      const url = String(rows[0].UrlArchivo || '');
-      const nombre = path.basename(decodeURIComponent(url.split('/').pop() || ''));
-      const archivo = path.join(UPLOAD_DIR, nombre);
-      if (nombre && path.dirname(archivo) === UPLOAD_DIR && fs.existsSync(archivo)) {
+      const archivo = archivoDelMaterial(rows[0].UrlArchivo);
+      if (archivo && fs.existsSync(archivo)) {
         fs.unlinkSync(archivo);
       }
     } catch (unlinkError) {
