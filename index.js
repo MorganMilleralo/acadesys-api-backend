@@ -30,13 +30,13 @@ if (faltantes.length > 0) {
   console.error(
     `❌ Faltan variables de entorno obligatorias: ${faltantes.join(", ")}`,
   );
+
   process.exit(1);
 }
 
 if (String(process.env.JWT_SECRET || "").length < 32) {
-  console.error(
-    "❌ JWT_SECRET debe tener al menos 32 caracteres. Configura un secreto largo y único en el entorno.",
-  );
+  console.error("❌ JWT_SECRET debe tener al menos 32 caracteres.");
+
   process.exit(1);
 }
 
@@ -44,46 +44,76 @@ if (String(process.env.JWT_SECRET || "").length < 32) {
 // 2. CONFIGURACIÓN GENERAL DE EXPRESS
 // ============================================================
 
-// Whitelist CORS explícita y centralizada (ver config/cors.js).
 app.set("trust proxy", 1);
 
+// CORS centralizado
 const { corsOptions } = require("./config/cors");
+
 app.use(cors(corsOptions));
-// Firma del proveedor y cuerpo acotado; antes del parser general y JWT.
-const mercadopagoWebhook = require('./routes/mercadopago-webhook.routes');
-app.use('/api/webhooks', express.json({ limit: '32kb' }), mercadopagoWebhook, mercadopagoWebhook.errorHandler);
+
+// ============================================================
+// 3. WEBHOOK CULQI
+// ============================================================
+
+// IMPORTANTE:
+// - Es público, no utiliza JWT de alumnos.
+// - Utiliza autenticación Basic configurada en CulqiPanel.
+// - Se monta antes del parser JSON general.
+// - Su ruta final será POST /api/webhooks/culqi.
+
+const culqiWebhook = require("./routes/culqi-webhook.routes");
+
+app.use("/api/webhooks", express.json({ limit: "32kb" }), culqiWebhook);
+
+// ============================================================
+// 4. PARSERS Y ARCHIVOS ESTÁTICOS
+// ============================================================
+
+// Parser general para el resto de endpoints.
 app.use(express.json({ limit: "15mb" }));
+
 app.use("/uploads", express.static(UPLOADS_DIR));
 
 // ============================================================
-// 3. IMPORTACIÓN DEL MIDDLEWARE JWT
+// 5. MIDDLEWARE DE AUTENTICACIÓN
 // ============================================================
 
 const verificarToken = require("./middlewares/auth.middleware");
 
 // ============================================================
-// 4. IMPORTACIÓN DE RUTAS PÚBLICAS
+// 6. IMPORTACIÓN DE RUTAS
 // ============================================================
 
+// Autenticación
 const authRoutes = require("./routes/auth.routes");
 const recuperacionRoutes = require("./routes/recuperacion.routes");
+
+// Matrículas y ciclos
 const matriculasRoutes = require("./routes/matriculas.routes");
 
-// ciclos.routes.js exporta un router o un objeto que contiene .router.
 const ciclosRoutesModule = require("./routes/ciclos.routes");
 const ciclosRoutes = ciclosRoutesModule.router || ciclosRoutesModule;
 
 // ============================================================
-// 5. RUTAS PÚBLICAS
+// 7. RUTAS PÚBLICAS
 // ============================================================
 
+// Login y autenticación
 app.use("/api", authRoutes);
+
+// Recuperación de contraseña
 app.use("/api/auth", recuperacionRoutes);
+
+// Consulta pública de ciclos
 app.use("/api/ciclos", ciclosRoutes);
+
+// Inscripciones y matrículas públicas.
+// Las operaciones privadas deben conservar sus validaciones
+// de sesión y permisos dentro del propio router.
 app.use("/api/matriculas", matriculasRoutes);
 
 // ============================================================
-// 6. HEALTH CHECK
+// 8. HEALTH CHECK
 // ============================================================
 
 app.get("/ping", (req, res) => {
@@ -96,45 +126,76 @@ app.get("/ping", (req, res) => {
 });
 
 // ============================================================
-// 7. CANDADO GLOBAL JWT
+// 9. CANDADO GLOBAL JWT
 // ============================================================
-// Todas las rutas /api declaradas después de este punto requieren JWT.
+
+// Todas las rutas /api declaradas después de este punto
+// requieren autenticación JWT.
+
 app.use("/api", verificarToken);
 
 // ============================================================
-// 8. RUTAS PRIVADAS ADMINISTRATIVAS
+// 10. RUTAS PRIVADAS ADMINISTRATIVAS
 // ============================================================
 
+// Gestión de ciclos
 app.use("/api/admin/ciclos", require("./routes/admin-ciclos.routes"));
+<<<<<<< HEAD
 // Panel de transacciones online, auditoría y conciliación (antes del router general /api/admin).
 app.use("/api/admin/pagos", require("./routes/admin-pagos.routes"));
+=======
+
+// Dashboard administrativo
+>>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)
 app.use("/api/admin", require("./routes/dashboard.routes"));
 
 // ============================================================
-// 9. RUTAS PRIVADAS EXISTENTES
+// 11. RUTAS PRIVADAS GENERALES
 // ============================================================
 
+// Gestión académica
 app.use("/api", require("./routes/academico.routes"));
+
+// Perfil
 app.use("/api", require("./routes/perfil.routes"));
+
+// Menús y navegación
 app.use("/api", require("./routes/menu.routes"));
+
+// Usuarios
 app.use("/api", require("./routes/usuario.routes"));
+
+// Calificaciones
 app.use("/api/notas", require("./routes/notas.routes"));
+
+// Actas académicas
 app.use("/api", require("./routes/actas.routes"));
+
+// Pagos y comprobantes
 app.use("/api", require("./routes/pagos.routes"));
+
+// Tutor pedagógico IA
 app.use("/api", require("./routes/ia.routes"));
 
-// Intranet y pagos manuales del alumno (rutas existentes).
+// ============================================================
+// 12. RUTAS PRIVADAS DEL ALUMNO
+// ============================================================
+
+// Intranet del alumno
 app.use("/api/alumno", require("./routes/alumno.routes"));
 
-// NUEVO: checkout online de mensualidades (responsabilidad Morgan).
-// Debe permanecer después del middleware JWT porque exige sesión de alumno.
+// Checkout de cuotas mediante Culqi.
+// Se registra UNA SOLA VEZ y después del JWT.
 app.use("/api/alumno", require("./routes/alumno-checkout.routes"));
 
+// Materiales académicos
 app.use("/api/materiales", require("./routes/materiales.routes"));
+
+// Comunicados y avisos
 app.use("/api", require("./routes/comunicados.routes"));
 
 // ============================================================
-// 10. RUTA API NO ENCONTRADA
+// 13. RUTA API NO ENCONTRADA
 // ============================================================
 
 app.use("/api", (req, res) => {
@@ -144,21 +205,32 @@ app.use("/api", (req, res) => {
 });
 
 // ============================================================
-// 11. MANEJO GLOBAL DE ERRORES
+// 14. MANEJO GLOBAL DE ERRORES
 // ============================================================
 
 app.use(require("./middlewares/error.middleware"));
 
 // ============================================================
-// 12. ARRANQUE DEL SERVIDOR
+// 15. ARRANQUE DEL SERVIDOR
 // ============================================================
 
 const server = app.listen(port, () => {
-  console.log(`🚀 AcadeSys API corriendo en el puerto ${port}`);
+  console.log("------------------------------------------");
+  console.log("🚀 AcadeSys API iniciada correctamente");
+  console.log("------------------------------------------");
+
   console.log("📚 Catálogo público:", "/api/ciclos/publicos");
   console.log("📝 Matrículas:", "/api/matriculas/checkout");
-  console.log("🔐 Administración de ciclos:", "/api/admin/ciclos");
+  console.log("🔐 Administración:", "/api/admin");
   console.log("📊 Dashboard:", "/api/admin/dashboard/overview");
+  console.log("💳 Proveedor de pagos: CULQI");
+  console.log("🔔 Webhook Culqi:", "/api/webhooks/culqi");
+  console.log("🎓 Intranet:", "/api/alumno");
+
+  console.log("------------------------------------------");
 });
 
-module.exports = { app, server };
+module.exports = {
+  app,
+  server,
+};

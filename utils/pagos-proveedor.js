@@ -1,3 +1,4 @@
+
 'use strict';
 
 class ErrorPago extends Error {
@@ -19,22 +20,10 @@ function aCentimos(valor) {
   return Number(entero) * 100 + Number(decimal.padEnd(2, '0'));
 }
 
-function idProveedor(valor) {
-  if (typeof valor === 'number' && !Number.isSafeInteger(valor)) return null;
-  if (!['string', 'number'].includes(typeof valor)) return null;
-  const texto = String(valor);
-  return /^[1-9]\d{0,19}$/.test(texto) ? texto : null;
+function idOrdenCulqi(valor) {
+  if (typeof valor !== 'string') return null;
+  const texto = valor.trim();
+  return /^ord_(?:test|live)_[A-Za-z0-9]{8,40}$/.test(texto) ? texto : null;
 }
 
-function urlCheckoutValida(valor) {
-  try {
-    const url = new URL(valor);
-    return typeof valor === 'string' && valor.length <= 1000
-      && url.protocol === 'https:' && !url.username && !url.password && !url.port
-      && ['www.mercadopago.com.pe', 'sandbox.mercadopago.com.pe',
-        'www.mercadopago.com', 'sandbox.mercadopago.com'].includes(url.hostname)
-      && /^(?:\/[a-z]{3})?\/checkout\//.test(url.pathname);
-  } catch { return false; }
-}
-
-module.exports = { ErrorPago, aCentimos, idProveedor, urlCheckoutValida };
+module.exports = { ErrorPago, aCentimos, idOrdenCulqi };

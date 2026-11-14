@@ -1,129 +1,279 @@
-'use strict';
 
-const express = require('express');
+"use strict";
+
+const express = require("express");
 const router = express.Router();
-const requiereRol = require('../middlewares/roles.middleware');
-const { idPositivo } = require('../utils/validaciones');
-const { ErrorPago } = require('../utils/pagos-proveedor');
-const pasarela = require('../services/mercadopago.adapter');
+const requiereRol = require("../middlewares/roles.middleware");
+const { idPositivo } = require("../utils/validaciones");
+const { ErrorPago, aCentimos } = require("../utils/pagos-proveedor");
+const culqi = require("../services/culqi.adapter");
+const transacciones = require("../services/transacciones-pago.service");
 const {
   reservarCheckoutAlumno,
   guardarOrdenCreada,
   marcarErrorCreacion,
   obtenerEstadoPagoAlumno,
+<<<<<<< HEAD
   obtenerReferenciaConciliable,
 } = require('../services/transacciones-pago.service');
 const conciliacion = require('../services/conciliacion-pagos.service');
+=======
+} = require("../services/transacciones-pago.service");
+>>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)
 
-const idUsuarioSesion = (req) => idPositivo(req.usuario?.idUsuario ?? req.usuario?.id);
+const idUsuarioSesion = (req) =>
+  idPositivo(req.usuario?.idUsuario ?? req.usuario?.id);
 const idAcademiaSesion = (req) => idPositivo(req.usuario?.idAcademia);
+router.use(requiereRol("Alumno", "Estudiante"));
 
-router.use(requiereRol('Alumno', 'Estudiante'));
+function datosCliente(reserva) {
+  return {
+    email: reserva.emailAlumno,
+    firstName: reserva.nombreAlumno,
+    lastName: [reserva.apellidoPaterno, reserva.apellidoMaterno]
+      .filter(Boolean)
+      .join(" "),
+  };
+}
 
-// POST /api/alumno/pagos/:idPago/checkout
-// Solo crea/reutiliza el checkout. Jamás marca una cuota como Pagado.
-router.post('/pagos/:idPago/checkout', async (req, res) => {
-  const idPago = idPositivo(req.params.idPago);
-  const idUsuario = idUsuarioSesion(req);
-  const idAcademia = idAcademiaSesion(req);
-  if (!idPago) return res.status(400).json({ error: 'El IdPago no es válido.' });
-  if (!idUsuario || !idAcademia) return res.status(401).json({ error: 'La sesión del alumno no es válida.' });
+function respuestaCulqi({
+  reserva,
+  orderId,
+  estado,
+  reutilizada,
+  statusCode,
+  res,
+}) {
+  return res.status(statusCode).json({
+    exito: true,
+    proveedor: "CULQI",
+    reutilizada: Boolean(reutilizada),
+    idPago: Number(reserva.idPago),
+    idTransaccion: Number(reserva.idTransaccion),
+    orderId,
+    publicKey: String(process.env.CULQI_PUBLIC_KEY || "").trim(),
+    amountCentimos: aCentimos(reserva.monto),
+    amount: Number(reserva.monto),
+    currency: "PEN",
+    estado: estado || "PENDIENTE",
+    client: datosCliente(reserva),
+    mensaje:
+      "Orden preparada. El pago seguirá pendiente hasta recibir y verificar la notificación de Culqi.",
+  });
+}
 
+async function checkoutCulqi({ idPago, idUsuario, idAcademia, res }) {
   let reserva;
   try {
-    pasarela.verificarConfiguracion();
-    reserva = await reservarCheckoutAlumno({ idPago, idUsuario, idAcademia });
-    if (reserva.reutilizada && reserva.checkoutUrl) {
-      return res.status(200).json({
-        exito: true,
-        reutilizada: true,
-        idPago,
-        idTransaccion: reserva.idTransaccion,
-        estado: reserva.estado,
-        monto: reserva.monto,
-        moneda: reserva.moneda,
-        checkoutUrl: reserva.checkoutUrl,
-        mensaje: 'Se reutilizó el checkout pendiente de esta cuota.',
-      });
-    }
+    // La ausencia de credenciales devuelve 503 antes de abrir una transacción SQL.
+    culqi.verificarConfiguracion();
+    reserva = await reservarCheckoutAlumno({
+      idPago,
+      idUsuario,
+      idAcademia,
+      proveedor: "CULQI",
+    });
+
     if (reserva.enPreparacion) {
       return res.status(409).json({
-        code: 'CHECKOUT_EN_PREPARACION',
+        code: "CHECKOUT_EN_PREPARACION",
         idTransaccion: reserva.idTransaccion,
-        error: 'Ya se está preparando un checkout para esta cuota. Actualiza la pantalla en unos segundos.',
+        error:
+          "Ya se está preparando una orden para esta cuota. Actualiza la pantalla en unos segundos.",
       });
     }
 
-    const orden = await pasarela.crearOrdenPago({
-      idTransaccion: reserva.idTransaccion,
-      referenciaInterna: reserva.referenciaInterna,
-      idempotencyKey: reserva.idempotencyKey,
-      monto: reserva.monto,
-      moneda: reserva.moneda,
-      concepto: reserva.concepto,
-      ciclo: reserva.ciclo,
-      alumno: reserva.alumno,
-      payerEmail: reserva.emailAlumno,
-      notificationUrl: process.env.MERCADOPAGO_WEBHOOK_URL || null,
-      returnUrl: process.env.PAYMENT_RETURN_URL || null,
+    let orderId = reserva.idOrdenProveedor || null;
+    if (!orderId) {
+      const orden = await culqi.crearOrdenPago({ ...reserva, idPago });
+      orderId = orden.idOrdenProveedor;
+
+      // Persistimos la orden en CREANDO antes de confirmarla. Si la respuesta
+      // de confirmación se pierde, el siguiente intento consulta el mismo ID.
+      await guardarOrdenCreada({
+        idTransaccion: reserva.idTransaccion,
+        idOrdenProveedor: orderId,
+        checkoutUrl: null,
+        estadoProveedor: "created",
+        proveedor: "CULQI",
+      });
+    }
+
+    const ordenActual = await culqi.confirmarOrdenPago(orderId, {
+      ...reserva,
+      idPago,
     });
+    if (["expired", "deleted"].includes(ordenActual.state)) {
+      const estadoVerificado = await culqi.consultarOrdenVerificada({
+        orderId,
+      });
+      await transacciones.actualizarEstadoNoAprobado(estadoVerificado);
+      throw new ErrorPago(
+        409,
+        "ORDEN_CULQI_EXPIRADA",
+        "El QR de esta orden venció o fue cancelado. Vuelve a pulsar pagar para generar uno nuevo.",
+      );
+    }
+    if (ordenActual.state === "paid") {
+      const pagoVerificado = await culqi.consultarOrdenVerificada({ orderId });
+      await transacciones.confirmarPagoProveedor(pagoVerificado);
+      throw new ErrorPago(
+        409,
+        "CUOTA_YA_PAGADA",
+        "Culqi ya reporta esta orden como pagada. Se actualizó el estado de tu cuota.",
+      );
+    }
 
     const guardada = await guardarOrdenCreada({
       idTransaccion: reserva.idTransaccion,
-      idOrdenProveedor: orden?.idOrdenProveedor,
-      checkoutUrl: orden?.checkoutUrl,
-      estadoProveedor: orden?.estado || 'pending',
+      idOrdenProveedor: orderId,
+      checkoutUrl: null,
+      estadoProveedor: "pending",
+      proveedor: "CULQI",
     });
+    reserva.estado = guardada.Estado;
 
-    return res.status(201).json({
-      exito: true,
-      reutilizada: false,
-      idPago,
-      idTransaccion: reserva.idTransaccion,
-      estado: guardada.Estado,
-      monto: reserva.monto,
-      moneda: reserva.moneda,
-      checkoutUrl: guardada.UrlCheckout,
-      mensaje: 'Checkout creado. La cuota seguirá pendiente hasta recibir una confirmación verificada.',
+    // El webhook puede llegar mientras respondemos al checkout. Si ya cerró
+    // la transacción, no abrimos otra vez una orden pagada o vencida.
+    if (String(guardada.Estado).toUpperCase() === "APROBADA") {
+      return res.status(409).json({
+        code: "CUOTA_YA_PAGADA",
+        error:
+          "El pago ya fue confirmado por Culqi. Actualiza tus cuotas para ver el estado.",
+      });
+    }
+    if (
+      ["EXPIRADA", "CANCELADA", "RECHAZADA"].includes(
+        String(guardada.Estado).toUpperCase(),
+      )
+    ) {
+      return res.status(409).json({
+        code: "ORDEN_CULQI_NO_VIGENTE",
+        error:
+          "La orden ya no está vigente. Vuelve a iniciar el pago para generar otra orden.",
+      });
+    }
+
+    return respuestaCulqi({
+      reserva: { ...reserva, idPago },
+      orderId,
+      estado: reserva.estado || "PENDIENTE",
+      reutilizada: Boolean(reserva.reutilizada || reserva.requiereConfirmacion),
+      statusCode:
+        reserva.reutilizada || reserva.requiereConfirmacion ? 200 : 201,
+      res,
     });
   } catch (error) {
-    // Solo liberar la reserva cuando el adaptador garantiza que NO creó una
-    // orden. Ante timeout/red ambigua se conserva CREANDO para evitar cobrar
-    // dos veces al reintentar con una nueva clave idempotente.
+    // Solo se libera una reserva cuando se sabe que no existe una orden en Culqi.
+    // marcarErrorCreacion exige además que IdOrdenProveedor siga NULL.
     if (reserva?.idTransaccion && error?.safeToMarkError === true) {
-      try { await marcarErrorCreacion(reserva.idTransaccion); } catch { /* conservar error original */ }
+      try {
+        await marcarErrorCreacion(reserva.idTransaccion, "CULQI");
+      } catch {
+        /* conservar error original */
+      }
     }
     const conocido = error instanceof ErrorPago;
     const status = conocido ? error.status : 500;
-    if (status >= 500) console.error('Error al crear checkout de alumno:', conocido ? error.code : 'CHECKOUT_NO_DISPONIBLE');
+    if (status >= 500)
+      console.error(
+        "Error al crear checkout Culqi:",
+        conocido ? error.code : "CULQI_CHECKOUT_NO_DISPONIBLE",
+      );
     return res.status(status).json({
-      code: conocido ? error.code : 'CHECKOUT_NO_DISPONIBLE',
-      error: status === 503
-        ? 'El pago online todavía no está disponible. Puedes usar el medio manual habilitado por la academia.'
-        : (conocido ? error.message : 'No se pudo iniciar el checkout.'),
+      code: conocido ? error.code : "CULQI_CHECKOUT_NO_DISPONIBLE",
+      error: conocido
+        ? error.message
+        : "No se pudo iniciar el pago. La transacción quedó protegida para evitar un cobro duplicado.",
     });
   }
+}
+
+// POST /api/alumno/pagos/:idPago/checkout
+// El navegador envía solo el ID de la cuota. El servidor calcula monto/titular.
+router.post("/pagos/:idPago/checkout", async (req, res) => {
+  const idPago = idPositivo(req.params.idPago);
+  const idUsuario = idUsuarioSesion(req);
+  const idAcademia = idAcademiaSesion(req);
+  if (!idPago)
+    return res.status(400).json({ error: "El IdPago no es válido." });
+  if (!idUsuario || !idAcademia)
+    return res
+      .status(401)
+      .json({ error: "La sesión del alumno no es válida." });
+
+  // AcadeSys opera exclusivamente con Culqi para nuevos pagos online.
+  // Los registros históricos de otros proveedores permanecen intactos en MySQL.
+  return checkoutCulqi({ idPago, idUsuario, idAcademia, res });
 });
 
-// GET /api/alumno/pagos/:idPago/estado
-// Devuelve el estado interno. Nunca consulta ni modifica un estado enviado por React.
-router.get('/pagos/:idPago/estado', async (req, res) => {
+// GET /api/alumno/pagos/:idPago/estado. Solo consulta MySQL; nunca confirma por query.
+router.get("/pagos/:idPago/estado", async (req, res) => {
   try {
-    const data = await obtenerEstadoPagoAlumno({
+    const consulta = {
       idPago: req.params.idPago,
       idUsuario: idUsuarioSesion(req),
       idAcademia: idAcademiaSesion(req),
-    });
+    };
+    let data = await obtenerEstadoPagoAlumno(consulta);
+
+    // La consulta manual también reconcilia Culqi por API. Así el alumno puede
+    // recuperar el estado incluso si el webhook se retrasó, sin confiar en
+    // parámetros del navegador ni declarar el pago por el retorno del checkout.
+    if (
+      data?.transaccion?.proveedor === "CULQI" &&
+      data?.transaccion?.orderId &&
+      ["CREANDO", "PENDIENTE"].includes(
+        String(data.transaccion.estado || "").toUpperCase(),
+      )
+    ) {
+      try {
+        const pagoVerificado = await culqi.consultarOrdenVerificada({
+          orderId: data.transaccion.orderId,
+        });
+        if (pagoVerificado.estadoProveedor === "paid") {
+          await transacciones.confirmarPagoProveedor(pagoVerificado);
+        } else {
+          await transacciones.actualizarEstadoNoAprobado(pagoVerificado);
+        }
+        data = await obtenerEstadoPagoAlumno(consulta);
+      } catch (errorSincronizacion) {
+        // El estado previamente registrado sigue siendo válido; no exponemos
+        // fallos internos ni convertimos un GET en error si Culqi está lento.
+        if (
+          errorSincronizacion instanceof ErrorPago &&
+          errorSincronizacion.status < 500
+        ) {
+          console.error(
+            "Reconciliación Culqi requiere revisión:",
+            errorSincronizacion.code,
+          );
+        } else if (errorSincronizacion?.status >= 500) {
+          console.error("Reconciliación Culqi temporalmente no disponible.");
+        }
+      }
+    }
     return res.json(data);
   } catch (error) {
     const conocido = error instanceof ErrorPago;
     const status = conocido ? error.status : 500;
-    if (status >= 500) console.error('Error al consultar estado de checkout:', conocido ? error.code : 'ESTADO_PAGO_NO_DISPONIBLE');
-    return res.status(status).json({ code: conocido ? error.code : 'ESTADO_PAGO_NO_DISPONIBLE',
-      error: conocido ? error.message : 'No se pudo consultar el estado del pago.' });
+    if (status >= 500)
+      console.error(
+        "Error al consultar estado de checkout:",
+        conocido ? error.code : "ESTADO_PAGO_NO_DISPONIBLE",
+      );
+    return res
+      .status(status)
+      .json({
+        code: conocido ? error.code : "ESTADO_PAGO_NO_DISPONIBLE",
+        error: conocido
+          ? error.message
+          : "No se pudo consultar el estado del pago.",
+      });
   }
 });
 
+<<<<<<< HEAD
 // POST /api/alumno/pagos/:idPago/conciliar
 // «Consultar estado del pago»: si el webhook no llegó, busca la operación en
 // Mercado Pago y la aplica con la misma verificación que el webhook. Nunca usa
@@ -161,3 +311,6 @@ router.post('/pagos/:idPago/conciliar', async (req, res) => {
 });
 
 module.exports = router;
+=======
+module.exports = router;
+>>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)

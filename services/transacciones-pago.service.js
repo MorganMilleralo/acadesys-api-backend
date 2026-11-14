@@ -1,11 +1,12 @@
+
 'use strict';
 
 const crypto = require('node:crypto');
 const pool = require('../config/db');
 const { rollbackSeguro } = require('../utils/validaciones');
-const { ErrorPago, aCentimos, idProveedor, urlCheckoutValida } = require('../utils/pagos-proveedor');
+const { ErrorPago, aCentimos, idOrdenCulqi } = require('../utils/pagos-proveedor');
 
-const PROVEEDOR = 'MERCADOPAGO';
+const PROVEEDOR = 'CULQI';
 const MONEDA = 'PEN';
 
 // W3: una reserva en CREANDO sin preferencia guardada después de 2 minutos es
@@ -89,10 +90,14 @@ async function descartarTransaccion(connection, tx, idAcademia, cuota, estadoNue
  * La fila de PagosMensualidad se bloquea antes de comprobar si ya existe un
  * checkout pendiente, evitando dos reservas concurrentes para la misma cuota.
  */
-async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia }) {
+async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor = PROVEEDOR }) {
   const pagoId = idPositivo(idPago);
   const usuarioId = idPositivo(idUsuario);
   const academiaId = idPositivo(idAcademia);
+  const proveedorActual = String(proveedor || PROVEEDOR).trim().toUpperCase();
+  if (proveedorActual !== 'CULQI') {
+    throw errorPago(400, 'PROVEEDOR_INVALIDO', 'El proveedor de pago no está admitido.');
+  }
   if (!pagoId || !usuarioId || !academiaId) {
     throw errorPago(400, 'DATOS_INVALIDOS', 'No se pudo identificar la cuota o la sesión del alumno.');
   }
@@ -104,7 +109,8 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia }) {
 
     const [pagos] = await connection.query(
       `SELECT p.IdPago, p.IdUsuario, p.IdCiclo, p.Mes, p.Monto, p.Estado,
-              u.IdAcademia, u.CorreoElectronico,
+              u.IdAcademia, u.CorreoElectronico, u.Celular AS Telefono,
+              u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno,
               CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, NULLIF(u.ApellidoMaterno, '')) AS Alumno,
               c.Nombre AS Ciclo
        FROM PagosMensualidad p
@@ -137,7 +143,13 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia }) {
       await connection.rollback();
       throw errorPago(409, 'MONTO_NO_COBRABLE', 'La cuota no tiene un importe válido para pagar online.');
     }
+    if (proveedorActual === 'CULQI' && (montoCentimos < 600 || montoCentimos > 50000)) {
+      await connection.rollback();
+      throw errorPago(422, 'MONTO_FUERA_DE_RANGO_BILLETERAS',
+        'El pago con billeteras móviles debe estar entre S/ 6.00 y S/ 500.00. Contacta con la academia para otra forma de pago.');
+    }
 
+<<<<<<< HEAD
     // W5: el pago manual y el online no se superponen. Mientras administración
     // revisa un comprobante, no se abre un cobro online de la misma cuota.
     const [enRevision] = await connection.query(
@@ -153,6 +165,9 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia }) {
         'Esta cuota tiene un comprobante en revisión. Espera la respuesta de la academia antes de pagar online.');
     }
 
+=======
+    const filtroTerminal = "Estado NOT IN ('ERROR', 'EXPIRADA', 'CANCELADA', 'RECHAZADA')";
+>>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)
     const [existentes] = await connection.query(
       `SELECT IdTransaccion, IdPago, ReferenciaInterna, IdOrdenProveedor, ClaveIdempotencia,
               Monto, Moneda, Estado, UrlCheckout, CodigoEstadoProveedor,
@@ -160,11 +175,16 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia }) {
        FROM PagoTransaccion
        WHERE IdPago = ? AND IdUsuario = ? AND IdAcademia = ?
          AND Proveedor = ? AND EstadoRegistro = 1
+<<<<<<< HEAD
          AND Estado NOT IN ('ERROR', 'EXPIRADA')
+=======
+         AND ${filtroTerminal}
+>>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)
        ORDER BY IdTransaccion DESC LIMIT 1 FOR UPDATE`,
-      [pagoId, usuarioId, academiaId, PROVEEDOR],
+      [pagoId, usuarioId, academiaId, proveedorActual],
     );
 
+<<<<<<< HEAD
     let actual = existentes[0] || null;
     if (actual) {
       const antiguedad = Number(actual.AntiguedadSegundos);
@@ -183,28 +203,56 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia }) {
     }
 
     if (actual) {
+=======
+    const datosAlumno = {
+      emailAlumno: pago.CorreoElectronico || null,
+      telefonoAlumno: pago.Telefono || null,
+      nombreAlumno: pago.Nombres || '',
+      apellidoPaterno: pago.ApellidoPaterno || '',
+      apellidoMaterno: pago.ApellidoMaterno || '',
+      alumno: pago.Alumno || 'Alumno',
+      ciclo: pago.Ciclo || 'Ciclo académico',
+      concepto: String(pago.Mes || ''),
+    };
+
+    if (existentes.length) {
+      const actual = existentes[0];
+>>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)
       if (aCentimos(actual.Monto) !== montoCentimos || actual.Moneda !== MONEDA) {
         await connection.rollback();
         throw errorPago(409, 'CHECKOUT_IMPORTE_CAMBIADO',
           'El importe de la cuota cambió desde tu último intento. Podrás pagar con el importe nuevo cuando venza el checkout anterior (máximo 65 minutos).');
       }
-      if (['PENDIENTE', 'RECHAZADA', 'CANCELADA'].includes(actual.Estado)
-          && actual.IdOrdenProveedor && urlCheckoutValida(actual.UrlCheckout)) {
+
+      if (proveedorActual === 'CULQI' && actual.Estado === 'PENDIENTE'
+          && idOrdenCulqi(actual.IdOrdenProveedor)) {
         await connection.commit();
         return {
-          reutilizada: true,
-          enPreparacion: false,
+          reutilizada: true, enPreparacion: false,
+          idPago: pagoId,
           idTransaccion: Number(actual.IdTransaccion),
           referenciaInterna: actual.ReferenciaInterna,
           idempotencyKey: actual.ClaveIdempotencia,
-          monto: Number(actual.Monto),
-          moneda: actual.Moneda,
-          estado: actual.Estado,
-          checkoutUrl: actual.UrlCheckout,
-          emailAlumno: pago.CorreoElectronico || null,
-          alumno: pago.Alumno || 'Alumno',
-          ciclo: pago.Ciclo || 'Ciclo académico',
-          concepto: String(pago.Mes || ''),
+          idOrdenProveedor: actual.IdOrdenProveedor,
+          monto: Number(actual.Monto), moneda: actual.Moneda, estado: actual.Estado,
+          proveedor: proveedorActual,
+          ...datosAlumno,
+        };
+      }
+
+      if (proveedorActual === 'CULQI' && actual.Estado === 'CREANDO'
+          && idOrdenCulqi(actual.IdOrdenProveedor)) {
+        await connection.commit();
+        return {
+          reutilizada: false, enPreparacion: false, requiereConfirmacion: true,
+          idPago: pagoId,
+          idTransaccion: Number(actual.IdTransaccion),
+          referenciaInterna: actual.ReferenciaInterna,
+          idempotencyKey: actual.ClaveIdempotencia,
+          idOrdenProveedor: actual.IdOrdenProveedor,
+          monto: Number(actual.Monto), moneda: actual.Moneda, estado: actual.Estado,
+          proveedor: proveedorActual,
+          ...datosAlumno,
         };
       }
 
@@ -224,13 +272,14 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia }) {
         (IdPago, IdUsuario, IdAcademia, Proveedor, ReferenciaInterna,
          ClaveIdempotencia, Monto, Moneda, Estado, FechaCreacion, FechaActualizacion, EstadoRegistro)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CREANDO', NOW(), NOW(), 1)`,
-      [pagoId, usuarioId, academiaId, PROVEEDOR, referenciaInterna, idempotencyKey, Number(pago.Monto), MONEDA],
+      [pagoId, usuarioId, academiaId, proveedorActual, referenciaInterna, idempotencyKey, Number(pago.Monto), MONEDA],
     );
 
     await connection.commit();
     return {
       reutilizada: false,
       enPreparacion: false,
+      idPago: pagoId,
       idTransaccion: Number(insertado.insertId),
       referenciaInterna,
       idempotencyKey,
@@ -238,10 +287,8 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia }) {
       moneda: MONEDA,
       estado: 'CREANDO',
       checkoutUrl: null,
-      emailAlumno: pago.CorreoElectronico || null,
-      alumno: pago.Alumno || 'Alumno',
-      ciclo: pago.Ciclo || 'Ciclo académico',
-      concepto: String(pago.Mes || ''),
+      proveedor: proveedorActual,
+      ...datosAlumno,
     };
   } catch (error) {
     await rollbackSeguro(connection);
@@ -251,43 +298,65 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia }) {
   }
 }
 
-async function guardarOrdenCreada({ idTransaccion, idOrdenProveedor, checkoutUrl, estadoProveedor = 'pending' }) {
+async function guardarOrdenCreada({
+  idTransaccion,
+  idOrdenProveedor,
+  checkoutUrl = null,
+  estadoProveedor = 'pending',
+  proveedor = PROVEEDOR,
+}) {
   const id = idPositivo(idTransaccion);
-  const orden = String(idOrdenProveedor || '').trim();
-  const url = String(checkoutUrl || '').trim();
-  if (!id || !orden || orden.length > 120) throw errorPago(400, 'ORDEN_INVALIDA', 'El proveedor no devolvió un identificador de orden válido.');
-  let urlValidada;
-  try { urlValidada = new URL(url); } catch { throw errorPago(502, 'URL_CHECKOUT_INVALIDA', 'El proveedor no devolvió una URL de checkout válida.'); }
-  if (!urlCheckoutValida(url)) throw errorPago(502, 'URL_CHECKOUT_INVALIDA', 'La URL debe ser un checkout HTTPS de Mercado Pago Perú.');
+  const proveedorActual = String(proveedor || PROVEEDOR).trim().toUpperCase();
+  const orden = idOrdenCulqi(idOrdenProveedor);
+  if (!id || proveedorActual !== 'CULQI' || !orden || orden !== String(idOrdenProveedor).trim()
+      || (checkoutUrl !== null && checkoutUrl !== undefined && checkoutUrl !== '')) {
+    throw errorPago(400, 'ORDEN_CULQI_INVALIDA', 'Los datos de la orden Culqi no son válidos.');
+  }
 
-  const [actualizacion] = await pool.query(
+  const estadoProveedorActual = String(estadoProveedor || '').trim().toLowerCase();
+  if (!['created', 'pending'].includes(estadoProveedorActual)) {
+    throw errorPago(409, 'ESTADO_ORDEN_CULQI_INVALIDO', 'Culqi devolvió un estado de orden no esperado.');
+  }
+
+  await pool.query(
     `UPDATE PagoTransaccion
-     SET IdOrdenProveedor = ?, UrlCheckout = ?,
+     SET IdOrdenProveedor = ?, UrlCheckout = NULL,
          CodigoEstadoProveedor = IF(Estado = 'CREANDO', ?, CodigoEstadoProveedor),
-         Estado = IF(Estado = 'CREANDO', 'PENDIENTE', Estado),
+         Estado = IF(Estado = 'CREANDO' AND ? = 'pending', 'PENDIENTE', Estado),
          FechaActualizacion = NOW()
      WHERE IdTransaccion = ? AND EstadoRegistro = 1
-       AND Proveedor = 'MERCADOPAGO'
+       AND Proveedor = 'CULQI'
        AND (IdOrdenProveedor IS NULL OR IdOrdenProveedor = ?)
        AND Estado <> 'ERROR'`,
-    [orden, urlValidada.toString(), String(estadoProveedor).slice(0, 80), id, orden],
+    [orden, estadoProveedorActual, estadoProveedorActual, id, orden],
   );
-  if (actualizacion.affectedRows !== 1) throw errorPago(409, 'ORDEN_NO_GUARDADA', 'No se pudo guardar el checkout; requiere conciliación.');
+
   const [rows] = await pool.query(
-    `SELECT IdTransaccion, Estado, UrlCheckout FROM PagoTransaccion
-     WHERE IdTransaccion = ? AND EstadoRegistro = 1 LIMIT 1`,
+    `SELECT IdTransaccion, Estado, UrlCheckout, IdOrdenProveedor
+     FROM PagoTransaccion
+     WHERE IdTransaccion = ? AND EstadoRegistro = 1
+     LIMIT 1`,
     [id],
   );
-  if (!rows.length) throw errorPago(404, 'TRANSACCION_NO_ENCONTRADA', 'No se encontró la transacción creada.');
+  if (!rows.length) {
+    throw errorPago(404, 'TRANSACCION_NO_ENCONTRADA', 'No se encontró la transacción creada.');
+  }
+  if (rows[0].IdOrdenProveedor !== orden || rows[0].Estado === 'ERROR') {
+    throw errorPago(409, 'ORDEN_NO_GUARDADA', 'La orden Culqi no coincide con la transacción reservada.');
+  }
   return rows[0];
 }
 
-async function marcarErrorCreacion(idTransaccion) {
+async function marcarErrorCreacion(idTransaccion, proveedor = PROVEEDOR) {
   const id = idPositivo(idTransaccion);
-  if (!id) return;
+  const proveedorActual = String(proveedor || PROVEEDOR).trim().toUpperCase();
+  if (!id || proveedorActual !== 'CULQI') return;
   await pool.query(
-    `UPDATE PagoTransaccion SET Estado = 'ERROR', FechaActualizacion = NOW()
-     WHERE IdTransaccion = ? AND Estado = 'CREANDO' AND EstadoRegistro = 1`,
+    `UPDATE PagoTransaccion
+     SET Estado = 'ERROR', FechaActualizacion = NOW()
+     WHERE IdTransaccion = ? AND Estado = 'CREANDO'
+       AND IdOrdenProveedor IS NULL AND Proveedor = 'CULQI'
+       AND EstadoRegistro = 1`,
     [id],
   );
 }
@@ -325,6 +394,7 @@ async function obtenerEstadoPagoAlumno({ idPago, idUsuario, idAcademia }) {
     transaccion: row.IdTransaccion ? {
       idTransaccion: Number(row.IdTransaccion),
       proveedor: row.Proveedor,
+      orderId: row.Proveedor === 'CULQI' ? row.IdOrdenProveedor : null,
       estado: row.EstadoTransaccion,
       referenciaInterna: row.ReferenciaInterna,
       checkoutUrl: row.UrlCheckout,
@@ -341,19 +411,34 @@ async function obtenerEstadoPagoAlumno({ idPago, idUsuario, idAcademia }) {
  * existente guarda la versión de cada pago, sin ampliar el esquema de Morgan.
  */
 async function aplicarPagoProveedor(datos) {
+  const proveedorActual = String(datos?.proveedor || PROVEEDOR).trim().toUpperCase();
   const { referenciaInterna: referencia, idOrdenProveedor: orden, idPagoProveedor,
-    idTransaccion, monto, moneda, estadoProveedor, fechaActualizacionProveedor } = datos;
-  const estados = { approved: 'APROBADA', pending: 'PENDIENTE', in_process: 'PENDIENTE',
-    authorized: 'PENDIENTE', in_mediation: 'PENDIENTE', rejected: 'RECHAZADA',
-    cancelled: 'CANCELADA', refunded: 'REEMBOLSADA', charged_back: 'CONTRACARGO' };
+    idTransaccion, idPago: idPagoMetadata, monto, moneda, estadoProveedor, fechaActualizacionProveedor } = datos;
+  if (proveedorActual !== 'CULQI') {
+    throw errorPago(409, 'PROVEEDOR_NO_ADMITIDO', 'La notificación pertenece a un proveedor no admitido.');
+  }
+
+  const esCulqi = proveedorActual === 'CULQI';
+  const estadoAprobado = esCulqi ? 'paid' : 'approved';
+  const estados = esCulqi
+    ? { created: 'PENDIENTE', pending: 'PENDIENTE', paid: 'APROBADA', expired: 'EXPIRADA', deleted: 'CANCELADA' }
+    : { approved: 'APROBADA', pending: 'PENDIENTE', in_process: 'PENDIENTE',
+      authorized: 'PENDIENTE', in_mediation: 'PENDIENTE', rejected: 'RECHAZADA',
+      cancelled: 'CANCELADA', refunded: 'REEMBOLSADA', charged_back: 'CONTRACARGO' };
   const importe = aCentimos(monto);
-  if (datos.proveedor !== PROVEEDOR || typeof referencia !== 'string' || !/^ACS-[1-9]\d*-[-a-f0-9]{36}$/.test(referencia)
-      || typeof orden !== 'string' || !/^[\w-]{1,120}$/.test(orden)
-      || !idProveedor(idPagoProveedor) || !idPositivo(idTransaccion) || !importe
+  const idOrdenValido = idOrdenCulqi(orden);
+  const idPagoProveedorValido = idOrdenCulqi(idPagoProveedor);
+  if (typeof referencia !== 'string' || !/^ACS-[1-9]\d*-[-a-f0-9]{36}$/.test(referencia)
+      || !idOrdenValido || !idPagoProveedorValido || !idPositivo(idTransaccion) || !importe
       || moneda !== MONEDA || !Object.hasOwn(estados, estadoProveedor)
       || datos.estado !== estados[estadoProveedor]
       || !Number.isSafeInteger(fechaActualizacionProveedor) || fechaActualizacionProveedor <= 0) {
     throw errorPago(409, 'EVENTO_PAGO_INVALIDO', 'La operación verificada no contiene los datos requeridos.');
+  }
+  if (esCulqi && (String(idPagoProveedor) !== String(orden)
+      || !idPositivo(idPagoMetadata)
+      || !referencia.startsWith(`ACS-${Number(idPagoMetadata)}-`))) {
+    throw errorPago(409, 'ORDEN_CULQI_NO_COINCIDE', 'La orden, cuota y referencia no coinciden con la notificación.');
   }
 
   let connection;
@@ -361,7 +446,7 @@ async function aplicarPagoProveedor(datos) {
     // Localizar sin lock, luego tomar cuota ANTES de transacción, como checkout.
     const [localizadas] = await pool.query(
       'SELECT IdPago FROM PagoTransaccion WHERE Proveedor = ? AND ReferenciaInterna = ? AND EstadoRegistro = 1 LIMIT 1',
-      [PROVEEDOR, referencia],
+      [proveedorActual, referencia],
     );
     if (!localizadas.length) throw errorPago(404, 'TRANSACCION_NO_ENCONTRADA', 'No existe la transacción notificada.');
     connection = await pool.getConnection();
@@ -381,30 +466,34 @@ async function aplicarPagoProveedor(datos) {
               IdOrdenProveedor, Monto, Moneda, Estado, CodigoEstadoProveedor
        FROM PagoTransaccion
        WHERE Proveedor = ? AND ReferenciaInterna = ? AND EstadoRegistro = 1
-       LIMIT 1 FOR UPDATE`, [PROVEEDOR, referencia],
+       LIMIT 1 FOR UPDATE`, [proveedorActual, referencia],
     );
     const tx = rows[0];
     if (!tx || Number(tx.IdTransaccion) !== Number(idTransaccion) || tx.ReferenciaInterna !== referencia
         || Number(tx.IdPago) !== Number(cuota.IdPago) || Number(tx.IdUsuario) !== Number(cuota.IdUsuario)
-        || Number(tx.IdAcademia) !== Number(cuota.IdAcademia)) {
+        || Number(tx.IdAcademia) !== Number(cuota.IdAcademia) || tx.Proveedor !== proveedorActual
+        || (esCulqi && Number(tx.IdPago) !== Number(idPagoMetadata))) {
       throw errorPago(409, 'TRANSACCION_NO_COINCIDE', 'El pago no corresponde a la transacción y cuota registradas.');
     }
     if ((tx.IdOrdenProveedor && tx.IdOrdenProveedor !== orden)
         || (!tx.IdOrdenProveedor && tx.Estado !== 'CREANDO')) {
-      throw errorPago(409, 'ORDEN_NO_COINCIDE', 'La preferencia no coincide con la transacción interna.');
+      throw errorPago(409, 'ORDEN_NO_COINCIDE', 'La orden no coincide con la transacción interna.');
     }
     if (aCentimos(tx.Monto) !== importe || aCentimos(cuota.Monto) !== importe || tx.Moneda !== MONEDA) {
       throw errorPago(409, 'IMPORTE_NO_COINCIDE', 'El importe o moneda no coincide con la cuota registrada.');
     }
+
+    const eventoEstado = `${proveedorActual}_EVENTO`;
     const [auditorias] = await connection.query(
       `SELECT IdAuditoria, Motivo FROM PagoAuditoria
-       WHERE IdPago = ? AND IdAcademia = ? AND Evento = 'MERCADOPAGO_EVENTO'
-       ORDER BY IdAuditoria DESC FOR UPDATE`, [tx.IdPago, tx.IdAcademia],
+       WHERE IdPago = ? AND IdAcademia = ? AND Evento = ?
+       ORDER BY IdAuditoria DESC FOR UPDATE`, [tx.IdPago, tx.IdAcademia, eventoEstado],
     );
     const recibos = auditorias.map(row => {
       let recibo;
       try { recibo = JSON.parse(row.Motivo); } catch { /* falla cerrada */ }
-      if (!recibo || recibo.v !== 1 || !idProveedor(recibo.pago)
+      const reciboPagoValido = idOrdenCulqi(recibo?.pago);
+      if (!recibo || recibo.v !== 1 || !reciboPagoValido
           || !idPositivo(recibo.transaccion) || !Number.isSafeInteger(recibo.actualizado)
           || !Object.hasOwn(estados, recibo.estado)) {
         throw errorPago(409, 'AUDITORIA_PAGO_INVALIDA', 'La auditoría del proveedor requiere revisión.');
@@ -420,9 +509,10 @@ async function aplicarPagoProveedor(datos) {
       await connection.commit();
       return { ...resultado, idempotente: true, atrasada: fechaActualizacionProveedor < anterior.actualizado };
     }
-    if (anterior && ['approved', 'refunded', 'charged_back', 'cancelled', 'rejected'].includes(anterior.estado)
-        && !['refunded', 'charged_back'].includes(estadoProveedor)
-        && estadoProveedor !== anterior.estado) {
+    const estadosFinales = ['paid', 'expired', 'deleted'];
+    const estadosReversion = [];
+    if (anterior && estadosFinales.includes(anterior.estado)
+        && !estadosReversion.includes(estadoProveedor) && estadoProveedor !== anterior.estado) {
       throw errorPago(409, 'TRANSICION_PROVEEDOR_INVALIDA', 'La transición del pago requiere conciliación.');
     }
 
@@ -430,10 +520,10 @@ async function aplicarPagoProveedor(datos) {
     let codigoProveedor = tx.CodigoEstadoProveedor;
     let pagoDuplicado = false;
     let confirmada = false;
-    const esReversion = ['refunded', 'charged_back'].includes(estadoProveedor);
-    if (estadoProveedor === 'approved') {
+    const esReversion = estadosReversion.includes(estadoProveedor);
+    if (estadoProveedor === estadoAprobado) {
       codigoProveedor = estadoProveedor;
-      const yaConfirmado = recibos.some(r => r.pago === String(idPagoProveedor) && r.estado === 'approved');
+      const yaConfirmado = recibos.some(r => r.pago === String(idPagoProveedor) && r.estado === estadoAprobado);
       if (String(cuota.Estado).toLowerCase() === 'pagado') {
         if (yaConfirmado) {
           confirmada = tx.Estado === 'APROBADA';
@@ -460,10 +550,11 @@ async function aplicarPagoProveedor(datos) {
         estadoTx = 'APROBADA';
         confirmada = true;
         await auditar(connection, {
-          idPago: tx.IdPago, idAcademia: tx.IdAcademia, evento: 'PAGO_MERCADOPAGO_CONFIRMADO',
+          idPago: tx.IdPago, idAcademia: tx.IdAcademia,
+          evento: `PAGO_${proveedorActual}_CONFIRMADO`,
           estadoAnterior: cuota.Estado, estadoNuevo: 'Pagado',
           montoAnterior: Number(cuota.Monto), montoNuevo: importe / 100,
-          motivo: `Pago ${idPagoProveedor}; preferencia ${orden}; transacción ${tx.IdTransaccion}. Verificado con API.`,
+          motivo: `Pago ${idPagoProveedor}; orden ${orden}; transacción ${tx.IdTransaccion}. Verificado con API.`,
         });
       }
     } else if (!['APROBADA', 'PAGO_DUPLICADO', 'REEMBOLSADA', 'CONTRACARGO', 'EXPIRADA'].includes(tx.Estado)
@@ -476,12 +567,12 @@ async function aplicarPagoProveedor(datos) {
       `UPDATE PagoTransaccion SET Estado = ?, IdOrdenProveedor = ?,
          CodigoEstadoProveedor = ?, FechaActualizacion = NOW(),
          FechaConfirmacion = IF(? = 'APROBADA', COALESCE(FechaConfirmacion, NOW()), FechaConfirmacion)
-       WHERE IdTransaccion = ? AND EstadoRegistro = 1`,
-      [estadoTx, orden, codigoProveedor || estadoProveedor, estadoTx, tx.IdTransaccion],
+       WHERE IdTransaccion = ? AND EstadoRegistro = 1 AND Proveedor = ?`,
+      [estadoTx, orden, codigoProveedor || estadoProveedor, estadoTx, tx.IdTransaccion, proveedorActual],
     );
     if (cambioTx.affectedRows !== 1) throw errorPago(409, 'TRANSACCION_NO_ACTUALIZADA', 'No se pudo actualizar la transacción.');
     await auditar(connection, {
-      idPago: tx.IdPago, idAcademia: tx.IdAcademia, evento: 'MERCADOPAGO_EVENTO',
+      idPago: tx.IdPago, idAcademia: tx.IdAcademia, evento: eventoEstado,
       estadoAnterior: tx.Estado, estadoNuevo: estadoTx,
       montoAnterior: Number(tx.Monto), montoNuevo: importe / 100,
       motivo: JSON.stringify({ v: 1, transaccion: Number(tx.IdTransaccion), pago: String(idPagoProveedor),
@@ -489,7 +580,7 @@ async function aplicarPagoProveedor(datos) {
     });
     if (esReversion) {
       await auditar(connection, {
-        idPago: tx.IdPago, idAcademia: tx.IdAcademia, evento: 'MERCADOPAGO_REQUIERE_REVISION',
+        idPago: tx.IdPago, idAcademia: tx.IdAcademia, evento: `${proveedorActual}_REQUIERE_REVISION`,
         estadoAnterior: cuota.Estado, estadoNuevo: cuota.Estado,
         montoAnterior: Number(cuota.Monto), montoNuevo: Number(cuota.Monto),
         motivo: `Pago ${idPagoProveedor}: ${estadoProveedor}. Conciliar manualmente; no se revierte la cuota automáticamente.`,
@@ -506,12 +597,18 @@ async function aplicarPagoProveedor(datos) {
 }
 
 async function confirmarPagoProveedor(datos) {
-  if (datos?.estadoProveedor !== 'approved') throw errorPago(409, 'PAGO_NO_APROBADO', 'La operación no está aprobada.');
+  const proveedor = String(datos?.proveedor || PROVEEDOR).trim().toUpperCase();
+  if (proveedor !== 'CULQI') throw errorPago(409, 'PROVEEDOR_NO_ADMITIDO', 'Solo se admite Culqi.');
+  const estadoEsperado = 'paid';
+  if (datos?.estadoProveedor !== estadoEsperado) throw errorPago(409, 'PAGO_NO_APROBADO', 'La operación no está aprobada.');
   return aplicarPagoProveedor(datos);
 }
 
 async function actualizarEstadoNoAprobado(datos) {
-  if (datos?.estadoProveedor === 'approved') throw errorPago(409, 'ESTADO_PROVEEDOR_INVALIDO', 'Usa la confirmación transaccional.');
+  const proveedor = String(datos?.proveedor || PROVEEDOR).trim().toUpperCase();
+  if (proveedor !== 'CULQI') throw errorPago(409, 'PROVEEDOR_NO_ADMITIDO', 'Solo se admite Culqi.');
+  const estadoAprobado = 'paid';
+  if (datos?.estadoProveedor === estadoAprobado) throw errorPago(409, 'ESTADO_PROVEEDOR_INVALIDO', 'Usa la confirmación transaccional.');
   return aplicarPagoProveedor(datos);
 }
 
@@ -705,8 +802,12 @@ module.exports = {
   obtenerEstadoPagoAlumno,
   confirmarPagoProveedor,
   actualizarEstadoNoAprobado,
+<<<<<<< HEAD
   normalizarFiltrosTransacciones,
   listarTransaccionesAdmin,
   auditoriaPagoAdmin,
   obtenerReferenciaConciliable,
 };
+=======
+};
+>>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)

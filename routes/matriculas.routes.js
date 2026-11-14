@@ -146,7 +146,7 @@ async function enviarCorreoCheckout(correoParaEnviar, datosCorreo) {
       <p>Tu ${datosCorreo.esReinscripcion ? "reinscripción" : "inscripción"} al <strong>${escaparHtml(datosCorreo.cicloNombre)}</strong> fue procesada correctamente.</p>
       <p><strong>Monto de inscripción:</strong> S/ ${Number(datosCorreo.precio || 0).toFixed(2)}</p>
       <p><strong>Estado del pago:</strong> ${escaparHtml(datosCorreo.estadoPago || "Pendiente")}.</p>
-      ${String(datosCorreo.estadoPago || "Pendiente").toLowerCase() === "pagado" ? "<p>Se conservó el registro de pago existente; no se creó un cobro duplicado.</p>" : "<p>AcadeSys no ha confirmado un cobro real. Registra el comprobante o completa el método de pago habilitado por la academia.</p>"}
+      ${String(datosCorreo.estadoPago || "Pendiente").toLowerCase() === "no requiere pago" ? "<p>Este ciclo no cobra inscripción. No se generó una deuda por ese concepto. Las mensualidades, si corresponden, se gestionan por separado en Mis pagos.</p>" : String(datosCorreo.estadoPago || "Pendiente").toLowerCase() === "pagado" ? "<p>Se conservó el registro de pago existente; no se creó un cobro duplicado.</p>" : "<p>La cuota de inscripción está pendiente. Puedes consultarla y pagarla desde Mis pagos cuando el medio de pago esté habilitado.</p>"}
       <p><strong>Código de usuario:</strong> <span style="font-family: monospace;">${escaparHtml(datosCorreo.codigoUsuario)}</span></p>
       ${bloqueClave}
       <p>Gracias por confiar en AcadeSys.</p>
@@ -847,14 +847,20 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
     );
 
     if (pagosInscripcion.length > 0) {
+      // Si ya existía una cuota (incluida una cuota histórica pendiente), se
+      // conserva tal cual. Cambiar el precio del ciclo no debe borrar deudas
+      // que ya fueron publicadas para un alumno.
       const pagoExistente = pagosInscripcion[0];
       pagoCheckout = {
         idPago: Number(pagoExistente.IdPago),
         monto: obtenerPrecioCiclo(pagoExistente.Monto) ?? precioReal,
         estado: String(pagoExistente.Estado || 'Pendiente'),
         creadoAhora: false,
+        requierePago: String(pagoExistente.Estado || 'Pendiente').toLowerCase() !== 'pagado',
       };
-    } else {
+    } else if (precioReal > 0) {
+      // Solo se crea una deuda de inscripción cuando el precio canónico del
+      // ciclo es mayor que cero. El importe siempre procede de la BD.
       const [insertPago] = await connection.query(
         `INSERT INTO PagosMensualidad
           (IdUsuario, IdCiclo, Mes, Monto, Estado, FechaPago, FechaVencimiento, EstadoRegistro)
@@ -866,6 +872,7 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
         monto: precioReal,
         estado: 'Pendiente',
         creadoAhora: true,
+        requierePago: true,
       };
       await connection.query(
         `INSERT INTO PagoAuditoria
@@ -874,6 +881,16 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
          VALUES (?, NULL, ?, ?, 'INSCRIPCION_CREADA', NULL, 'Pendiente', NULL, ?, ?, NOW())`,
         [pagoCheckout.idPago, idAlumnoFinal, ciclo.IdAcademia, precioReal, 'Cuota de inscripción generada por checkout.'],
       );
+    } else {
+      // Inscripción gratuita: no insertar una cuota artificial de S/ 0.00.
+      // Las mensualidades se generan por separado según el periodo académico.
+      pagoCheckout = {
+        idPago: null,
+        monto: 0,
+        estado: 'No requiere pago',
+        creadoAhora: false,
+        requierePago: false,
+      };
     }
 
     const [nuevoConteo] = await connection.query(
@@ -927,8 +944,9 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
       );
     }
 
-    const mensajeCorreoFallido =
-      `La matrícula quedó registrada y la cuota de inscripción figura como ${pagoCheckout?.estado || 'Pendiente'}, pero no se pudo confirmar el envío del correo. No vuelvas a enviar el formulario; contacta a la academia para recuperar el acceso.`;
+    const mensajeCorreoFallido = pagoCheckout?.estado === 'No requiere pago'
+      ? 'La matrícula quedó registrada y no requiere pago de inscripción, pero no se pudo confirmar el envío del correo. Contacta a la academia para recuperar el acceso.'
+      : `La matrícula quedó registrada y la cuota de inscripción figura como ${pagoCheckout?.estado || 'Pendiente'}, pero no se pudo confirmar el envío del correo. No vuelvas a enviar el formulario; contacta a la academia para recuperar el acceso.`;
 
     res.status(201).json({
       exito: true,
@@ -943,16 +961,19 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
       mensaje:
         estadoCorreo !== "enviado"
           ? mensajeCorreoFallido
-          : pagoCheckout?.estado?.toLowerCase() === 'pagado'
-            ? `${esReinscripcion ? 'Reinscripción' : 'Matrícula'} registrada. Se conservó el registro de inscripción que ya figuraba como pagado y no se duplicó la cuota.`
-            : `${esReinscripcion ? 'Reinscripción' : 'Matrícula'} registrada. La cuota de inscripción figura como ${pagoCheckout?.estado || 'Pendiente'}; el navegador no ha confirmado ningún cobro real.`,
+          : pagoCheckout?.estado === 'No requiere pago'
+            ? `${esReinscripcion ? 'Reinscripción' : 'Matrícula'} registrada. Este ciclo no cobra inscripción y no se generó una cuota de S/ 0.00. Las mensualidades se gestionan por separado desde Mis pagos.`
+            : pagoCheckout?.estado?.toLowerCase() === 'pagado'
+              ? `${esReinscripcion ? 'Reinscripción' : 'Matrícula'} registrada. Se conservó el registro de inscripción que ya figuraba como pagado y no se duplicó la cuota.`
+              : `${esReinscripcion ? 'Reinscripción' : 'Matrícula'} registrada. La cuota de inscripción figura como ${pagoCheckout?.estado || 'Pendiente'}; podrás consultarla y pagarla desde Mis pagos.`,
       pago: {
         idPago: pagoCheckout?.idPago ?? null,
-        modo: pagoCheckout?.creadoAhora ? "sin_pasarela" : "registro_existente",
+        modo: pagoCheckout?.estado === 'No requiere pago' ? 'sin_costo' : pagoCheckout?.creadoAhora ? "sin_pasarela" : "registro_existente",
         estado: pagoCheckout?.estado ?? "Pendiente",
         monto: pagoCheckout?.monto ?? precioReal,
+        requierePago: Boolean(pagoCheckout?.requierePago),
         confirmadoPorPasarela: false,
-        requiereRevision: String(pagoCheckout?.estado || '').toLowerCase() !== 'pagado',
+        requiereRevision: Boolean(pagoCheckout?.requierePago) && String(pagoCheckout?.estado || '').toLowerCase() !== 'pagado',
       },
     });
   } catch (error) {
