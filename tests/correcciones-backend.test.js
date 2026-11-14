@@ -1337,6 +1337,7 @@ test('alumno registra referencia de comprobante, pero el pago sigue pendiente', 
     }
     if (/FROM PagoComprobante/.test(sql) && /Referencia = \?/.test(sql)) return [[]];
     if (/FROM PagoComprobante/.test(sql) && /EstadoRevision = 'EN_REVISION'/.test(sql)) return [[]];
+    if (/FROM PagoTransaccion/.test(sql)) { assert.deepEqual(p, [88, 10, 1]); return [[]]; }
     if (/INSERT INTO PagoComprobante/.test(sql)) {
       assert.deepEqual(p, [88, 10, 1, 'OP-12345678', null]);
       comprobanteInsertado = true;
@@ -1356,6 +1357,29 @@ test('alumno registra referencia de comprobante, pero el pago sigue pendiente', 
   }, 'Alumno');
   assert.equal(comprobanteInsertado, true);
   assert.equal(tx.commit, 1);
+});
+
+test('alumno no registra transferencia si Mercado Pago tiene un pago en proceso (W5)', async () => {
+  let insertado = false;
+  ejecutar = async (sql, p) => {
+    if (/FROM PagosMensualidad p/.test(sql) && /FOR UPDATE/.test(sql)) {
+      return [[{ IdPago: 88, IdUsuario: 10, IdCiclo: 2, Estado: 'Pendiente', Monto: '300.00', IdAcademia: 1 }]];
+    }
+    if (/FROM PagoComprobante/.test(sql)) return [[]];
+    if (/FROM PagoTransaccion/.test(sql)) {
+      assert.match(sql, /'in_process'/);
+      assert.doesNotMatch(sql, /preference_created/);
+      return [[{ IdTransaccion: 5 }]];
+    }
+    if (/INSERT/.test(sql)) { insertado = true; return [{ insertId: 1, affectedRows: 1 }]; }
+    throw new Error(`SQL inesperado: ${sql}`);
+  };
+  await conServidor(async (pedir) => {
+    const r = await pedir('/api/alumno/pagos/88/comprobante', 'POST', { referencia: 'OP-12345678' });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.code, 'PAGO_ONLINE_EN_PROCESO');
+  }, 'Alumno');
+  assert.equal(insertado, false);
 });
 
 test('administración aprueba comprobante y confirma el mismo registro de pago', async () => {

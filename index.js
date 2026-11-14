@@ -106,6 +106,8 @@ app.use("/api", verificarToken);
 // ============================================================
 
 app.use("/api/admin/ciclos", require("./routes/admin-ciclos.routes"));
+// Panel de transacciones online, auditoría y conciliación (antes del router general /api/admin).
+app.use("/api/admin/pagos", require("./routes/admin-pagos.routes"));
 app.use("/api/admin", require("./routes/dashboard.routes"));
 
 // ============================================================

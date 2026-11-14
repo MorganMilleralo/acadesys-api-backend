@@ -238,3 +238,24 @@ Para publicar a main:
 6. Repetir fetch, integrar avances adicionales y ejecutar la suite antes de publicar.
    Desactivar Auto-Deploy de Render antes del push, conforme a la restricción existente
    del repositorio, y obtener autorización de publicación/despliegue posterior.
+
+## Actualización 2026-11-14 — correcciones del informe de verificación
+
+Situación verificada antes del cambio: `735e9cb` se publicó en `main` el 2026-11-04
+(15:21) y Render lo desplegó. El 2026-11-14, `POST /api/webhooks/mercadopago` en
+producción respondió `503 PASARELA_NO_CONFIGURADA`: no hay credenciales y no se
+puede cobrar. Mantener así hasta superar las pruebas en sandbox.
+
+| Código | Problema | Corrección |
+| --- | --- | --- |
+| C4 | El panel administrativo no tenía de dónde leer transacciones | `GET /api/admin/pagos/transacciones` (filtros `idCiclo`, `periodo` = `AAAA-MM` o `Inscripcion`, `estado` o `REQUIERE_REVISION`, `limite` ≤ 200, `desde`) y `GET /api/admin/pagos/:idPago/auditoria` |
+| W1 | Un webhook perdido dejaba la cuota pendiente para siempre | Conciliación activa: `POST /api/alumno/pagos/:idPago/conciliar` y `POST /api/admin/pagos/transacciones/:id/conciliar`. Busca por `external_reference` y aplica cada pago con la misma verificación y transacción SQL que el webhook. Máximo una consulta cada 30 s por referencia |
+| W3 | Un timeout ambiguo dejaba la cuota en `CREANDO` sin salida | Pasados 2 min sin preferencia guardada, la reserva pasa a `ERROR` (su URL nunca llegó al alumno) y se crea otra |
+| W4 | Un cambio de importe bloqueaba el pago online sin salida; las URLs no vencían | Las preferencias vencen a los 60 min (`expires`). A los 65 min, si no hay un pago en curso informado por el proveedor, la transacción pasa a `EXPIRADA` y se crea otra con el importe vigente. Una aprobación tardía sobre `EXPIRADA` confirma la cuota si sigue pendiente |
+| W5 | Se podía pagar por transferencia y online a la vez | El checkout responde `409 COMPROBANTE_EN_REVISION` si hay un comprobante en revisión. El registro de comprobante responde `409 PAGO_ONLINE_EN_PROCESO` si Mercado Pago informó un pago en curso |
+
+Otros cambios:
+
+- Al crear la preferencia, `CodigoEstadoProveedor` se guarda como `preference_created`. Así se distingue de un pago `pending` informado por Mercado Pago.
+- Nuevos estados de `PagoTransaccion.Estado`: `EXPIRADA`. Nuevos eventos de `PagoAuditoria`: `CHECKOUT_CREACION_DESCARTADA` y `CHECKOUT_EXPIRADO`. No requieren cambios de esquema.
+- Requisito antes de desplegar: `SELECT COUNT(*) FROM PagoTransaccion;` debe devolver 0. Las preferencias creadas antes de este cambio no tienen vencimiento.

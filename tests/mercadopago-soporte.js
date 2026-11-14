@@ -12,7 +12,7 @@ const checkoutUrl = 'https://www.mercadopago.com.pe/checkout/v1/redirect?pref_id
 function baseSimulada() {
   const inicial = () => ({ cuota: { IdPago: 7, IdUsuario: 10, IdAcademia: 1, IdCiclo: 3,
     Mes: '2026-11', Monto: '150.00', Estado: 'Pendiente', CorreoElectronico: 'alumno@example.test', Ciclo: 'QA' },
-  transacciones: [], auditorias: [] });
+  transacciones: [], auditorias: [], comprobantes: [] });
   const db = { state: inicial(), queries: [], rollbacks: 0, commits: 0, releases: 0, fault: null };
   let cola = Promise.resolve();
   async function adquirir() {
@@ -33,7 +33,7 @@ function baseSimulada() {
     }
     if (/FOR UPDATE/.test(q)) assert.ok(conexion?.unlock, 'Cuota debe bloquearse antes de transacción/auditoría');
     if (db.fault) { const respuesta = db.fault(q, params); if (respuesta) return respuesta; }
-    const { cuota, transacciones, auditorias } = db.state;
+    const { cuota, transacciones, auditorias, comprobantes } = db.state;
     const copia = rows => [structuredClone(rows)];
     if (q.startsWith('SELECT IdPago FROM PagoTransaccion')) {
       return copia(transacciones.filter(t => t.ReferenciaInterna === params[1]).map(t => ({ IdPago: t.IdPago })));
@@ -48,12 +48,24 @@ function baseSimulada() {
       return copia(Number(params[0]) === cuota.IdPago && (params.length === 1
         || (params[1] === cuota.IdUsuario && params[2] === cuota.IdAcademia)) ? [cuota] : []);
     }
+    if (q.includes('FROM PagoComprobante')) {
+      assert.match(q, /EstadoRevision = 'EN_REVISION'/);
+      return copia(comprobantes.filter(c => c.IdPago === params[0] && c.EstadoRevision === 'EN_REVISION'));
+    }
+    if (q.startsWith('SELECT') && q.includes('FROM PagoTransaccion') && q.includes('IdOrdenProveedor IS NOT NULL')) {
+      // obtenerReferenciaConciliable: academia + (IdPago | IdTransaccion) [+ IdUsuario]
+      const campos = [...q.matchAll(/AND (IdPago|IdTransaccion|IdUsuario) = \?/g)].map(m => m[1]);
+      let candidatas = transacciones.filter(t => t.IdAcademia === params[0] && t.IdOrdenProveedor);
+      campos.forEach((campo, i) => { candidatas = candidatas.filter(t => t[campo] === params[2 + i]); });
+      return copia(candidatas.slice(-1).map(t => ({ IdTransaccion: t.IdTransaccion, IdPago: t.IdPago,
+        ReferenciaInterna: t.ReferenciaInterna, Estado: t.Estado })));
+    }
     if (q.startsWith('SELECT') && q.includes('FROM PagoTransaccion')) {
       let rows;
       if (q.includes('WHERE IdPago = ?')) {
-        assert.match(q, /Estado <> 'ERROR'/);
+        assert.match(q, /Estado NOT IN \('ERROR', 'EXPIRADA'\)/);
         rows = transacciones.filter(t => t.IdPago === params[0] && t.IdUsuario === params[1]
-          && t.IdAcademia === params[2] && t.Estado !== 'ERROR').slice(-1);
+          && t.IdAcademia === params[2] && !['ERROR', 'EXPIRADA'].includes(t.Estado)).slice(-1);
       } else if (q.includes('ReferenciaInterna = ?')) rows = transacciones.filter(t => t.ReferenciaInterna === params[1]);
       else rows = transacciones.filter(t => t.IdTransaccion === params[0]);
       return copia(rows);
@@ -77,6 +89,12 @@ function baseSimulada() {
     if (q.startsWith("UPDATE PagoTransaccion SET Estado = 'ERROR'")) {
       const tx = transacciones.find(t => t.IdTransaccion === params[0] && t.Estado === 'CREANDO');
       if (tx) tx.Estado = 'ERROR';
+      return [{ affectedRows: tx ? 1 : 0 }];
+    }
+    if (q.startsWith('UPDATE PagoTransaccion SET FechaActualizacion = NOW(), Estado = ?')) {
+      assert.ok(conexion?.unlock, 'Descartar un checkout exige la cuota bloqueada');
+      const tx = transacciones.find(t => t.IdTransaccion === params[1] && t.Estado === params[2]);
+      if (tx) tx.Estado = params[0];
       return [{ affectedRows: tx ? 1 : 0 }];
     }
     if (q.startsWith('UPDATE PagoTransaccion SET Estado = ?')) {
@@ -154,7 +172,7 @@ function proveedorSimulado(t) {
     const url = new URL(input);
     if (url.hostname === '127.0.0.1') return originalFetch(input, options);
     assert.equal(url.origin, 'https://api.mercadopago.com', 'Red externa prohibida');
-    const llamada = { path: url.pathname, method: options.method || 'GET', options,
+    const llamada = { path: url.pathname, query: Object.fromEntries(url.searchParams), method: options.method || 'GET', options,
       body: options.body ? JSON.parse(options.body) : undefined };
     mock.llamadas.push(llamada);
     if (mock.responder) { const response = await mock.responder(llamada); if (response) return response; }
@@ -183,7 +201,8 @@ function firma({ id = '123', ts = String(Math.floor(Date.now() / 1000)), request
 async function servir(t, db) {
   const rutaDB = require.resolve('../config/db');
   require.cache[rutaDB] = { id: rutaDB, filename: rutaDB, loaded: true, exports: db.pool };
-  for (const ruta of ['../services/transacciones-pago.service', '../routes/alumno-checkout.routes', '../routes/mercadopago-webhook.routes']) {
+  for (const ruta of ['../services/transacciones-pago.service', '../services/conciliacion-pagos.service',
+    '../routes/alumno-checkout.routes', '../routes/mercadopago-webhook.routes', '../routes/admin-pagos.routes']) {
     delete require.cache[require.resolve(ruta)];
   }
   const app = express();
@@ -195,6 +214,7 @@ async function servir(t, db) {
     next();
   });
   app.use('/api/alumno', require('../routes/alumno-checkout.routes'));
+  app.use('/api/admin/pagos', require('../routes/admin-pagos.routes'));
   const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   return async (method, path, { body, headers = {} } = {}) => {

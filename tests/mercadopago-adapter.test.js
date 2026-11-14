@@ -15,7 +15,7 @@ function entrada() {
 test('MP SDK real crea preferencia PEN y conserva contrato, referencia e idempotencia', async t => {
   entorno(t); const mp = proveedorSimulado(t);
   assert.deepEqual(await adapter.crearOrdenPago(entrada()), {
-    idOrdenProveedor: 'pref-1', checkoutUrl, estado: 'pending',
+    idOrdenProveedor: 'pref-1', checkoutUrl, estado: 'preference_created',
   });
   assert.equal(mp.llamadas.length, 2);
   const request = mp.llamadas[1];
@@ -27,6 +27,10 @@ test('MP SDK real crea preferencia PEN y conserva contrato, referencia e idempot
   assert.equal(request.body.items[0].currency_id, 'PEN');
   assert.equal(request.body.notification_url, process.env.MERCADOPAGO_WEBHOOK_URL + '?source_news=webhooks');
   assert.equal(request.body.back_urls.success, process.env.PAYMENT_RETURN_URL);
+  // El checkout vence en el proveedor; AcadeSys no reutiliza URLs vencidas.
+  assert.equal(request.body.expires, true);
+  const vence = Date.parse(request.body.expiration_date_to);
+  assert.ok(vence > Date.now() + 59 * 60000 && vence <= Date.now() + 60 * 60000 + 1000);
 });
 
 for (const variable of ['MERCADOPAGO_ACCESS_TOKEN', 'MERCADOPAGO_WEBHOOK_SECRET', 'MERCADOPAGO_SELLER_ID']) {
@@ -162,3 +166,41 @@ for (const [objeto, cambio] of [
     await assert.rejects(adapter.consultarPagoVerificado('123'));
   });
 }
+
+function respuestaBusqueda(results) {
+  return new Response(JSON.stringify({ paging: { total: results.length }, results }), {
+    status: 200, headers: { 'Content-Type': 'application/json' } });
+}
+
+test('MP conciliación busca por referencia, filtra ajenos y no confirma nada por sí sola', async t => {
+  entorno(t); const mp = proveedorSimulado(t);
+  mp.responder = req => req.path === '/v1/payments/search' ? respuestaBusqueda([
+    { id: 125, external_reference: referencia, collector_id: 900, status: 'approved' },
+    { id: 125, external_reference: referencia, collector_id: 900 },
+    { id: 126, external_reference: 'ACS-8-33333333-3333-4333-8333-333333333333', collector_id: 900 },
+    { id: 127, external_reference: referencia, collector_id: 901 },
+    { id: 'no-numerico', external_reference: referencia },
+    { id: 123, external_reference: referencia },
+  ]) : null;
+  assert.deepEqual(await adapter.buscarPagosPorReferencia(referencia), ['125', '123']);
+  assert.equal(mp.llamadas.length, 1);
+  assert.equal(mp.llamadas[0].path, '/v1/payments/search');
+  assert.equal(mp.llamadas[0].method, 'GET');
+  assert.equal(mp.llamadas[0].query.external_reference, referencia);
+  assert.equal(mp.llamadas[0].query.sort, 'date_last_updated');
+});
+
+test('MP conciliación exige referencia válida y pasarela configurada antes de llamar', async t => {
+  entorno(t); const mp = proveedorSimulado(t);
+  await assert.rejects(adapter.buscarPagosPorReferencia('ACS-ajena'), { code: 'RESPUESTA_PROVEEDOR_INVALIDA' });
+  delete process.env.MERCADOPAGO_ACCESS_TOKEN;
+  await assert.rejects(adapter.buscarPagosPorReferencia(referencia), { code: 'PASARELA_NO_CONFIGURADA' });
+  assert.equal(mp.llamadas.length, 0);
+});
+
+test('MP conciliación con respuesta malformada no devuelve IDs', async t => {
+  entorno(t); const mp = proveedorSimulado(t);
+  mp.responder = req => req.path === '/v1/payments/search'
+    ? new Response(JSON.stringify({ results: 'no-es-lista' }), { status: 200, headers: { 'Content-Type': 'application/json' } }) : null;
+  await assert.rejects(adapter.buscarPagosPorReferencia(referencia), { code: 'RESPUESTA_PROVEEDOR_INVALIDA' });
+});

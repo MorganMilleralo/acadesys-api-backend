@@ -251,6 +251,24 @@ router.post('/pagos/:idPago/comprobante', async (req, res) => {
       return res.status(409).json({ error: 'Ya existe un comprobante en revisión para esta cuota.' });
     }
 
+    // W5: no registrar una transferencia mientras Mercado Pago tiene un pago en
+    // proceso para la misma cuota ('preference_created' = solo checkout abierto).
+    const [enProceso] = await connection.query(
+      `SELECT IdTransaccion FROM PagoTransaccion
+       WHERE IdPago = ? AND IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1
+         AND Estado = 'PENDIENTE'
+         AND CodigoEstadoProveedor IN ('pending', 'in_process', 'authorized', 'in_mediation')
+       LIMIT 1 FOR UPDATE`,
+      [idPago, idUsuario, idAcademia],
+    );
+    if (enProceso.length) {
+      await connection.rollback();
+      return res.status(409).json({
+        code: 'PAGO_ONLINE_EN_PROCESO',
+        error: 'Tienes un pago con Mercado Pago en proceso para esta cuota. Espera su confirmación antes de registrar una transferencia.',
+      });
+    }
+
     const [insertado] = await connection.query(
       `INSERT INTO PagoComprobante
         (IdPago, IdUsuario, IdAcademia, Referencia, UrlComprobante,

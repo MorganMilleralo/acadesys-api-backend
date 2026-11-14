@@ -4,6 +4,12 @@ const { MercadoPagoConfig, Preference, Payment, MerchantOrder, User,
   WebhookSignatureValidator } = require('mercadopago');
 const { ErrorPago, aCentimos, idProveedor, urlCheckoutValida } = require('../utils/pagos-proveedor');
 
+// Un checkout vence en Mercado Pago a los 60 minutos. AcadeSys solo lo
+// reemplaza localmente después de 65 (margen), para que el proveedor siempre
+// lo invalide antes de que exista una URL nueva para la misma cuota.
+const VIGENCIA_CHECKOUT_MINUTOS = 60;
+const REFERENCIA_INTERNA = /^ACS-[1-9]\d*-[-a-f0-9]{36}$/;
+
 function configuracion() {
   const env = process.env;
   const modo = env.MERCADOPAGO_ENV || 'test';
@@ -63,7 +69,7 @@ async function crearOrdenPago({ idTransaccion, referenciaInterna, idempotencyKey
   const config = configuracion();
   const centimos = aCentimos(monto);
   if (!Number.isSafeInteger(idTransaccion) || idTransaccion <= 0
-      || typeof referenciaInterna !== 'string' || !/^ACS-[1-9]\d*-[-a-f0-9]{36}$/.test(referenciaInterna)
+      || typeof referenciaInterna !== 'string' || !REFERENCIA_INTERNA.test(referenciaInterna)
       || typeof idempotencyKey !== 'string' || !/^ACS-[-a-f0-9]{36}$/.test(idempotencyKey)
       || moneda !== 'PEN' || !centimos) {
     throw new ErrorPago(409, 'DATOS_ORDEN_INVALIDOS', 'La transacción no contiene datos cobrables válidos.', true);
@@ -90,6 +96,8 @@ async function crearOrdenPago({ idTransaccion, referenciaInterna, idempotencyKey
     notification_url: notificacion.toString(),
     back_urls: { success: retorno, pending: retorno, failure: retorno },
     auto_return: 'approved',
+    expires: true,
+    expiration_date_to: new Date(Date.now() + VIGENCIA_CHECKOUT_MINUTOS * 60000).toISOString(),
   };
   if (typeof payerEmail === 'string' && payerEmail.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(payerEmail)) {
     body.payer = { email: payerEmail };
@@ -101,7 +109,9 @@ async function crearOrdenPago({ idTransaccion, referenciaInterna, idempotencyKey
       || preferencia.external_reference !== referenciaInterna
       || idProveedor(preferencia.collector_id) !== config.sellerId
       || !urlCheckoutValida(preferencia.init_point)) respuestaInvalida();
-  return { idOrdenProveedor: preferencia.id, checkoutUrl: preferencia.init_point, estado: 'pending' };
+  // 'preference_created' distingue la preferencia recién creada de un pago
+  // 'pending' notificado por el proveedor (efectivo, validación, etc.).
+  return { idOrdenProveedor: preferencia.id, checkoutUrl: preferencia.init_point, estado: 'preference_created' };
 }
 
 function validarNotificacion(req) {
@@ -162,7 +172,7 @@ async function consultarPagoVerificado(id) {
   if (!preferencia || preferencia.id !== orden.preference_id
       || idProveedor(preferencia.collector_id) !== config.sellerId
       || preferencia.external_reference !== pago.external_reference
-      || typeof pago.external_reference !== 'string' || !/^ACS-[1-9]\d*-[-a-f0-9]{36}$/.test(pago.external_reference)
+      || typeof pago.external_reference !== 'string' || !REFERENCIA_INTERNA.test(pago.external_reference)
       || !idProveedor(preferencia.metadata?.acadesys_transaction_id)
       || !Number.isSafeInteger(idTransaccion) || idTransaccion <= 0
       || !centimos || pago.currency_id !== 'PEN' || !Number.isSafeInteger(fecha)
@@ -183,4 +193,28 @@ async function consultarPagoVerificado(id) {
     estado: estados[pago.status], fechaActualizacionProveedor: fecha };
 }
 
-module.exports = { verificarConfiguracion, crearOrdenPago, validarNotificacion, consultarPagoVerificado };
+/**
+ * Conciliación activa: devuelve los IDs de pago que Mercado Pago tiene para
+ * una referencia interna, del más reciente al más antiguo. Cada ID se verifica
+ * después con consultarPagoVerificado; la búsqueda no confirma nada por sí sola.
+ */
+async function buscarPagosPorReferencia(referenciaInterna) {
+  if (typeof referenciaInterna !== 'string' || !REFERENCIA_INTERNA.test(referenciaInterna)) respuestaInvalida();
+  const config = configuracion();
+  const sdk = cliente(config);
+  const resultado = await llamadaProveedor(() => new Payment(sdk).search({ options: {
+    external_reference: referenciaInterna, sort: 'date_last_updated', criteria: 'desc', limit: 10 } }));
+  if (!resultado || (resultado.results !== undefined && !Array.isArray(resultado.results))) respuestaInvalida();
+  const ids = [];
+  for (const pago of resultado.results || []) {
+    const id = idProveedor(pago?.id);
+    // Solo pagos de esta referencia y de este vendedor; el resto se ignora.
+    if (!id || pago.external_reference !== referenciaInterna) continue;
+    if (pago.collector_id !== undefined && idProveedor(pago.collector_id) !== config.sellerId) continue;
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids.slice(0, 10);
+}
+
+module.exports = { VIGENCIA_CHECKOUT_MINUTOS, verificarConfiguracion, crearOrdenPago, validarNotificacion,
+  consultarPagoVerificado, buscarPagosPorReferencia };

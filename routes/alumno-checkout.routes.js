@@ -11,7 +11,9 @@ const {
   guardarOrdenCreada,
   marcarErrorCreacion,
   obtenerEstadoPagoAlumno,
+  obtenerReferenciaConciliable,
 } = require('../services/transacciones-pago.service');
+const conciliacion = require('../services/conciliacion-pagos.service');
 
 const idUsuarioSesion = (req) => idPositivo(req.usuario?.idUsuario ?? req.usuario?.id);
 const idAcademiaSesion = (req) => idPositivo(req.usuario?.idAcademia);
@@ -119,6 +121,42 @@ router.get('/pagos/:idPago/estado', async (req, res) => {
     if (status >= 500) console.error('Error al consultar estado de checkout:', conocido ? error.code : 'ESTADO_PAGO_NO_DISPONIBLE');
     return res.status(status).json({ code: conocido ? error.code : 'ESTADO_PAGO_NO_DISPONIBLE',
       error: conocido ? error.message : 'No se pudo consultar el estado del pago.' });
+  }
+});
+
+// POST /api/alumno/pagos/:idPago/conciliar
+// «Consultar estado del pago»: si el webhook no llegó, busca la operación en
+// Mercado Pago y la aplica con la misma verificación que el webhook. Nunca usa
+// datos enviados por React ni los parámetros de la URL de retorno.
+router.post('/pagos/:idPago/conciliar', async (req, res) => {
+  const idPago = idPositivo(req.params.idPago);
+  const idUsuario = idUsuarioSesion(req);
+  const idAcademia = idAcademiaSesion(req);
+  if (!idPago) return res.status(400).json({ error: 'El IdPago no es válido.' });
+  if (!idUsuario || !idAcademia) return res.status(401).json({ error: 'La sesión del alumno no es válida.' });
+  try {
+    pasarela.verificarConfiguracion();
+    const referencia = await obtenerReferenciaConciliable({ idPago, idUsuario, idAcademia });
+    let resumen = { consultado: false, motivo: 'SIN_CHECKOUT' };
+    if (referencia && ['PENDIENTE', 'RECHAZADA', 'CANCELADA', 'EXPIRADA', 'CREANDO'].includes(referencia.estado)) {
+      if (conciliacion.puedeConciliar(referencia.referenciaInterna)) {
+        const r = await conciliacion.conciliarReferencia(referencia.referenciaInterna);
+        resumen = { consultado: true, pagosEncontrados: r.pagosEncontrados, confirmada: r.confirmada };
+      } else {
+        resumen = { consultado: false, motivo: 'CONSULTA_RECIENTE' };
+      }
+    } else if (referencia) {
+      resumen = { consultado: false, motivo: 'ESTADO_FINAL' };
+    }
+    const estado = await obtenerEstadoPagoAlumno({ idPago, idUsuario, idAcademia });
+    return res.json({ ...estado, conciliacion: resumen });
+  } catch (error) {
+    const conocido = error instanceof ErrorPago;
+    const status = conocido ? error.status : 500;
+    if (status >= 500) console.error('Error al conciliar pago de alumno:', conocido ? error.code : 'CONCILIACION_NO_DISPONIBLE');
+    return res.status(status).json({ code: conocido ? error.code : 'CONCILIACION_NO_DISPONIBLE',
+      error: status >= 500 ? 'No se pudo consultar Mercado Pago en este momento. Inténtalo en unos minutos.'
+        : (conocido ? error.message : 'No se pudo consultar el estado del pago.') });
   }
 });
 

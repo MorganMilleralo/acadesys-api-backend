@@ -346,3 +346,130 @@ for (const status of ['refunded', 'charged_back']) {
     assert.equal(eventos(db, 'MERCADOPAGO_REQUIERE_REVISION').length, 1);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Correcciones del informe de verificación (14 nov 2026): W1, W3, W4, W5, C4.
+// ---------------------------------------------------------------------------
+const conciliar = '/api/alumno/pagos/7/conciliar';
+const admin = { ...sesion, 'x-rol': 'Administrador' };
+function busqueda(mp, ids) {
+  mp.responder = req => req.path === '/v1/payments/search'
+    ? new Response(JSON.stringify({ results: ids.map(id => ({ id, external_reference: referencia, collector_id: 900 })) }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }) : null;
+}
+
+test('W5: comprobante en revisión bloquea el checkout online sin llamar al proveedor', async t => {
+  const { db, mp, http } = await preparar(t, false);
+  db.state.comprobantes.push({ IdComprobante: 1, IdPago: 7, EstadoRevision: 'EN_REVISION' });
+  const r = await http('POST', checkout, { headers: sesion });
+  assert.equal(r.status, 409); assert.equal(r.body.code, 'COMPROBANTE_EN_REVISION');
+  assert.equal(db.state.transacciones.length, 0); assert.equal(mp.llamadas.length, 0);
+});
+
+test('W3: reserva CREANDO huérfana (> 2 min) se descarta y se crea un checkout nuevo', async t => {
+  const { db, mp, http } = await preparar(t, false);
+  mp.responder = req => { if (req.method === 'POST') throw new Error('conexión interrumpida'); };
+  assert.equal((await http('POST', checkout, { headers: sesion })).status, 502);
+  mp.responder = null;
+  db.state.transacciones[0].AntiguedadSegundos = 300;
+  const r = await http('POST', checkout, { headers: sesion });
+  assert.equal(r.status, 201);
+  assert.equal(db.state.transacciones[0].Estado, 'ERROR');
+  assert.equal(db.state.transacciones[1].Estado, 'PENDIENTE');
+  assert.equal(eventos(db, 'CHECKOUT_CREACION_DESCARTADA').length, 1);
+  assert.equal(db.state.cuota.Estado, 'Pendiente');
+});
+
+test('W3: reserva CREANDO reciente sigue bloqueando un segundo POST', async t => {
+  const { db, mp, http } = await preparar(t, false);
+  mp.responder = req => { if (req.method === 'POST') throw new Error('conexión interrumpida'); };
+  await http('POST', checkout, { headers: sesion });
+  db.state.transacciones[0].AntiguedadSegundos = 30;
+  assert.equal((await http('POST', checkout, { headers: sesion })).body.code, 'CHECKOUT_EN_PREPARACION');
+  assert.equal(mp.llamadas.filter(r => r.method === 'POST').length, 1);
+});
+
+test('W4: checkout vencido (> 65 min) con importe cambiado se reemplaza con el importe vigente', async t => {
+  const { db, mp, http } = await preparar(t);
+  db.state.transacciones[0].AntiguedadSegundos = 66 * 60;
+  db.state.cuota.Monto = '160.00';
+  const r = await http('POST', checkout, { headers: sesion });
+  assert.equal(r.status, 201); assert.equal(r.body.monto, 160);
+  assert.equal(db.state.transacciones[0].Estado, 'EXPIRADA');
+  assert.equal(db.state.transacciones[1].Monto, 160);
+  assert.equal(eventos(db, 'CHECKOUT_EXPIRADO').length, 1);
+  assert.equal(mp.llamadas.find(r => r.method === 'POST').body.items[0].unit_price, 160);
+});
+
+test('W4: no se reemplaza un checkout vencido con un pago pendiente informado por el proveedor', async t => {
+  const { db, mp, http, notificar } = await preparar(t);
+  mp.pago.status = 'pending';
+  assert.equal((await notificar()).status, 200);
+  db.state.transacciones[0].AntiguedadSegundos = 70 * 60;
+  const r = await http('POST', checkout, { headers: sesion });
+  assert.equal(r.status, 200); assert.equal(r.body.reutilizada, true);
+  assert.equal(db.state.transacciones.length, 1); assert.equal(eventos(db, 'CHECKOUT_EXPIRADO').length, 0);
+});
+
+test('W4: una aprobación tardía sobre un checkout EXPIRADO confirma la cuota pendiente', async t => {
+  const { db, notificar } = await preparar(t);
+  db.state.transacciones[0].Estado = 'EXPIRADA';
+  const r = await notificar();
+  assert.equal(r.status, 200); assert.equal(r.body.confirmada, true);
+  assert.equal(db.state.cuota.Estado, 'Pagado'); assert.equal(db.state.transacciones[0].Estado, 'APROBADA');
+});
+
+test('W1: conciliación del alumno recupera un webhook perdido con la misma verificación', async t => {
+  const { db, mp, http } = await preparar(t);
+  busqueda(mp, [123]);
+  const r = await http('POST', conciliar, { headers: sesion });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.conciliacion.consultado, true); assert.equal(r.body.conciliacion.confirmada, true);
+  assert.equal(r.body.estadoPago, 'Pagado');
+  assert.equal(db.state.cuota.Estado, 'Pagado'); assert.equal(eventos(db, 'PAGO_MERCADOPAGO_CONFIRMADO').length, 1);
+  assert.deepEqual(mp.llamadas.map(l => l.path),
+    ['/v1/payments/search', '/v1/payments/123', '/merchant_orders/55', '/checkout/preferences/pref-1']);
+  // Segunda consulta inmediata: no vuelve a llamar al proveedor.
+  const segunda = await http('POST', conciliar, { headers: sesion });
+  assert.equal(segunda.status, 200); assert.equal(segunda.body.conciliacion.consultado, false);
+  assert.equal(mp.llamadas.length, 4);
+});
+
+test('W1: conciliación no confirma un pago rechazado ni acepta cuotas ajenas', async t => {
+  const { db, mp, http } = await preparar(t);
+  require('../services/conciliacion-pagos.service')._ultimas.clear();
+  mp.pago.status = 'rejected'; busqueda(mp, [123]);
+  const r = await http('POST', conciliar, { headers: sesion });
+  assert.equal(r.status, 200); assert.equal(r.body.estadoPago, 'Pendiente');
+  assert.equal(db.state.transacciones[0].Estado, 'RECHAZADA');
+  const ajena = await http('POST', conciliar, { headers: { ...sesion, 'x-usuario': '99' } });
+  assert.equal(ajena.status, 404);
+});
+
+test('W1: conciliación sin credenciales responde 503 y no toca la BD', async t => {
+  const { db, mp, http } = await preparar(t); delete process.env.MERCADOPAGO_WEBHOOK_SECRET;
+  const r = await http('POST', conciliar, { headers: sesion });
+  assert.equal(r.status, 503); assert.equal(r.body.code, 'PASARELA_NO_CONFIGURADA');
+  assert.equal(mp.llamadas.length, 0); assert.equal(db.queries.length, 0);
+});
+
+test('C4: conciliación administrativa exige rol y transacción de la academia', async t => {
+  const { db, mp, http } = await preparar(t);
+  require('../services/conciliacion-pagos.service')._ultimas.clear();
+  busqueda(mp, [123]);
+  assert.equal((await http('POST', '/api/admin/pagos/transacciones/1/conciliar', { headers: sesion })).status, 403);
+  assert.equal((await http('POST', '/api/admin/pagos/transacciones/9/conciliar', { headers: admin })).status, 404);
+  const r = await http('POST', '/api/admin/pagos/transacciones/1/conciliar', { headers: admin });
+  assert.equal(r.status, 200); assert.equal(r.body.confirmada, true);
+  assert.equal(db.state.cuota.Estado, 'Pagado');
+  assert.equal((await http('POST', '/api/admin/pagos/transacciones/1/conciliar', { headers: admin })).status, 429);
+});
+
+test('W4: un rechazo tardío no reactiva un checkout EXPIRADO, pero queda auditado', async t => {
+  const { db, mp, notificar } = await preparar(t);
+  db.state.transacciones[0].Estado = 'EXPIRADA'; mp.pago.status = 'rejected';
+  const r = await notificar();
+  assert.equal(r.status, 200);
+  assert.equal(db.state.transacciones[0].Estado, 'EXPIRADA'); assert.equal(db.state.cuota.Estado, 'Pendiente');
+  assert.equal(eventos(db, 'MERCADOPAGO_EVENTO').length, 1);
+});

@@ -45,7 +45,8 @@ test('Tutor IA mantiene el contexto de main sin consultar Evaluacion.IdCurso', a
   assert.equal(r.status, 200); assert.equal(r.body.respuesta, 'Respuesta simulada');
   assert.equal(r.body.contexto.promedioGeneral, 1200);assert.equal(r.body.contexto.puestoRanking,2);
   assert.equal(r.body.contexto.escalaMaxima,2000);assert.equal(r.body.contexto.totalEvaluaciones,2);
-  assert.equal(r.body.contexto.historial[0].estadoRegistro,2);
+  // Desde a149b5a el contexto público no devuelve el historial de notas.
+  assert.equal(r.body.contexto.historial, undefined);
   assert.doesNotMatch(prompts[0], /Persona Ficticia|9999/);fin();
 });
 
