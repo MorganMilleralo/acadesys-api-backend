@@ -5,14 +5,10 @@ const crypto = require('crypto');
 const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
-const { idPositivo } = require('../utils/validaciones');
+const { idPositivo, rollbackSeguro } = require('../utils/validaciones');
 const { MATERIAL_UPLOADS_DIR } = require('../config/storage');
 
 const UPLOAD_DIR = MATERIAL_UPLOADS_DIR;
-
-function asegurarDirectorio() {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
 
 function apiBase(req) {
   return String(process.env.API_PUBLIC_URL || process.env.PUBLIC_API_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
@@ -92,8 +88,7 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
     return res.status(400).json({ error: 'El archivo PDF recibido no es válido.' });
   }
 
-  let destino;
-  let insertado = false;
+  let conexion;
   try {
     const [relacion] = await pool.query(`
       SELECT
@@ -134,30 +129,31 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
       return res.status(400).json({ error: 'El archivo PDF recibido está vacío o incompleto.' });
     }
 
-    asegurarDirectorio();
-
+    // El PDF se guarda en MySQL (MaterialArchivo): el disco de Render se borra
+    // en cada despliegue, la base de datos no.
     const nombreSeguro = limpiarNombreArchivo(nombreArchivo || 'material.pdf').slice(-180);
-    const nombreFinal = `${Date.now()}-${crypto.randomBytes(5).toString('hex')}-${nombreSeguro}`;
-    destino = path.join(UPLOAD_DIR, nombreFinal);
-
-    fs.writeFileSync(destino, buffer);
-
-    const urlArchivo = `${apiBase(req)}/uploads/materiales/${encodeURIComponent(nombreFinal)}`;
-
-    const [insert] = await pool.query(`
+    const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+    conexion = await pool.getConnection();
+    await conexion.beginTransaction();
+    const [insert] = await conexion.query(`
       INSERT INTO MaterialAcademico
         (IdCiclo, IdCurso, Titulo, Descripcion, NombreArchivo, UrlArchivo, TipoMime, IdUsuarioCreacion, FechaPublicacion, EstadoRegistro)
-      VALUES (?, ?, ?, ?, ?, ?, 'application/pdf', ?, NOW(), 1)
+      VALUES (?, ?, ?, ?, ?, '', 'application/pdf', ?, NOW(), 1)
     `, [
       Number(idCiclo),
       Number(idCurso),
       String(titulo).trim(),
       String(descripcion || '').trim(),
       nombreSeguro,
-      urlArchivo,
       req.usuario.idUsuario || req.usuario.id
     ]);
-    insertado = true;
+    const urlArchivo = `${apiBase(req)}/api/materiales/${insert.insertId}/descargar`;
+    await conexion.query(
+      'INSERT INTO MaterialArchivo (IdMaterial, Contenido, TamanoBytes, Sha256) VALUES (?, ?, ?, ?)',
+      [insert.insertId, buffer, buffer.length, sha256],
+    );
+    await conexion.query('UPDATE MaterialAcademico SET UrlArchivo = ? WHERE IdMaterial = ?', [urlArchivo, insert.insertId]);
+    await conexion.commit();
 
     res.status(201).json({
       idMaterial: insert.insertId,
@@ -172,12 +168,18 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
       curso: relacion[0].Curso
     });
   } catch (error) {
-    if (destino && !insertado) {
-      try { fs.unlinkSync(destino); }
-      catch (cleanupError) { if (cleanupError.code !== 'ENOENT') console.error('Cleanup PDF no completado:', cleanupError); }
+    await rollbackSeguro(conexion);
+    if (error?.code === 'ER_NO_SUCH_TABLE') {
+      console.error('Falta la tabla MaterialArchivo (database/MATERIAL_ARCHIVO_2026-11-14.sql).');
+      return res.status(503).json({ code: 'ALMACEN_NO_CONFIGURADO', error: 'El almacenamiento de materiales no está configurado. Avisa al administrador del sistema.' });
+    }
+    if (error?.code === 'ER_NET_PACKET_TOO_LARGE') {
+      return res.status(413).json({ error: 'El PDF supera el tamaño que acepta la base de datos.' });
     }
     console.error('Error en POST /api/materiales:', error.message);
     res.status(500).json({ error: 'No se pudo guardar el material PDF.' });
+  } finally {
+    if (conexion) conexion.release();
   }
 });
 
@@ -238,13 +240,32 @@ router.get('/:id/descargar', async (req, res) => {
     }
     if (!autorizado) return res.status(404).json({ error: 'Material no encontrado.' });
 
+    const nombreDescarga = limpiarNombreArchivo(material.NombreArchivo || 'material.pdf');
+    let guardado = null;
+    try {
+      const [archivos] = await pool.query(
+        'SELECT Contenido FROM MaterialArchivo WHERE IdMaterial = ? LIMIT 1', [idMaterial]);
+      guardado = archivos[0]?.Contenido || null;
+    } catch (error) {
+      // Sin la tabla todavía se intenta el archivo antiguo en disco.
+      if (error?.code !== 'ER_NO_SUCH_TABLE') throw error;
+    }
+    if (guardado) {
+      res.set('Cache-Control', 'private, no-store');
+      res.set('X-Content-Type-Options', 'nosniff');
+      res.set('Content-Type', 'application/pdf');
+      res.attachment(nombreDescarga);
+      return res.send(Buffer.isBuffer(guardado) ? guardado : Buffer.from(guardado));
+    }
+
+    // Materiales anteriores a MaterialArchivo: archivo en disco, si todavía existe.
     const archivo = archivoDelMaterial(material.UrlArchivo);
     if (!archivo || !fs.existsSync(archivo)) {
       return res.status(404).json({ code: 'ARCHIVO_NO_DISPONIBLE', error: 'El archivo del material no está disponible en el servidor.' });
     }
     res.set('Cache-Control', 'private, no-store');
     res.set('X-Content-Type-Options', 'nosniff');
-    return res.download(archivo, limpiarNombreArchivo(material.NombreArchivo || 'material.pdf'), {
+    return res.download(archivo, nombreDescarga, {
       headers: { 'Content-Type': 'application/pdf' },
     }, (error) => {
       if (error && !res.headersSent) res.status(500).json({ error: 'No se pudo descargar el material.' });
@@ -278,6 +299,12 @@ router.delete('/:id', requiereRol('Administrador'), async (req, res) => {
        SET ma.EstadoRegistro = -1 WHERE ma.IdMaterial = ? AND c.IdAcademia = ? AND ma.EstadoRegistro = 1`,
       [Number(id), idAcademia]
     );
+
+    try {
+      await pool.query('DELETE FROM MaterialArchivo WHERE IdMaterial = ?', [Number(id)]);
+    } catch (blobError) {
+      if (blobError?.code !== 'ER_NO_SUCH_TABLE') console.warn('No se pudo liberar el PDF guardado:', blobError.message);
+    }
 
     try {
       const archivo = archivoDelMaterial(rows[0].UrlArchivo);

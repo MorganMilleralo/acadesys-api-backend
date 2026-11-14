@@ -861,16 +861,10 @@ test("material de otra academia no se publica ni elimina", async () => {
   });
 });
 
-test("PDF huérfano se limpia si falla INSERT; cleanup no oculta el error original", async (t) => {
-  const escritos = [],
-    borrados = [];
+test("si falla el INSERT del material no queda ningún PDF en disco (se guarda en MySQL)", async (t) => {
+  const escritos = [];
   t.mock.method(console, "error", () => {});
-  t.mock.method(fs, "mkdirSync", () => {});
   t.mock.method(fs, "writeFileSync", (destino) => escritos.push(destino));
-  t.mock.method(fs, "unlinkSync", (destino) => {
-    borrados.push(destino);
-    throw new Error("fallo cleanup simulado");
-  });
   ejecutar = async (sql) => {
     if (/FROM CicloCurso/.test(sql)) return [[{ Curso: "Álgebra" }]];
     if (/INSERT INTO MaterialAcademico/.test(sql))
@@ -880,8 +874,7 @@ test("PDF huérfano se limpia si falla INSERT; cleanup no oculta el error origin
   await conServidor(async (pedir) =>
     assert.equal((await pedir("/api/materiales", "POST", pdf)).status, 500),
   );
-  assert.equal(escritos.length, 1);
-  assert.deepEqual(borrados, escritos);
+  assert.equal(escritos.length, 0);
 });
 
 test("PDF inválido y mayor de 10 MB se rechazan sin escribir archivos", async (t) => {
