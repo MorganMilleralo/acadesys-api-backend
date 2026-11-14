@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const express = require("express");
 
 // Base de datos simulada: NO se utiliza Aiven.
-const rutaDB = require.resolve("./config/db");
+const rutaDB = require.resolve("../../config/db");
 const cierres = new Set();
 
 const clave = (ciclo, curso, periodo, tipo) =>
@@ -82,7 +82,7 @@ app.use((req, res, next) => {
 });
 
 // Cargamos las rutas reales con la BD simulada.
-app.use("/api", require("./routes/actas.routes"));
+app.use("/api", require("../../routes/actas.routes"));
 
 const servidor = app.listen(0, "127.0.0.1", async () => {
   const puerto = servidor.address().port;

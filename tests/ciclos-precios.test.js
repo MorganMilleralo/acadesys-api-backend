@@ -5,7 +5,7 @@ const { simular, servir, eventos, consultas } = require('./soporte');
 const { prepararPrecios, salidaPrecios } = require('../utils/precios-ciclo');
 const { obtenerPrecioInscripcion } = require('../utils/pagos');
 
-test('Precios: NULL no es cero ni mensualidad heredada; catálogo coincide con checkout de Morgan', () => {
+test('Precios: NULL no es cero ni mensualidad heredada; catálogo coincide con el checkout', () => {
   for (const [inscripcion, legado, esperado] of [[null, '200.00', 200], ['250.00', '200.00', 250],
     ['0.00', '200.00', 0], [null, null, null]]) {
     const ciclo = { PrecioInscripcion: inscripcion, Precio: legado, PrecioMensual: null };
@@ -101,7 +101,7 @@ test('Precios: catálogo y administración exponen tarifa efectiva, conceptos y 
   assert.equal(catalogo.body[0].origenPrecioInscripcion, 'PrecioInscripcion');
 });
 
-test('Precios: mensualidad NULL devuelve 409 en ruta intacta de Morgan aunque exista Precio', async t => {
+test('Precios: mensualidad NULL devuelve 409 aunque exista Precio', async t => {
   const pedir = await servir(t, [['/api', 'pagos.routes']]);
   simular(() => [[{ IdCiclo: 7, Precio: 200, PrecioInscripcion: 200, PrecioMensual: null }]]);
   const r = await pedir('POST', '/api/pagos/ciclo/7/mensualidades', { periodo: '2026-11', fechaVencimiento: '2026-11-10' });

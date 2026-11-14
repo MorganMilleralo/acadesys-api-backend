@@ -1,7 +1,6 @@
 'use strict';
 
-// C4 del informe de verificación: listado administrativo de transacciones
-// online y auditoría por cuota. Solo lectura y siempre dentro de la academia.
+// Listado administrativo de transacciones online y auditoría por cuota. Solo lectura y siempre dentro de la academia.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { simular, secuencia, servir, consultas } = require('./soporte');
@@ -17,7 +16,7 @@ const fila = {
   IdUsuario: 10, CodigoUsuario: 'A001', Alumno: 'Alumno Ficticio',
 };
 
-test('C4 lista transacciones de la academia con filtros parametrizados y paginación', async t => {
+test('lista transacciones de la academia con filtros parametrizados y paginación', async t => {
   const fin = secuencia([
     { sql: /SELECT COUNT\(\*\) AS Total FROM PagoTransaccion pt/, params: [4, 3, '2026-11', 'PAGO_DUPLICADO'],
       rows: [{ Total: 1 }], verificar(q) { assert.match(q, /pt\.IdAcademia = \?/); } },
@@ -34,7 +33,7 @@ test('C4 lista transacciones de la academia con filtros parametrizados y paginac
   fin();
 });
 
-test('C4 filtro REQUIERE_REVISION usa estados fijos, sin texto del usuario en el SQL', async t => {
+test('filtro REQUIERE_REVISION usa estados fijos, sin texto del usuario en el SQL', async t => {
   const fin = secuencia([
     { sql: /COUNT/, params: [4, 'Inscripcion'], rows: [{ Total: 0 }],
       verificar(q) { assert.match(q, /'PAGO_DUPLICADO', 'REEMBOLSADA', 'CONTRACARGO'/); assert.doesNotMatch(q, /requiere/i); } },
@@ -46,7 +45,7 @@ test('C4 filtro REQUIERE_REVISION usa estados fijos, sin texto del usuario en el
   fin();
 });
 
-test('C4 rechaza filtros inválidos sin consultar la base', async t => {
+test('rechaza filtros inválidos sin consultar la base', async t => {
   simular();
   const pedir = await servir(t, rutas, admin);
   for (const q of ['idCiclo=abc', 'periodo=2026-13', 'estado=PAGADO', 'limite=500', 'desde=-1', "estado=x'%20OR%201=1"]) {
@@ -56,18 +55,18 @@ test('C4 rechaza filtros inválidos sin consultar la base', async t => {
   assert.equal(consultas.length, 0);
 });
 
-test('C4 solo administradores consultan transacciones', async t => {
+test('solo administradores consultan transacciones', async t => {
   simular();
   const pedir = await servir(t, rutas, { id: 10, idAcademia: 4, rol: 'Alumno' });
   assert.equal((await pedir('GET', '/api/admin/pagos/transacciones')).status, 403);
   assert.equal(consultas.length, 0);
 });
 
-test('C4 auditoría de una cuota exige que pertenezca a la academia y traduce eventos del proveedor', async t => {
+test('auditoría de una cuota exige que pertenezca a la academia y traduce eventos del proveedor', async t => {
   const fin = secuencia([
     { sql: /FROM PagosMensualidad p/, params: [7, 4], rows: [{ IdPago: 7 }] },
     { sql: /FROM PagoAuditoria WHERE IdPago = \? AND IdAcademia = \?/, params: [7, 4], rows: [
-      { IdAuditoria: 2, IdComprobante: null, IdUsuarioActor: null, Evento: 'MERCADOPAGO_EVENTO', EstadoAnterior: 'PENDIENTE',
+      { IdAuditoria: 2, IdComprobante: null, IdUsuarioActor: null, Evento: 'CULQI_EVENTO', EstadoAnterior: 'PENDIENTE',
         EstadoNuevo: 'APROBADA', MontoAnterior: '150.00', MontoNuevo: '150.00',
         Motivo: JSON.stringify({ v: 1, transaccion: 31, pago: '123', preferencia: 'pref-1', actualizado: 1, estado: 'approved' }),
         FechaCreacion: '2026-11-14T10:05:00.000Z' },
@@ -83,7 +82,7 @@ test('C4 auditoría de una cuota exige que pertenezca a la academia y traduce ev
   fin();
 });
 
-test('C4 auditoría de una cuota de otra academia responde 404', async t => {
+test('auditoría de una cuota de otra academia responde 404', async t => {
   const fin = secuencia([{ sql: /FROM PagosMensualidad p/, params: [8, 4], rows: [] }]);
   const pedir = await servir(t, rutas, admin);
   assert.equal((await pedir('GET', '/api/admin/pagos/8/auditoria')).status, 404);

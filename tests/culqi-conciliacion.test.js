@@ -1,6 +1,6 @@
 'use strict';
 
-// W1/W3/W5 y C4 tras el cambio a Culqi: la conciliación consulta la orden
+// Conciliación con Culqi: consulta la orden
 // guardada en BD, nunca datos del navegador, y reutiliza la misma
 // verificación que el webhook.
 const { test } = require('node:test');
@@ -32,7 +32,7 @@ const orden = (estadoProveedor, estado, referenciaInterna = ref) => ({ proveedor
   monto: 150, moneda: 'PEN', estadoProveedor, estado, fechaActualizacionProveedor: 1 });
 function reiniciar() { llamadas.length = 0; aplicadas.length = 0; configurada = true; conciliacion._ultimas.clear(); }
 
-test('W1 conciliación Culqi confirma una orden pagada con la orden guardada en BD', async () => {
+test('conciliación Culqi confirma una orden pagada con la orden guardada en BD', async () => {
   reiniciar(); ordenSimulada = orden('paid', 'APROBADA');
   const r = await conciliacion.conciliarReferencia({ referenciaInterna: ref, idOrdenProveedor: 'ord_test_abcdefgh12' });
   assert.deepEqual(llamadas, ['ord_test_abcdefgh12']);
@@ -40,7 +40,7 @@ test('W1 conciliación Culqi confirma una orden pagada con la orden guardada en 
   assert.equal(r.confirmada, true); assert.equal(r.pagosEncontrados, 1);
 });
 
-test('W1 una orden expirada no confirma y una orden ajena se rechaza', async () => {
+test('una orden expirada no confirma y una orden ajena se rechaza', async () => {
   reiniciar(); ordenSimulada = orden('expired', 'EXPIRADA');
   const r = await conciliacion.conciliarReferencia({ referenciaInterna: ref, idOrdenProveedor: 'ord_test_abcdefgh12' });
   assert.equal(r.confirmada, false); assert.deepEqual(aplicadas, [['actualizar', 'EXPIRADA']]);
@@ -52,7 +52,7 @@ test('W1 una orden expirada no confirma y una orden ajena se rechaza', async () 
 
 const filaRef = { IdTransaccion: 31, IdPago: 7, ReferenciaInterna: ref, IdOrdenProveedor: 'ord_test_abcdefgh12', Estado: 'PENDIENTE' };
 
-test('C4 conciliación administrativa usa Culqi y solo transacciones de la academia', async t => {
+test('conciliación administrativa usa Culqi y solo transacciones de la academia', async t => {
   reiniciar(); ordenSimulada = orden('paid', 'APROBADA');
   const pedir = await servir(t, [['/api/admin/pagos', 'admin-pagos.routes']], { id: 1, idAcademia: 4, rol: 'Administrador' });
   let fin = secuencia([{ sql: /FROM PagoTransaccion WHERE .*IdTransaccion = \?/, params: [4, 'CULQI', 31], rows: [filaRef] }]);
@@ -64,14 +64,14 @@ test('C4 conciliación administrativa usa Culqi y solo transacciones de la acade
   assert.equal(r.status, 404); fin();
 });
 
-test('C4 conciliación sin credenciales de Culqi responde 503 sin tocar la BD', async t => {
+test('conciliación sin credenciales de Culqi responde 503 sin tocar la BD', async t => {
   reiniciar(); configurada = false; simular();
   const pedir = await servir(t, [['/api/admin/pagos', 'admin-pagos.routes']], { id: 1, idAcademia: 4, rol: 'Administrador' });
   const r = await pedir('POST', '/api/admin/pagos/transacciones/31/conciliar');
   assert.equal(r.status, 503); assert.equal(consultas.length, 0); assert.equal(llamadas.length, 0);
 });
 
-test('W5 un comprobante en revisión bloquea el checkout Culqi antes de crear la orden', async () => {
+test('un comprobante en revisión bloquea el checkout Culqi antes de crear la orden', async () => {
   const fin = secuencia([
     { sql: /FROM PagosMensualidad p .*FOR UPDATE/, params: [7, 10, 1], rows: [{ IdPago: 7, IdUsuario: 10, IdCiclo: 3,
       Mes: '2026-11', Monto: '150.00', Estado: 'Pendiente', IdAcademia: 1 }] },
@@ -83,7 +83,7 @@ test('W5 un comprobante en revisión bloquea el checkout Culqi antes de crear la
   fin();
 });
 
-test('W3 una reserva CREANDO sin orden de más de 2 minutos se descarta y se crea una nueva', async () => {
+test('una reserva CREANDO sin orden de más de 2 minutos se descarta y se crea una nueva', async () => {
   const pasos = [
     { sql: /FROM PagosMensualidad p .*FOR UPDATE/, rows: [{ IdPago: 7, IdUsuario: 10, IdCiclo: 3,
       Mes: '2026-11', Monto: '150.00', Estado: 'Pendiente', IdAcademia: 1, Nombres: 'A' }] },

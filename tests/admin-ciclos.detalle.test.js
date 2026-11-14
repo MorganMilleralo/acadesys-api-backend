@@ -154,7 +154,7 @@ test('GET /api/admin/ciclos/:id sin rol autorizado responde 403', async () => {
 
 // ---------------------------------------------------------------------------
 // Regresión de capacidad: el commit 4c36c12 recortaba toda capacidad a 100.
-// Plan 26/10, AC-05: límite nuevo 120; los históricos no se recortan ni se ocultan.
+// Límite para capacidades nuevas: 120; los ciclos históricos no se recortan ni se ocultan.
 // ---------------------------------------------------------------------------
 
 test('el detalle devuelve la capacidad real (250), sin recortarla a 100', async () => {
@@ -180,7 +180,7 @@ test('el listado conserva capacidad histórica 250, sus vacantes y el aviso de r
   });
 });
 
-test('el tope de nuevas capacidades corresponde al plan AC-05 (1..120)', () => {
+test('el tope de nuevas capacidades es 1..120', () => {
   assert.equal(ciclosModulo.MIN_CAPACIDAD, 1);
   assert.equal(ciclosModulo.MAX_CAPACIDAD, 120);
 });

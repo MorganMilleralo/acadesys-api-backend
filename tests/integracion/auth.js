@@ -5,7 +5,7 @@ const jwt = require("jsonwebtoken");
 // Simulamos MySQL para NO conectarnos a Aiven.
 let usuariosSimulados = [];
 
-const rutaDB = require.resolve("./config/db");
+const rutaDB = require.resolve("../../config/db");
 
 require.cache[rutaDB] = {
   id: rutaDB,
@@ -16,7 +16,7 @@ require.cache[rutaDB] = {
   },
 };
 
-const verificarToken = require("./middlewares/auth.middleware");
+const verificarToken = require("../../middlewares/auth.middleware");
 
 const token = jwt.sign(
   {

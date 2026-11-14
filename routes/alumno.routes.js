@@ -251,8 +251,8 @@ router.post('/pagos/:idPago/comprobante', async (req, res) => {
       return res.status(409).json({ error: 'Ya existe un comprobante en revisión para esta cuota.' });
     }
 
-    // W5: no registrar una transferencia mientras Culqi tiene un pago en
-    // proceso para la misma cuota ('preference_created' = solo checkout abierto).
+    // No se registra una transferencia mientras la misma cuota tiene un pago
+    // online en proceso: así se evita el doble pago.
     const [enProceso] = await connection.query(
       `SELECT IdTransaccion FROM PagoTransaccion
        WHERE IdPago = ? AND IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1

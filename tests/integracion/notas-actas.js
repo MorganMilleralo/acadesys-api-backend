@@ -40,9 +40,9 @@ async function query(sql, p=[]) {
 }
 const connection={query,async beginTransaction(){respaldo={evaluaciones:copia(evaluaciones),cierres:copia(cierres),siguienteId};},
  async commit(){respaldo=null;},async rollback(){if(!respaldo)return;evaluaciones.splice(0,evaluaciones.length,...respaldo.evaluaciones);cierres.splice(0,cierres.length,...respaldo.cierres);siguienteId=respaldo.siguienteId;respaldo=null;},release(){}};
-const dbPath=require.resolve('./config/db');require.cache[dbPath]={id:dbPath,filename:dbPath,loaded:true,exports:{query,getConnection:async()=>connection}};
+const dbPath=require.resolve('../../config/db');require.cache[dbPath]={id:dbPath,filename:dbPath,loaded:true,exports:{query,getConnection:async()=>connection}};
 const app=express();app.use(express.json());app.use((req,res,next)=>{req.usuario={id:10,idAcademia:1,rol:req.headers['x-rol-prueba']||'Administrador'};next();});
-app.use('/api/notas',require('./routes/notas.routes'));app.use('/api',require('./routes/actas.routes'));
+app.use('/api/notas',require('../../routes/notas.routes'));app.use('/api',require('../../routes/actas.routes'));
 const server=app.listen(0,'127.0.0.1',async()=>{
  const base=`http://127.0.0.1:${server.address().port}`;
  async function probar(nombre,metodo,ruta,body,esperado,rol='Administrador') {

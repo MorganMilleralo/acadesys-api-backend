@@ -1075,7 +1075,7 @@ test('checkout sin inscripción ni precio legado rechaza solicitud y confirmaci�
   }, null);
 });
 
-test('AC-05 dos confirmaciones concurrentes compiten por la última vacante (locks simulados)', async t => {
+test('dos confirmaciones concurrentes compiten por la última vacante (locks simulados)', async t => {
   const { crearTokenVerificacionMatricula } = require('../utils/token-verificacion-matricula');
   const originalFetch = globalThis.fetch;
   t.mock.method(globalThis, 'fetch', async (url, ...args) => {
@@ -1352,7 +1352,7 @@ test('alumno registra referencia de comprobante, pero el pago sigue pendiente', 
   assert.equal(tx.commit, 1);
 });
 
-test('alumno no registra transferencia si Mercado Pago tiene un pago en proceso (W5)', async () => {
+test('alumno no registra transferencia si tiene un pago online en proceso', async () => {
   let insertado = false;
   ejecutar = async (sql, p) => {
     if (/FROM PagosMensualidad p/.test(sql) && /FOR UPDATE/.test(sql)) {

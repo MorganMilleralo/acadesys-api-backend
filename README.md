@@ -1,45 +1,78 @@
-# Avance de Morgan — autorización RBAC de notas
+# AcadeSys API
 
-> Estado de la rama de consolidación: este avance ya está integrado. Consultar
-> [CONSOLIDACION_BACKEND.md](CONSOLIDACION_BACKEND.md) para el contrato vigente,
-> pruebas y bloqueos. Ejecutar `npm.cmd test`; no volver a ejecutar el instalador
-> descrito abajo. Docente/tutor no reciben acceso a notas sin asignación verificable;
-> Administrador y Recursos Humanos comparten permisos por nombre exacto normalizado.
->
-> Alcance confirmado por Morgan: **solo simulacros semanales, sin calificaciones
-> por curso**. La integración conserva el contrato existente de main, sin
-> Evaluacion.IdCurso ni RegistrosAfectados. Sus 154 pruebas locales pasan; la
-> adaptación semanal completa y la verificación del esquema vivo siguen pendientes.
-> **No apto para Auto-Deploy**: Render despliega main y Aiven es la única base.
+API REST de **AcadeSys**, plataforma de gestión para academias preuniversitarias: catálogo de ciclos, matrícula en línea, intranet del alumno, gestión académica (notas, asistencia, materiales), pagos con Culqi y Tutor IA.
 
-El texto siguiente conserva la descripción del avance original de main.
+- **Stack:** Node.js 18+, Express 5, MySQL 8 (`mysql2`), JWT, bcrypt.
+- **Despliegue:** Render (despliegue automático desde `main`) con base de datos MySQL en Aiven.
+- **Frontend:** [acadesys-web-frontend](https://github.com/LuisFern2a/acadesys-web-frontend).
 
-## Objetivo
-Cerrar las rutas de lectura de notas que no exigen autorización por rol y evitar que un alumno consulte el historial de otro estudiante.
+## Puesta en marcha
 
-## Contenido
-- `middlewares/notas-acceso.middleware.js`: middleware completo e independiente para consultas generales de notas y consulta de historial individual.
-- `scripts/aplicar-avance.js`: integra de forma quirúrgica el middleware en cuatro rutas de `routes/notas.routes.js`; no sustituye el archivo completo y crea un respaldo antes de escribir.
-- `tests/notas-acceso.middleware.test.js`: pruebas con el módulo nativo de Node.js, sin librerías adicionales.
-- `docs/AVANCE-MORGAN-RBAC-NOTAS.md`: pasos, criterios y limitaciones.
+```bash
+npm install
+cp .env.example .env    # completar las variables
+npm run dev             # http://localhost:3000
+```
 
-## Instalación
-1. Copia únicamente `middlewares/notas-acceso.middleware.js` a la carpeta `middlewares/` del backend. No reemplaces `roles.middleware.js`; el archivo de notas existente seguirá usando su middleware actual para las rutas POST y PUT.
-2. Copia el script de `scripts/` a una carpeta temporal o ejecuta este script desde esta carpeta, estando en la raíz del backend:
-   `node /ruta/Avance_Morgan_RBAC_Notas/scripts/aplicar-avance.js`
-3. Revisa el diff de `routes/notas.routes.js` y el respaldo `routes/notas.routes.js.bak-*` creado automáticamente.
-4. Ejecuta las pruebas desde esta carpeta:
-   `node --test tests/notas-acceso.middleware.test.js`
-5. Prueba la integración contra la base de datos de desarrollo y revisa el frontend antes de hacer merge o desplegar.
+Para una base de datos nueva, ejecutar `database/esquema_inicial.sql` y después los archivos de `database/migraciones/` en orden numérico.
 
-## Endpoints protegidos
-- `GET /api/notas`: personal académico autorizado.
-- `GET /api/notas/contexto/:idCiclo`: personal académico autorizado.
-- `GET /api/notas/matriculas/:idCiclo`: personal académico autorizado.
-- `GET /api/notas/alumno/:id`: personal académico autenticado con academia válida, o el alumno autenticado consultando su propio ID.
+## Scripts
 
-Los `POST` y `PUT` existentes mantienen los controles de rol y el middleware de cierre que ya tenían.
+| Comando | Descripción |
+|---|---|
+| `npm start` | Inicia la API. |
+| `npm run dev` | Inicia la API y la reinicia al guardar cambios. |
+| `npm test` | Ejecuta todas las pruebas automatizadas (sin conexión a MySQL ni a servicios externos). |
+| `npm run verificar:sintaxis` | Comprueba la sintaxis de todos los archivos JavaScript. |
+| `npm run verificar:entorno` | Revisa que el `.env` tenga las variables obligatorias, sin mostrar sus valores. |
+| `npm run cuotas:generar` | Genera las cuotas mensuales pendientes (tarea programada). |
 
-## Archivos subidos y fotos de perfil
+## Estructura
 
-El almacenamiento local usa `backend/uploads` por defecto. Para un hosting que ofrezca volumen persistente, configura `UPLOADS_DIR` a la ruta montada (por ejemplo `/var/data/uploads`) para que fotos y materiales sobrevivan reinicios/redeploys. Si no hay volumen persistente, usar almacenamiento de objetos externo o deshabilitar la promesa de persistencia. `Usuario.FotoUrl` requiere la migración controlada documentada en `database/migrations/20261022_add_usuario_fotourl.sql`; probarla primero en staging, nunca a ciegas en producción.
+```
+config/        Conexión MySQL, CORS y carpetas de archivos
+middlewares/   Autenticación JWT, roles, cierre de actas y manejo de errores
+routes/        Endpoints agrupados por módulo
+services/      Integración con Culqi y lógica de transacciones de pago
+utils/         Reglas de negocio reutilizables (precios, capacidad, escalas, validaciones)
+database/      Esquema inicial y migraciones
+scripts/       Pruebas, verificaciones y tareas programadas
+tests/         Pruebas unitarias y de integración (node:test)
+docs/          Colección de Postman
+```
+
+## Módulos principales
+
+| Módulo | Rutas | Acceso |
+|---|---|---|
+| Autenticación y recuperación de contraseña | `/api/login`, `/api/auth/recuperar-password` | Público |
+| Catálogo y matrícula | `/api/ciclos`, `/api/matriculas` | Público |
+| Intranet del alumno | `/api/alumno` | Alumno |
+| Pagos del alumno (Culqi) | `/api/alumno/pagos` | Alumno |
+| Webhook de Culqi | `/api/webhooks/culqi` | Culqi (Basic Auth) |
+| Administración de ciclos, pagos y dashboard | `/api/admin/...` | Administrador |
+| Aulas, cursos, horarios, asignaciones y asistencia | `/api/aulas`, `/api/cursos`, `/api/horarios`, `/api/asignaciones`, `/api/asistencias` | Personal académico |
+| Notas y cierre de actas | `/api/notas`, `/api/actas` | Personal académico |
+| Pagos manuales y comprobantes | `/api/pagos` | Administrador |
+| Comunicados | `/api/comunicados` | Administrador (publica) y usuarios (lectura) |
+| Materiales | `/api/materiales` | Administrador (gestión) y usuarios autorizados (descarga) |
+| Usuarios, perfiles y menús | `/api/usuarios`, `/api/perfiles`, `/api/menus` | Administrador |
+| Tutor IA | `/api/tutor-ia` | Alumno |
+
+Todas las rutas privadas exigen `Authorization: Bearer <token>`. Cada consulta se limita a la academia del usuario autenticado.
+
+## Seguridad y datos
+
+- Las contraseñas se guardan con bcrypt y las sesiones usan JWT con verificación del usuario en cada petición.
+- Los permisos se validan en el backend por rol y por academia; el frontend no decide accesos.
+- Los materiales en PDF y las fotos de perfil se guardan en MySQL (`MaterialArchivo`, `FotoPerfil`), así no se pierden en los despliegues.
+- Los materiales solo se descargan con sesión: administración de la academia, alumnos matriculados en el ciclo o docentes asignados al curso.
+- Los pagos online se confirman únicamente con la consulta al proveedor (webhook o conciliación), nunca con datos del navegador. Cada cambio queda registrado en `PagoAuditoria`.
+
+## Pruebas
+
+```bash
+npm test
+```
+
+Las pruebas sustituyen MySQL y los servicios externos por dobles locales, por lo que pueden ejecutarse en cualquier equipo sin credenciales.

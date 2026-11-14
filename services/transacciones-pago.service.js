@@ -9,13 +9,9 @@ const { ErrorPago, aCentimos, idOrdenCulqi } = require('../utils/pagos-proveedor
 const PROVEEDOR = 'CULQI';
 const MONEDA = 'PEN';
 
-// W3: una reserva en CREANDO sin preferencia guardada después de 2 minutos es
-// huérfana. Su URL nunca llegó al alumno, así que nadie puede pagarla.
+// Una reserva en CREANDO sin orden guardada después de 2 minutos es huérfana:
+// la orden nunca llegó al alumno, así que nadie puede pagarla.
 const CREACION_HUERFANA_SEGUNDOS = 120;
-// W4: Mercado Pago vence el checkout a los 60 min (adaptador). Solo se
-// reemplaza localmente a los 65 min, cuando el proveedor ya no lo acepta.
-const REEMPLAZO_CHECKOUT_SEGUNDOS = 65 * 60;
-const ESTADOS_PAGO_EN_CURSO = new Set(['pending', 'in_process', 'authorized', 'in_mediation']);
 const ESTADOS_TRANSACCION = new Set(['CREANDO', 'PENDIENTE', 'APROBADA', 'RECHAZADA', 'CANCELADA',
   'REEMBOLSADA', 'CONTRACARGO', 'PAGO_DUPLICADO', 'ERROR', 'EXPIRADA']);
 
@@ -47,27 +43,6 @@ async function auditar(connection, datos) {
     ],
   );
   if (resultado.affectedRows !== 1) throw errorPago(503, 'AUDITORIA_NO_GUARDADA', 'No se pudo registrar la auditoría del pago.');
-}
-
-/**
- * ¿Mercado Pago informó un pago todavía en curso para esta transacción?
- * Falla cerrada: ante auditoría ilegible se asume que sí y no se reemplaza.
- */
-async function pagoEnCurso(connection, tx, idAcademia) {
-  if (ESTADOS_PAGO_EN_CURSO.has(tx.CodigoEstadoProveedor) && tx.CodigoEstadoProveedor !== 'pending') return true;
-  if (tx.Estado !== 'PENDIENTE') return false;
-  const [auditorias] = await connection.query(
-    `SELECT IdAuditoria, Motivo FROM PagoAuditoria
-     WHERE IdPago = ? AND IdAcademia = ? AND Evento = 'MERCADOPAGO_EVENTO'
-     ORDER BY IdAuditoria DESC FOR UPDATE`, [tx.IdPago, idAcademia],
-  );
-  for (const row of auditorias) {
-    let recibo;
-    try { recibo = JSON.parse(row.Motivo); } catch { return true; }
-    if (Number(recibo?.transaccion) !== Number(tx.IdTransaccion)) continue;
-    return ESTADOS_PAGO_EN_CURSO.has(recibo.estado);
-  }
-  return false;
 }
 
 async function descartarTransaccion(connection, tx, idAcademia, cuota, estadoNuevo, evento, motivo) {
@@ -149,7 +124,7 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
         'El pago con billeteras móviles debe estar entre S/ 6.00 y S/ 500.00. Contacta con la academia para otra forma de pago.');
     }
 
-    // W5: el pago manual y el online no se superponen. Mientras administración
+    // El pago manual y el online no se superponen. Mientras administración
     // revisa un comprobante, no se abre un cobro online de la misma cuota.
     const [enRevision] = await connection.query(
       `SELECT IdComprobante FROM PagoComprobante
@@ -195,13 +170,7 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
       if (actual.Estado === 'CREANDO' && !actual.IdOrdenProveedor && medible
           && antiguedad >= CREACION_HUERFANA_SEGUNDOS) {
         await descartarTransaccion(connection, actual, academiaId, pago, 'ERROR', 'CHECKOUT_CREACION_DESCARTADA',
-          'Reserva sin preferencia guardada por más de 2 minutos; su URL nunca llegó al alumno.');
-        actual = null;
-      } else if (proveedorActual === 'MERCADOPAGO'
-          && ['PENDIENTE', 'RECHAZADA', 'CANCELADA'].includes(actual.Estado) && medible
-          && antiguedad >= REEMPLAZO_CHECKOUT_SEGUNDOS && !(await pagoEnCurso(connection, actual, academiaId))) {
-        await descartarTransaccion(connection, actual, academiaId, pago, 'EXPIRADA', 'CHECKOUT_EXPIRADO',
-          'Checkout vencido en Mercado Pago (60 min); se reemplaza por uno nuevo con el importe vigente.');
+          'Reserva sin orden guardada por más de 2 minutos; nunca llegó al alumno.');
         actual = null;
       }
     }
@@ -396,8 +365,8 @@ async function obtenerEstadoPagoAlumno({ idPago, idUsuario, idAcademia }) {
 }
 
 /**
- * Solo recibe datos normalizados tras firma + consultas al SDK. La auditoría
- * existente guarda la versión de cada pago, sin ampliar el esquema de Morgan.
+ * Solo recibe datos normalizados tras validar el aviso y consultar al proveedor. La auditoría
+ * existente guarda la versión de cada pago.
  */
 async function aplicarPagoProveedor(datos) {
   const proveedorActual = String(datos?.proveedor || PROVEEDOR).trim().toUpperCase();
@@ -647,7 +616,7 @@ function motivoRevision(row) {
   return null;
 }
 
-/** C4: listado de transacciones online de la academia del administrador. */
+/** Listado de transacciones online de la academia del administrador. */
 async function listarTransaccionesAdmin({ idAcademia, filtros }) {
   const academiaId = idPositivo(idAcademia);
   if (!academiaId || !filtros) throw errorPago(400, 'FILTROS_INVALIDOS', 'Los filtros de transacciones no son válidos.');
@@ -734,7 +703,7 @@ async function auditoriaPagoAdmin({ idPago, idAcademia }) {
   );
   return rows.map((row) => {
     let detalle = null;
-    if (row.Evento === 'MERCADOPAGO_EVENTO') {
+    if (/_EVENTO$/.test(String(row.Evento || ''))) {
       try { detalle = JSON.parse(row.Motivo); } catch { detalle = null; }
     }
     return {
@@ -754,7 +723,7 @@ async function auditoriaPagoAdmin({ idPago, idAcademia }) {
 }
 
 /**
- * Referencia conciliable: la última transacción con preferencia creada.
+ * Referencia conciliable: la última transacción con orden creada.
  * Con idUsuario se limita al alumno; sin él, a la academia (administrador).
  */
 async function obtenerReferenciaConciliable({ idPago = null, idTransaccion = null, idUsuario = null, idAcademia }) {

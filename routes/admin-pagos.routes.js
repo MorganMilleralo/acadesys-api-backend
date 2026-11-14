@@ -1,6 +1,6 @@
 'use strict';
 
-// Panel administrativo de pagos online (C4 del informe de verificación).
+// Panel administrativo de pagos online.
 // Montado en /api/admin/pagos después del candado JWT. Solo lectura, salvo la
 // conciliación, que aplica pagos con la misma verificación que el webhook.
 

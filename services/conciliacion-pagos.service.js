@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Conciliación activa con Culqi (W1 del informe de verificación).
+ * Conciliación activa con Culqi.
  *
  * El webhook POST /api/webhooks/culqi es la vía principal de confirmación. Si
  * un aviso se pierde (por ejemplo, Render dormido), esta función consulta la

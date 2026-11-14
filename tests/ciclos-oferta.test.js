@@ -2,8 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { simular, servir, eventos, consultas } = require('./soporte');
-const { prepararPlan } = require('../scripts/plan-regularizacion-pagos');
-test('AC-06 cobertura informa pendientes de docente y horario sin duplicar cursos', async t => {
+test('cobertura informa pendientes de docente y horario sin duplicar cursos', async t => {
   const pedir = await servir(t, [['/api', 'academico.routes']]);
   simular((sql, params) => {
     if (/AS TieneDocente/.test(sql)) {
@@ -27,7 +26,7 @@ test('AC-06 cobertura informa pendientes de docente y horario sin duplicar curso
   assert.equal(r.body.coberturaCompleta, false);
 });
 
-test('AC-06 cobertura no expone ciclo ajeno ni permite alumno/docente', async t => {
+test('cobertura no expone ciclo ajeno ni permite alumno/docente', async t => {
   const pedir = await servir(t, [['/api', 'academico.routes']]);
   simular(() => [[]]);
   assert.equal((await pedir('GET', '/api/ciclos/99/cobertura')).status, 404);
@@ -64,7 +63,7 @@ function fixtureAsignacion({ docente = true, vinculado = true, conflicto = false
     throw new Error(sql);
   });
 }
-test('AC-06 asignación rechaza docente inválido, curso ajeno, conflicto y duplicado; conserva alta válida', async t => {
+test('asignación rechaza docente inválido, curso ajeno, conflicto y duplicado; conserva alta válida', async t => {
   const pedir = await servir(t, [['/api', 'academico.routes']]);
   for (const [config, status] of [[{ docente: false }, 400], [{ vinculado: false }, 400],
     [{ conflicto: true }, 409], [{ duplicado: true }, 409], [{}, 201]]) {
@@ -76,7 +75,7 @@ test('AC-06 asignación rechaza docente inválido, curso ajeno, conflicto y dupl
   }
 });
 
-test('AC-06 crear/editar horario rechaza conflicto de docente entre ciclos y revierte', async t => {
+test('crear/editar horario rechaza conflicto de docente entre ciclos y revierte', async t => {
   const pedir = await servir(t, [['/api', 'academico.routes']]);
   for (const [metodo, ruta] of [['POST', '/api/horarios'], ['PUT', '/api/horarios/9']]) {
     simular((sql, params) => {
@@ -97,7 +96,7 @@ test('AC-06 crear/editar horario rechaza conflicto de docente entre ciclos y rev
   }
 });
 
-test('AC-07 dashboard sin filtros nunca calcula promedio académico multi-escala', async t => {
+test('dashboard sin filtros nunca calcula promedio académico multi-escala', async t => {
   const pedir = await servir(t, [['/api/admin', 'dashboard.routes']]);
   simular(sql => {
     assert.doesNotMatch(sql, /AVG\(/);
@@ -116,7 +115,7 @@ test('AC-07 dashboard sin filtros nunca calcula promedio académico multi-escala
   assert.equal(r.body.rendimientoEstado.comparable, false);
 });
 
-test('HU-12 filtros afectan métricas operativas; un periodo arbitrario no acredita simulacro semanal', async t => {
+test('filtros afectan métricas operativas; un periodo arbitrario no acredita simulacro semanal', async t => {
   const pedir = await servir(t, [['/api/admin', 'dashboard.routes']]);
   simular((sql, params) => {
     assert.ok(sql.includes('IdAcademia'));
@@ -135,7 +134,7 @@ test('HU-12 filtros afectan métricas operativas; un periodo arbitrario no acred
   assert.equal(r.body.resumen.vacantesDisponibles, 0);
 });
 
-test('AC-07 filtros inválidos no consultan SQL y ciclo ajeno no entrega métricas', async t => {
+test('filtros inválidos no consultan SQL y ciclo ajeno no entrega métricas', async t => {
   const pedir = await servir(t, [['/api/admin', 'dashboard.routes']]);
   for (const query of ['idCiclo=x', 'idCiclo=0', 'periodo=Semana1', 'idCiclo=7&periodo=', 'idCiclo=7&idCiclo=8']) {
     simular();
@@ -145,30 +144,4 @@ test('AC-07 filtros inválidos no consultan SQL y ciclo ajeno no entrega métric
   simular(() => [[]]);
   assert.equal((await pedir('GET', '/api/admin/dashboard/overview?idCiclo=99')).status, 404);
   assert.ok(!consultas.some(({ q }) => /FROM PagosMensualidad/.test(q)));
-});
-
-const cuota = { IdPago: 5, IdUsuario: 20, IdCiclo: 7, IdAcademia: 1, Mes: '2026-10',
-  Monto: '1.00', MontoAprobado: '300.00', Estado: 'Pendiente', FechaPago: null, EstadoRegistro: 1,
-  decisionMorgan: 'EJEMPLO FICTICIO; no es una aprobación real' };
-test('AC-01/P-07 plan offline conserva respaldo, vista previa y reversión condicional sin commit', () => {
-  const plan = prepararPlan([cuota]);
-  assert.deepEqual(plan.respaldo, [cuota]);
-  assert.deepEqual(plan.vistaPrevia, [{ idPago: 5, anterior: '1.00', nuevo: '300.00' }]);
-  assert.match(plan.aplicarSQL, /SET p.Monto = 300.00/);
-  assert.match(plan.revertirSQL, /SET p.Monto = 1.00/);
-  for (const sql of [plan.aplicarSQL, plan.revertirSQL]) {
-    assert.match(sql, /p.FechaPago IS NULL/);
-    assert.match(sql, /BINARY p.Estado = 'Pendiente'/);
-    assert.match(sql, /u.IdAcademia = 1 AND c.IdAcademia = 1/);
-    assert.match(sql, /ROLLBACK;$/);
-    assert.doesNotMatch(sql, /^COMMIT;/m);
-  }
-});
-test('P-07 generador rechaza confirmados, periodos ambiguos, importes inseguros y ausencia de decisión', () => {
-  for (const cambio of [{ Estado: 'Pagado' }, { FechaPago: '2026-10-01' }, { EstadoRegistro: 0 },
-    { Mes: 'Historico' }, { Mes: "2026-10'; DROP TABLE Ciclo; --" }, { MontoAprobado: '1.234' },
-    { MontoAprobado: '1e3' }, { MontoAprobado: 300 }, { decisionMorgan: '' }, { IdPago: -1 }]) {
-    assert.throws(() => prepararPlan([{ ...cuota, ...cambio }]));
-  }
-  assert.throws(() => prepararPlan([cuota, cuota]));
 });

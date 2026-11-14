@@ -1,6 +1,6 @@
 'use strict';
 
-// HU-19: los materiales ya no se sirven como estáticos públicos. Solo se
+// Los materiales no se sirven como estáticos públicos. Solo se
 // descargan con sesión y con permiso sobre el ciclo del material.
 const fs = require('node:fs');
 const os = require('node:os');

@@ -1,4 +1,4 @@
--- AcadeSys | Morgan | Transacciones online de mensualidades e inscripción
+-- AcadeSys | Transacciones online de mensualidades e inscripción
 -- Ejecutar primero en una BD de QA y verificar SHOW CREATE TABLE.
 -- Esta migración es aditiva. No modifica PagosMensualidad ni datos históricos.
 -- Se omiten FK deliberadamente hasta confirmar tipos/signos y constraints

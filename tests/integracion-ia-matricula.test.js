@@ -45,7 +45,7 @@ test('Tutor IA mantiene el contexto de main sin consultar Evaluacion.IdCurso', a
   assert.equal(r.status, 200); assert.equal(r.body.respuesta, 'Respuesta simulada');
   assert.equal(r.body.contexto.promedioGeneral, 1200);assert.equal(r.body.contexto.puestoRanking,2);
   assert.equal(r.body.contexto.escalaMaxima,2000);assert.equal(r.body.contexto.totalEvaluaciones,2);
-  // Desde la integración de Culqi (Morgan) el contexto devuelve el historial
+  // El contexto devuelve el historial
   // del propio alumno; nunca incluye su nombre ni datos enviados por React.
   assert.deepEqual(r.body.contexto.historial.map(n => n.calificacion), [1000, 1400]);
   assert.doesNotMatch(prompts[0], /Persona Ficticia|9999/);fin();

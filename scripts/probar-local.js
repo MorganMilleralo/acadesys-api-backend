@@ -6,9 +6,9 @@ const suites = readdirSync(path.join(root, 'tests')).filter((file) => file.endsW
   .sort().map((file) => 'tests/' + file);
 const casos = [
   ['--test', '--test-concurrency=1', ...suites],
-  ['prueba-auth-local.js'],
-  ['prueba-cierre-local.js'],
-  ['prueba-notas-actas-local.js'],
+  ['tests/integracion/auth.js'],
+  ['tests/integracion/cierre-actas.js'],
+  ['tests/integracion/notas-actas.js'],
 ];
 for (const args of casos) {
   const resultado = spawnSync(process.execPath, ['--require', './tests/aislamiento.js', ...args], {

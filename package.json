@@ -1,18 +1,27 @@
 {
-  "name": "backend",
+  "name": "acadesys-api",
   "version": "1.0.0",
-  "description": "",
+  "description": "API REST de AcadeSys: gestión académica y de pagos para academias preuniversitarias.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "node index.js",
-    "test": "node scripts/probar-local.js"
+    "dev": "node --watch index.js",
+    "test": "node scripts/probar-local.js",
+    "verificar:sintaxis": "node scripts/check-sintaxis.js",
+    "verificar:entorno": "node scripts/verificar-entorno.js",
+    "cuotas:generar": "node scripts/generar-mensualidades-cron.js"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MorganMilleralo/acadesys-api-backend.git"
   },
-  "keywords": [],
+  "keywords": [
+    "express",
+    "mysql",
+    "academia",
+    "matriculas",
+    "pagos"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
@@ -21,16 +30,17 @@
   },
   "homepage": "https://github.com/MorganMilleralo/acadesys-api-backend#readme",
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
-    "mysql2": "^3.24.2",
-    "nodemailer": "^10.0.12"
+    "mysql2": "^3.24.2"
   },
   "allowScripts": {
     "bcrypt@6.0.0": true
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

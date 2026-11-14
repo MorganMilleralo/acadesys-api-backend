@@ -641,8 +641,8 @@ router.delete('/horarios/:id', requiereRol('Administrador'), async (req, res) =>
 });
 
 // ============================================================
-// ASISTENCIAS POR CICLO: flujo de Morgan conservado por decision del usuario.
-// Mantiene compatibilidad con idAula y los permisos actuales de ROLES_GESTION.
+// ASISTENCIAS POR CICLO
+// Mantiene compatibilidad con idAula y los permisos de ROLES_GESTION.
 // ============================================================
 router.get('/asistencias', requiereRol(...ROLES_GESTION), async (req, res) => {
   const idAcademia = academiaDelUsuario(req, res);

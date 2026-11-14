@@ -80,7 +80,7 @@ const SELECT_USUARIO = `
   LEFT JOIN perfil p ON up.IdPerfil = p.IdPerfil`;
 
 // La columna Usuario.FotoUrl es opcional: puede no existir todavía en una BD
-// sin la migración ADD_USUARIO_FOTOURL.sql. Se detecta una sola vez y se
+// sin la migración 03_usuario_fotourl.sql. Se detecta una sola vez y se
 // cachea para que GET/PUT/DELETE sigan funcionando (sin 500) antes de migrar.
 let fotoUrlDisponibleCache = null;
 async function columnaFotoUrlDisponible() {
@@ -356,7 +356,7 @@ router.put("/usuarios/me", async (req, res) => {
       if (!(await columnaFotoUrlDisponible())) {
         return res.status(409).json({
           error:
-            "La foto de perfil no está disponible: falta aplicar la migración ADD_USUARIO_FOTOURL.sql.",
+            "La foto de perfil no está disponible: falta aplicar la migración database/migraciones/03_usuario_fotourl.sql.",
         });
       }
 
@@ -501,7 +501,7 @@ router.put("/usuarios/me", async (req, res) => {
     await rollbackSeguro(connection);
     if (!fotoPersistida) borrarArchivoFoto(fotoUrl);
     if (error?.code === "ER_NO_SUCH_TABLE") {
-      console.error("Falta la tabla FotoPerfil (database/FOTO_PERFIL_2026-11-14.sql).");
+      console.error("Falta la tabla FotoPerfil (database/migraciones/07_foto_perfil_y_cuotas.sql).");
       return res.status(503).json({ code: "ALMACEN_NO_CONFIGURADO", error: "El almacenamiento de fotos no está configurado. Avisa al administrador del sistema." });
     }
     return responderError(res, error, "PUT /usuarios/me");
@@ -820,7 +820,7 @@ router.delete(
       if (!(await columnaFotoUrlDisponible())) {
         return res.status(409).json({
           error:
-            "La foto de perfil no está disponible: falta aplicar la migración ADD_USUARIO_FOTOURL.sql.",
+            "La foto de perfil no está disponible: falta aplicar la migración database/migraciones/03_usuario_fotourl.sql.",
         });
       }
 

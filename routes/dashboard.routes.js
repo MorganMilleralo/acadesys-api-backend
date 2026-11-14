@@ -112,7 +112,7 @@ router.get('/dashboard/overview', async (req, res) => {
         AND p.EstadoRegistro = 1${filtroCiclo}
     `, [idAcademia, ...paramsCiclo]);
 
-    // HU-12/13/16: Periodo (incluido General) no acredita una semana real.
+    // Periodo (incluido 'General') no identifica una semana real.
     // No reconstruirla con FechaCreacion ni asignar una escala desconocida por defecto.
     const rendimientoPorCiclo = [];
     const coberturaDocente = await consultarCobertura(pool, idAcademia, idCiclo);
@@ -170,7 +170,7 @@ router.get('/dashboard/overview', async (req, res) => {
         ciclosProximos,
         ciclosCerrados,
         estudiantesMorosos: Number(morosidad[0]?.TotalMorosos || 0),
-        // Clave conservada por transición; Luis debe retirar la tarjeta, no mostrar cero.
+        // Se mantiene la clave por compatibilidad con el frontend; no hay promedio institucional.
         promedioInstitucional: null,
         vacantesDisponibles,
       },

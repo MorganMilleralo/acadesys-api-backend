@@ -45,7 +45,7 @@ const academyId = Number(process.env.PUBLIC_REGISTRATION_ACADEMY_ID);
 add('PUBLIC_REGISTRATION_ACADEMY_ID', Number.isSafeInteger(academyId) && academyId > 0,
   Number.isSafeInteger(academyId) && academyId > 0 ? 'entero positivo' : 'FALTA o no es un entero positivo');
 
-console.log('\nAcadeSys - comprobación de entorno de Morgan');
+console.log('\nAcadeSys - comprobación del entorno');
 console.log('No se muestran contraseñas, tokens ni URLs secretas.');
 for (const c of checks) console.log(`${c.ok ? 'OK ' : 'REV'} ${c.name}: ${c.detail}`);
 const failed = checks.filter(c => !c.ok);

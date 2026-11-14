@@ -28,14 +28,14 @@ const faltantes = variablesRequeridas.filter(
 
 if (faltantes.length > 0) {
   console.error(
-    `❌ Faltan variables de entorno obligatorias: ${faltantes.join(", ")}`,
+    `Faltan variables de entorno obligatorias: ${faltantes.join(", ")}`,
   );
 
   process.exit(1);
 }
 
 if (String(process.env.JWT_SECRET || "").length < 32) {
-  console.error("❌ JWT_SECRET debe tener al menos 32 caracteres.");
+  console.error("JWT_SECRET debe tener al menos 32 caracteres.");
 
   process.exit(1);
 }
@@ -71,9 +71,8 @@ app.use("/api/webhooks", express.json({ limit: "32kb" }), culqiWebhook);
 
 // Parser general para el resto de endpoints.
 app.use(express.json({ limit: "15mb" }));
-// Solo las fotos de perfil son públicas. Materiales y comprobantes NO se
-// sirven como estáticos: los materiales se descargan con sesión y permisos
-// en GET /api/materiales/:id/descargar (HU-19).
+// Solo las fotos de perfil son públicas. Los materiales se descargan con sesión
+// y permisos en GET /api/materiales/:id/descargar.
 app.use("/uploads/perfiles", require("./routes/foto-perfil.routes"), express.static(PROFILE_UPLOADS_DIR));
 
 // ============================================================
@@ -214,19 +213,7 @@ app.use(require("./middlewares/error.middleware"));
 // ============================================================
 
 const server = app.listen(port, () => {
-  console.log("------------------------------------------");
-  console.log("🚀 AcadeSys API iniciada correctamente");
-  console.log("------------------------------------------");
-
-  console.log("📚 Catálogo público:", "/api/ciclos/publicos");
-  console.log("📝 Matrículas:", "/api/matriculas/checkout");
-  console.log("🔐 Administración:", "/api/admin");
-  console.log("📊 Dashboard:", "/api/admin/dashboard/overview");
-  console.log("💳 Proveedor de pagos: CULQI");
-  console.log("🔔 Webhook Culqi:", "/api/webhooks/culqi");
-  console.log("🎓 Intranet:", "/api/alumno");
-
-  console.log("------------------------------------------");
+  console.log(`AcadeSys API escuchando en el puerto ${server.address().port}`);
 });
 
 module.exports = {

@@ -1,14 +1,10 @@
-# Copias de seguridad
-*.bak-*
-
 # Dependencias
 node_modules/
 
-# Variables de entorno y credenciales
+# Variables de entorno
 .env
 .env.*
 !.env.example
-!.env.*.example
 
 # Archivos subidos por los usuarios
 uploads/materiales/*
@@ -16,7 +12,12 @@ uploads/materiales/*
 uploads/perfiles/*
 !uploads/perfiles/.gitkeep
 
-# Logs de ejecucion local (no se versionan)
-server.log
+# Editor y sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
 
-
+# Logs y respaldos locales
+*.log
+*.bak-*

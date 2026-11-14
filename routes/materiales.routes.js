@@ -170,7 +170,7 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
   } catch (error) {
     await rollbackSeguro(conexion);
     if (error?.code === 'ER_NO_SUCH_TABLE') {
-      console.error('Falta la tabla MaterialArchivo (database/MATERIAL_ARCHIVO_2026-11-14.sql).');
+      console.error('Falta la tabla MaterialArchivo (database/migraciones/06_material_archivo.sql).');
       return res.status(503).json({ code: 'ALMACEN_NO_CONFIGURADO', error: 'El almacenamiento de materiales no está configurado. Avisa al administrador del sistema.' });
     }
     if (error?.code === 'ER_NET_PACKET_TOO_LARGE') {
@@ -197,7 +197,7 @@ function archivoDelMaterial(urlArchivo) {
   return path.dirname(archivo) === UPLOAD_DIR ? archivo : null;
 }
 
-// GET /api/materiales/:id/descargar (HU-19)
+// GET /api/materiales/:id/descargar
 // Administración: materiales de su academia. Alumno: solo con matrícula
 // activa en el ciclo del material. Docente: solo si está asignado a ese
 // ciclo y curso. Cualquier otro caso responde 404 para no revelar si existe.
