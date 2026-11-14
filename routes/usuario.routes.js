@@ -8,7 +8,7 @@ const { enteroPositivo } = require("../utils/evaluaciones");
 const path = require("path");
 const fs = require("fs");
 const { validarTipoArchivo, generarNombreSeguro } = require("../utils/validar-foto");
-const { UPLOADS_DIR, PROFILE_UPLOADS_DIR } = require("../config/storage");
+const { PROFILE_UPLOADS_DIR } = require("../config/storage");
 
 async function perfilActivo(connection, idPerfil) {
   if (!enteroPositivo(idPerfil)) return false;
@@ -120,6 +120,20 @@ function borrarArchivoFoto(fotoUrl) {
   } catch (error) {
     console.error("No se pudo eliminar el archivo de foto:", error.message);
   }
+}
+
+const TIPOS_FOTO = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
+
+// Borra la foto anterior de MySQL y, si era antigua, también del disco.
+// Nunca falla la petición: la foto nueva ya quedó guardada.
+async function borrarFotoGuardada(fotoUrl) {
+  if (!fotoUrl) return;
+  try {
+    await pool.query("DELETE FROM FotoPerfil WHERE NombreArchivo = ?", [path.basename(String(fotoUrl))]);
+  } catch (error) {
+    if (error?.code !== "ER_NO_SUCH_TABLE") console.error("No se pudo eliminar la foto guardada:", error.message);
+  }
+  borrarArchivoFoto(fotoUrl);
 }
 
 // 1. CREAR USUARIO STAFF (Docente / Tutor de Aula)
@@ -328,6 +342,7 @@ router.put("/usuarios/me", async (req, res) => {
   let fotoUrl = null;
   let fotoAnteriorUrl = null;
   let fotoPersistida = false;
+  let fotoNueva = null;
   try {
     const idUsuario = Number(req.usuario?.idUsuario ?? req.usuario?.id);
     if (!Number.isSafeInteger(idUsuario) || idUsuario <= 0) {
@@ -358,29 +373,11 @@ router.put("/usuarios/me", async (req, res) => {
         return res.status(400).json({ error: validacion.error });
       }
 
-      // Generar nombre seguro para el archivo (nunca usar nombre original)
+      // Generar nombre seguro (nunca usar el nombre original). La imagen se
+      // guarda en MySQL (FotoPerfil) dentro de la transacción: el disco de
+      // Render se borra en cada despliegue.
       const nombreArchivo = generarNombreSeguro(idUsuario, validacion.formato);
-      const uploadDir = UPLOADS_DIR;
-      const perfilDir = PROFILE_UPLOADS_DIR;
-
-      // Asegurarse de que los directorios existan
-      if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir, { recursive: true });
-      }
-      if (!fs.existsSync(perfilDir)) {
-        fs.mkdirSync(perfilDir, { recursive: true });
-      }
-
-      // Ruta completa del archivo
-      const destino = path.join(perfilDir, nombreArchivo);
-
-      // Escribir el archivo decodificado desde Base64
-      try {
-        fs.writeFileSync(destino, fileData.buffer);
-      } catch (writeError) {
-        console.error('Error escribiendo archivo de foto:', writeError);
-        return res.status(500).json({ error: 'No se pudo guardar el archivo de imagen.' });
-      }
+      fotoNueva = { nombreArchivo, buffer: fileData.buffer, tipoMime: TIPOS_FOTO[validacion.formato] };
 
       // Construir la URL relativa para devolver al cliente
       fotoUrl = `/uploads/perfiles/${nombreArchivo}`;
@@ -463,6 +460,12 @@ router.put("/usuarios/me", async (req, res) => {
       `UPDATE Usuario SET ${campos.join(", ")} WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1`,
       params,
     );
+    if (fotoNueva) {
+      await connection.query(
+        "INSERT INTO FotoPerfil (NombreArchivo, IdUsuario, Contenido, TipoMime, TamanoBytes) VALUES (?, ?, ?, ?, ?)",
+        [fotoNueva.nombreArchivo, idUsuario, fotoNueva.buffer, fotoNueva.tipoMime, fotoNueva.buffer.length],
+      );
+    }
 
     const [rows] = await connection.query(
       `${SELECT_USUARIO}
@@ -481,7 +484,7 @@ router.put("/usuarios/me", async (req, res) => {
     // Solo se elimina la foto anterior DESPUÉS de confirmar la transacción.
     // Si el commit falla, el archivo al que apunta la BD no se pierde.
     if (fotoUrl && fotoAnteriorUrl && fotoAnteriorUrl !== fotoUrl) {
-      borrarArchivoFoto(fotoAnteriorUrl);
+      await borrarFotoGuardada(fotoAnteriorUrl);
     }
     let fotoActual = fotoUrl;
     try {
@@ -497,6 +500,10 @@ router.put("/usuarios/me", async (req, res) => {
   } catch (error) {
     await rollbackSeguro(connection);
     if (!fotoPersistida) borrarArchivoFoto(fotoUrl);
+    if (error?.code === "ER_NO_SUCH_TABLE") {
+      console.error("Falta la tabla FotoPerfil (database/FOTO_PERFIL_2026-11-14.sql).");
+      return res.status(503).json({ code: "ALMACEN_NO_CONFIGURADO", error: "El almacenamiento de fotos no está configurado. Avisa al administrador del sistema." });
+    }
     return responderError(res, error, "PUT /usuarios/me");
   } finally {
     if (connection) connection.release();
@@ -840,7 +847,7 @@ router.delete(
 
       // Eliminar el archivo físico DESPUÉS del commit para no dejar FotoUrl
       // apuntando a un archivo borrado si la transacción pudiera revertirse.
-      if (usuario.FotoUrl) borrarArchivoFoto(usuario.FotoUrl);
+      if (usuario.FotoUrl) await borrarFotoGuardada(usuario.FotoUrl);
       res.json({ message: "Foto de perfil eliminada con éxito." });
     } catch (error) {
       await rollbackSeguro(connection);

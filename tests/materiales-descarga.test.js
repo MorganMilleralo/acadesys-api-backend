@@ -153,5 +153,5 @@ test('sin la tabla MaterialArchivo la subida responde 503 y revierte el material
 test('index.js ya no expone /uploads completo, solo las fotos de perfil', () => {
   const fuente = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
   assert.doesNotMatch(fuente, /app\.use\(\s*["']\/uploads["']/);
-  assert.match(fuente, /app\.use\(\s*["']\/uploads\/perfiles["'],\s*express\.static\(PROFILE_UPLOADS_DIR\)\)/);
+  assert.match(fuente, /app\.use\(\s*["']\/uploads\/perfiles["'],\s*require\(["']\.\/routes\/foto-perfil\.routes["']\),\s*express\.static\(PROFILE_UPLOADS_DIR\)\)/);
 });

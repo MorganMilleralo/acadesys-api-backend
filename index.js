@@ -74,7 +74,7 @@ app.use(express.json({ limit: "15mb" }));
 // Solo las fotos de perfil son públicas. Materiales y comprobantes NO se
 // sirven como estáticos: los materiales se descargan con sesión y permisos
 // en GET /api/materiales/:id/descargar (HU-19).
-app.use("/uploads/perfiles", express.static(PROFILE_UPLOADS_DIR));
+app.use("/uploads/perfiles", require("./routes/foto-perfil.routes"), express.static(PROFILE_UPLOADS_DIR));
 
 // ============================================================
 // 5. MIDDLEWARE DE AUTENTICACIÓN

@@ -66,7 +66,8 @@ function generarNombreSeguro(idUsuario, formato = 'webp') {
   const extensiones = { jpeg: 'jpg', jpg: 'jpg', png: 'png', webp: 'webp' };
   const extension = extensiones[String(formato).toLowerCase()] || 'webp';
   const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).substring(2, 8);
+  // Nombre público (se sirve sin sesión en <img>): aleatorio criptográfico.
+  const random = require('crypto').randomBytes(8).toString('hex');
   return `foto-perfil-${base}-${timestamp}-${random}.${extension}`;
 }
 
