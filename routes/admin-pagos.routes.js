@@ -9,7 +9,7 @@ const router = express.Router();
 const requiereRol = require('../middlewares/roles.middleware');
 const { idPositivo } = require('../utils/validaciones');
 const { ErrorPago } = require('../utils/pagos-proveedor');
-const pasarela = require('../services/mercadopago.adapter');
+const culqi = require('../services/culqi.adapter');
 const transacciones = require('../services/transacciones-pago.service');
 const conciliacion = require('../services/conciliacion-pagos.service');
 
@@ -60,7 +60,7 @@ router.post('/transacciones/:idTransaccion/conciliar', async (req, res) => {
   if (!idAcademia) return res.status(401).json({ error: 'La sesión administrativa no es válida.' });
   if (!idTransaccion) return res.status(400).json({ error: 'El IdTransaccion no es válido.' });
   try {
-    pasarela.verificarConfiguracion();
+    culqi.verificarConfiguracion();
     const referencia = await transacciones.obtenerReferenciaConciliable({ idTransaccion, idAcademia });
     if (!referencia) {
       return res.status(404).json({ code: 'TRANSACCION_NO_CONCILIABLE', error: 'La transacción no existe en tu academia o no llegó a crear un checkout.' });
@@ -68,7 +68,7 @@ router.post('/transacciones/:idTransaccion/conciliar', async (req, res) => {
     if (!conciliacion.puedeConciliar(referencia.referenciaInterna)) {
       return res.status(429).json({ code: 'CONSULTA_RECIENTE', error: 'Esta transacción se consultó hace menos de 30 segundos.' });
     }
-    const resultado = await conciliacion.conciliarReferencia(referencia.referenciaInterna);
+    const resultado = await conciliacion.conciliarReferencia(referencia);
     return res.json({ idTransaccion, ...resultado });
   } catch (error) {
     return responderError(res, error, 'POST /api/admin/pagos/transacciones/:id/conciliar');

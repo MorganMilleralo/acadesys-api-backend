@@ -140,13 +140,10 @@ app.use("/api", verificarToken);
 
 // Gestión de ciclos
 app.use("/api/admin/ciclos", require("./routes/admin-ciclos.routes"));
-<<<<<<< HEAD
 // Panel de transacciones online, auditoría y conciliación (antes del router general /api/admin).
 app.use("/api/admin/pagos", require("./routes/admin-pagos.routes"));
-=======
 
 // Dashboard administrativo
->>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)
 app.use("/api/admin", require("./routes/dashboard.routes"));
 
 // ============================================================

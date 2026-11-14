@@ -13,13 +13,9 @@ const {
   guardarOrdenCreada,
   marcarErrorCreacion,
   obtenerEstadoPagoAlumno,
-<<<<<<< HEAD
   obtenerReferenciaConciliable,
-} = require('../services/transacciones-pago.service');
-const conciliacion = require('../services/conciliacion-pagos.service');
-=======
 } = require("../services/transacciones-pago.service");
->>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)
+const conciliacion = require("../services/conciliacion-pagos.service");
 
 const idUsuarioSesion = (req) =>
   idPositivo(req.usuario?.idUsuario ?? req.usuario?.id);
@@ -273,10 +269,9 @@ router.get("/pagos/:idPago/estado", async (req, res) => {
   }
 });
 
-<<<<<<< HEAD
 // POST /api/alumno/pagos/:idPago/conciliar
 // «Consultar estado del pago»: si el webhook no llegó, busca la operación en
-// Mercado Pago y la aplica con la misma verificación que el webhook. Nunca usa
+// Culqi y la aplica con la misma verificación que el webhook. Nunca usa
 // datos enviados por React ni los parámetros de la URL de retorno.
 router.post('/pagos/:idPago/conciliar', async (req, res) => {
   const idPago = idPositivo(req.params.idPago);
@@ -285,12 +280,12 @@ router.post('/pagos/:idPago/conciliar', async (req, res) => {
   if (!idPago) return res.status(400).json({ error: 'El IdPago no es válido.' });
   if (!idUsuario || !idAcademia) return res.status(401).json({ error: 'La sesión del alumno no es válida.' });
   try {
-    pasarela.verificarConfiguracion();
+    culqi.verificarConfiguracion();
     const referencia = await obtenerReferenciaConciliable({ idPago, idUsuario, idAcademia });
     let resumen = { consultado: false, motivo: 'SIN_CHECKOUT' };
     if (referencia && ['PENDIENTE', 'RECHAZADA', 'CANCELADA', 'EXPIRADA', 'CREANDO'].includes(referencia.estado)) {
       if (conciliacion.puedeConciliar(referencia.referenciaInterna)) {
-        const r = await conciliacion.conciliarReferencia(referencia.referenciaInterna);
+        const r = await conciliacion.conciliarReferencia(referencia);
         resumen = { consultado: true, pagosEncontrados: r.pagosEncontrados, confirmada: r.confirmada };
       } else {
         resumen = { consultado: false, motivo: 'CONSULTA_RECIENTE' };
@@ -305,12 +300,9 @@ router.post('/pagos/:idPago/conciliar', async (req, res) => {
     const status = conocido ? error.status : 500;
     if (status >= 500) console.error('Error al conciliar pago de alumno:', conocido ? error.code : 'CONCILIACION_NO_DISPONIBLE');
     return res.status(status).json({ code: conocido ? error.code : 'CONCILIACION_NO_DISPONIBLE',
-      error: status >= 500 ? 'No se pudo consultar Mercado Pago en este momento. Inténtalo en unos minutos.'
+      error: status >= 500 ? 'No se pudo consultar Culqi en este momento. Inténtalo en unos minutos.'
         : (conocido ? error.message : 'No se pudo consultar el estado del pago.') });
   }
 });
 
 module.exports = router;
-=======
-module.exports = router;
->>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)

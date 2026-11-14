@@ -149,7 +149,6 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
         'El pago con billeteras móviles debe estar entre S/ 6.00 y S/ 500.00. Contacta con la academia para otra forma de pago.');
     }
 
-<<<<<<< HEAD
     // W5: el pago manual y el online no se superponen. Mientras administración
     // revisa un comprobante, no se abre un cobro online de la misma cuota.
     const [enRevision] = await connection.query(
@@ -165,9 +164,7 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
         'Esta cuota tiene un comprobante en revisión. Espera la respuesta de la academia antes de pagar online.');
     }
 
-=======
     const filtroTerminal = "Estado NOT IN ('ERROR', 'EXPIRADA', 'CANCELADA', 'RECHAZADA')";
->>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)
     const [existentes] = await connection.query(
       `SELECT IdTransaccion, IdPago, ReferenciaInterna, IdOrdenProveedor, ClaveIdempotencia,
               Monto, Moneda, Estado, UrlCheckout, CodigoEstadoProveedor,
@@ -175,35 +172,11 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
        FROM PagoTransaccion
        WHERE IdPago = ? AND IdUsuario = ? AND IdAcademia = ?
          AND Proveedor = ? AND EstadoRegistro = 1
-<<<<<<< HEAD
-         AND Estado NOT IN ('ERROR', 'EXPIRADA')
-=======
          AND ${filtroTerminal}
->>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)
        ORDER BY IdTransaccion DESC LIMIT 1 FOR UPDATE`,
       [pagoId, usuarioId, academiaId, proveedorActual],
     );
 
-<<<<<<< HEAD
-    let actual = existentes[0] || null;
-    if (actual) {
-      const antiguedad = Number(actual.AntiguedadSegundos);
-      const medible = Number.isSafeInteger(antiguedad) && antiguedad >= 0;
-      if (actual.Estado === 'CREANDO' && !actual.IdOrdenProveedor && medible
-          && antiguedad >= CREACION_HUERFANA_SEGUNDOS) {
-        await descartarTransaccion(connection, actual, academiaId, pago, 'ERROR', 'CHECKOUT_CREACION_DESCARTADA',
-          'Reserva sin preferencia guardada por más de 2 minutos; su URL nunca llegó al alumno.');
-        actual = null;
-      } else if (['PENDIENTE', 'RECHAZADA', 'CANCELADA'].includes(actual.Estado) && medible
-          && antiguedad >= REEMPLAZO_CHECKOUT_SEGUNDOS && !(await pagoEnCurso(connection, actual, academiaId))) {
-        await descartarTransaccion(connection, actual, academiaId, pago, 'EXPIRADA', 'CHECKOUT_EXPIRADO',
-          'Checkout vencido en Mercado Pago (60 min); se reemplaza por uno nuevo con el importe vigente.');
-        actual = null;
-      }
-    }
-
-    if (actual) {
-=======
     const datosAlumno = {
       emailAlumno: pago.CorreoElectronico || null,
       telefonoAlumno: pago.Telefono || null,
@@ -215,9 +188,25 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
       concepto: String(pago.Mes || ''),
     };
 
-    if (existentes.length) {
-      const actual = existentes[0];
->>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)
+    let actual = existentes[0] || null;
+    if (actual) {
+      const antiguedad = Number(actual.AntiguedadSegundos);
+      const medible = Number.isSafeInteger(antiguedad) && antiguedad >= 0;
+      if (actual.Estado === 'CREANDO' && !actual.IdOrdenProveedor && medible
+          && antiguedad >= CREACION_HUERFANA_SEGUNDOS) {
+        await descartarTransaccion(connection, actual, academiaId, pago, 'ERROR', 'CHECKOUT_CREACION_DESCARTADA',
+          'Reserva sin preferencia guardada por más de 2 minutos; su URL nunca llegó al alumno.');
+        actual = null;
+      } else if (proveedorActual === 'MERCADOPAGO'
+          && ['PENDIENTE', 'RECHAZADA', 'CANCELADA'].includes(actual.Estado) && medible
+          && antiguedad >= REEMPLAZO_CHECKOUT_SEGUNDOS && !(await pagoEnCurso(connection, actual, academiaId))) {
+        await descartarTransaccion(connection, actual, academiaId, pago, 'EXPIRADA', 'CHECKOUT_EXPIRADO',
+          'Checkout vencido en Mercado Pago (60 min); se reemplaza por uno nuevo con el importe vigente.');
+        actual = null;
+      }
+    }
+
+    if (actual) {
       if (aCentimos(actual.Monto) !== montoCentimos || actual.Moneda !== MONEDA) {
         await connection.rollback();
         throw errorPago(409, 'CHECKOUT_IMPORTE_CAMBIADO',
@@ -650,8 +639,8 @@ function normalizarFiltrosTransacciones(query = {}) {
 
 function motivoRevision(row) {
   if (row.Estado === 'PAGO_DUPLICADO') return 'Pago adicional aprobado sobre una cuota ya pagada: evaluar devolución.';
-  if (row.Estado === 'REEMBOLSADA') return 'Mercado Pago informó un reembolso: la cuota no se revirtió automáticamente.';
-  if (row.Estado === 'CONTRACARGO') return 'Mercado Pago informó un contracargo: la cuota no se revirtió automáticamente.';
+  if (row.Estado === 'REEMBOLSADA') return 'Culqi informó un reembolso: la cuota no se revirtió automáticamente.';
+  if (row.Estado === 'CONTRACARGO') return 'Culqi informó un contracargo: la cuota no se revirtió automáticamente.';
   if (row.Estado === 'CREANDO' && Number(row.AntiguedadSegundos) >= CREACION_HUERFANA_SEGUNDOS) {
     return 'Checkout sin confirmar del proveedor; se descartará en el próximo intento del alumno.';
   }
@@ -703,7 +692,7 @@ async function listarTransaccionesAdmin({ idAcademia, filtros }) {
         idCiclo: Number(row.IdCiclo),
         ciclo: row.Ciclo || null,
         periodo: row.Periodo || null,
-        metodo: row.Proveedor === PROVEEDOR ? 'Mercado Pago' : row.Proveedor,
+        metodo: row.Proveedor === PROVEEDOR ? 'Culqi' : row.Proveedor,
         monto: Number(row.Monto),
         moneda: row.Moneda,
         estado: row.Estado,
@@ -755,7 +744,7 @@ async function auditoriaPagoAdmin({ idPago, idAcademia }) {
       estadoNuevo: row.EstadoNuevo,
       montoAnterior: row.MontoAnterior === null ? null : Number(row.MontoAnterior),
       montoNuevo: row.MontoNuevo === null ? null : Number(row.MontoNuevo),
-      motivo: detalle ? `Mercado Pago informó "${detalle.estado}" para el pago ${detalle.pago}.` : row.Motivo,
+      motivo: detalle ? `El proveedor informó "${detalle.estado}" para el pago ${detalle.pago}.` : row.Motivo,
       detalleProveedor: detalle,
       idComprobante: row.IdComprobante === null ? null : Number(row.IdComprobante),
       automatico: row.IdUsuarioActor === null,
@@ -782,14 +771,15 @@ async function obtenerReferenciaConciliable({ idPago = null, idTransaccion = nul
   if (txId) { condiciones.push('IdTransaccion = ?'); params.push(txId); }
   if (usuarioId) { condiciones.push('IdUsuario = ?'); params.push(usuarioId); }
   const [rows] = await pool.query(
-    `SELECT IdTransaccion, IdPago, ReferenciaInterna, Estado FROM PagoTransaccion
+    `SELECT IdTransaccion, IdPago, ReferenciaInterna, IdOrdenProveedor, Estado FROM PagoTransaccion
      WHERE ${condiciones.join(' AND ')}
      ORDER BY IdTransaccion DESC LIMIT 1`,
     params,
   );
   if (!rows.length) return null;
   return { idTransaccion: Number(rows[0].IdTransaccion), idPago: Number(rows[0].IdPago),
-    referenciaInterna: rows[0].ReferenciaInterna, estado: rows[0].Estado };
+    referenciaInterna: rows[0].ReferenciaInterna, idOrdenProveedor: rows[0].IdOrdenProveedor,
+    estado: rows[0].Estado };
 }
 
 module.exports = {
@@ -802,12 +792,8 @@ module.exports = {
   obtenerEstadoPagoAlumno,
   confirmarPagoProveedor,
   actualizarEstadoNoAprobado,
-<<<<<<< HEAD
   normalizarFiltrosTransacciones,
   listarTransaccionesAdmin,
   auditoriaPagoAdmin,
   obtenerReferenciaConciliable,
 };
-=======
-};
->>>>>>> d3491b2 (feat(payments): integrate Culqi payment gateway and webhook)

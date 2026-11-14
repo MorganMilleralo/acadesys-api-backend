@@ -251,7 +251,7 @@ router.post('/pagos/:idPago/comprobante', async (req, res) => {
       return res.status(409).json({ error: 'Ya existe un comprobante en revisión para esta cuota.' });
     }
 
-    // W5: no registrar una transferencia mientras Mercado Pago tiene un pago en
+    // W5: no registrar una transferencia mientras Culqi tiene un pago en
     // proceso para la misma cuota ('preference_created' = solo checkout abierto).
     const [enProceso] = await connection.query(
       `SELECT IdTransaccion FROM PagoTransaccion
@@ -265,7 +265,7 @@ router.post('/pagos/:idPago/comprobante', async (req, res) => {
       await connection.rollback();
       return res.status(409).json({
         code: 'PAGO_ONLINE_EN_PROCESO',
-        error: 'Tienes un pago con Mercado Pago en proceso para esta cuota. Espera su confirmación antes de registrar una transferencia.',
+        error: 'Tienes un pago online en proceso para esta cuota. Espera su confirmación antes de registrar una transferencia.',
       });
     }
 

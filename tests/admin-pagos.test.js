@@ -9,7 +9,7 @@ const { simular, secuencia, servir, consultas } = require('./soporte');
 const rutas = [['/api/admin/pagos', 'admin-pagos.routes']];
 const admin = { id: 1, idAcademia: 4, rol: 'Administrador' };
 const fila = {
-  IdTransaccion: 31, IdPago: 7, Proveedor: 'MERCADOPAGO', ReferenciaInterna: 'ACS-7-ref',
+  IdTransaccion: 31, IdPago: 7, Proveedor: 'CULQI', ReferenciaInterna: 'ACS-7-ref',
   IdOrdenProveedor: 'pref-1', Monto: '150.00', Moneda: 'PEN', Estado: 'PAGO_DUPLICADO',
   CodigoEstadoProveedor: 'approved', FechaCreacion: '2026-11-14T10:00:00.000Z',
   FechaActualizacion: '2026-11-14T10:05:00.000Z', FechaConfirmacion: null, AntiguedadSegundos: 600,
@@ -29,7 +29,7 @@ test('C4 lista transacciones de la academia con filtros parametrizados y paginac
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.paginacion, { total: 1, limite: 20, desde: 40 });
   const [tx] = r.body.transacciones;
-  assert.equal(tx.metodo, 'Mercado Pago'); assert.equal(tx.monto, 150); assert.equal(tx.periodo, '2026-11');
+  assert.equal(tx.metodo, 'Culqi'); assert.equal(tx.monto, 150); assert.equal(tx.periodo, '2026-11');
   assert.equal(tx.requiereRevision, true); assert.match(tx.motivoRevision, /devolución/);
   fin();
 });
