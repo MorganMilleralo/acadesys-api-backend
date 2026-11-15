@@ -4,6 +4,7 @@ const express = require("express");
 const pool = require("../config/db");
 const requiereRol = require("../middlewares/roles.middleware");
 const { escalaMaximaPorUniversidad } = require("../utils/escalas");
+const { consultar } = require('../config/procedimientos');
 
 const router = express.Router();
 
@@ -109,22 +110,7 @@ async function obtenerContextoAcademico(req) {
     throw error;
   }
 
-  const [usuarios] = await pool.query(
-    `SELECT
-       u.IdUsuario,
-       u.Nombres,
-       u.ApellidoPaterno,
-       u.ApellidoMaterno,
-       CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno) AS NombreCompleto,
-       u.CodigoUsuario,
-       u.CorreoElectronico
-     FROM Usuario u
-     WHERE u.IdUsuario = ?
-       AND u.IdAcademia = ?
-       AND u.EstadoRegistro = 1
-     LIMIT 1`,
-    [idUsuario, idAcademia],
-  );
+  const [usuarios] = await consultar(pool, 'sp_tutor_ia_obtener_usuario', [idUsuario, idAcademia]);
 
   if (!usuarios.length) {
     const error = new Error("No se encontró el alumno activo autenticado.");
@@ -132,30 +118,7 @@ async function obtenerContextoAcademico(req) {
     throw error;
   }
 
-  const [matriculas] = await pool.query(
-    `SELECT
-       m.IdMatricula,
-       c.IdCiclo,
-       c.Nombre AS NombreCiclo,
-       COALESCE(NULLIF(TRIM(c.UniversidadObjetivo), ''), 'Preuniversitario') AS UniversidadObjetivo,
-       c.Turno,
-       c.Horario,
-       c.FechaInicio,
-       c.FechaFin,
-       c.EstadoRegistro AS EstadoCiclo
-     FROM Matricula m
-     INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo
-     INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-     WHERE m.IdUsuario = ?
-       AND u.IdAcademia = ?
-       AND u.EstadoRegistro = 1
-       AND m.EstadoRegistro = 1
-       AND c.EstadoRegistro = 1
-       AND c.IdAcademia = ?
-     ORDER BY m.IdMatricula DESC
-     LIMIT 1`,
-    [idUsuario, idAcademia, idAcademia],
-  );
+  const [matriculas] = await consultar(pool, 'sp_tutor_ia_obtener_matricula', [idUsuario, idAcademia]);
 
   const matricula = matriculas[0] || null;
   let cursos = [];
@@ -164,16 +127,7 @@ async function obtenerContextoAcademico(req) {
   let puestoRanking = null;
 
   if (matricula) {
-    const [cursosRows] = await pool.query(
-      `SELECT cu.IdCurso, cu.Nombre, cu.Codigo, cu.Descripcion
-       FROM CicloCurso cc
-       INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
-       WHERE cc.IdCiclo = ?
-         AND cc.EstadoRegistro = 1
-         AND cu.EstadoRegistro = 1
-       ORDER BY cc.Orden ASC, cu.Nombre ASC`,
-      [matricula.IdCiclo],
-    );
+    const [cursosRows] = await consultar(pool, 'sp_tutor_ia_listar_ciclo_curso', [matricula.IdCiclo]);
 
     cursos = cursosRows.map((curso) => ({
       idCurso: Number(curso.IdCurso),
@@ -182,29 +136,7 @@ async function obtenerContextoAcademico(req) {
       descripcion: curso.Descripcion || "",
     }));
 
-    const [notasRows] = await pool.query(
-      `SELECT
-         e.IdEvaluacion,
-         COALESCE(cu.Nombre, 'Simulacro general') AS Curso,
-         e.TipoEvaluacion,
-         e.Calificacion,
-         e.EstadoRegistro,
-         e.FechaCreacion
-       FROM Evaluacion e
-       INNER JOIN Matricula m ON m.IdMatricula = e.IdMatricula
-       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-       INNER JOIN Ciclo ci ON ci.IdCiclo = m.IdCiclo AND ci.IdAcademia = u.IdAcademia
-       LEFT JOIN Curso cu ON cu.IdCurso = m.IdCurso
-       WHERE m.IdUsuario = ?
-         AND m.IdCiclo = ?
-         AND u.IdAcademia = ?
-         AND u.EstadoRegistro = 1
-         AND m.EstadoRegistro = 1
-         AND e.EstadoRegistro IN (1, 2)
-       ORDER BY e.FechaCreacion DESC, e.IdEvaluacion DESC
-       LIMIT 100`,
-      [idUsuario, matricula.IdCiclo, idAcademia],
-    );
+    const [notasRows] = await consultar(pool, 'sp_tutor_ia_listar_evaluacion', [idUsuario, matricula.IdCiclo, idAcademia]);
 
     historial = notasRows.map((nota) => ({
       idEvaluacion: Number(nota.IdEvaluacion),
@@ -222,23 +154,7 @@ async function obtenerContextoAcademico(req) {
       );
       promedioGeneral = Number((suma / historial.length).toFixed(2));
 
-      const [rankingRows] = await pool.query(
-        `SELECT COUNT(*) + 1 AS Puesto
-         FROM (
-           SELECT m2.IdUsuario, AVG(e2.Calificacion) AS Promedio
-           FROM Matricula m2
-           INNER JOIN Evaluacion e2 ON e2.IdMatricula = m2.IdMatricula
-           INNER JOIN Usuario u2 ON u2.IdUsuario = m2.IdUsuario
-           WHERE m2.IdCiclo = ?
-             AND m2.EstadoRegistro = 1
-             AND u2.IdAcademia = ?
-             AND u2.EstadoRegistro = 1
-             AND e2.EstadoRegistro IN (1, 2)
-           GROUP BY m2.IdUsuario
-           HAVING AVG(e2.Calificacion) > ?
-         ) r`,
-        [matricula.IdCiclo, idAcademia, promedioGeneral],
-      );
+      const [rankingRows] = await consultar(pool, 'sp_tutor_ia_listar_matricula', [matricula.IdCiclo, idAcademia, promedioGeneral]);
       puestoRanking = Number(rankingRows[0]?.Puesto || 1);
     }
   }

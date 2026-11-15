@@ -7,6 +7,7 @@ const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
 const { idPositivo, rollbackSeguro } = require('../utils/validaciones');
 const { MATERIAL_UPLOADS_DIR } = require('../config/storage');
+const { consultar, ejecutar } = require('../config/procedimientos');
 
 const UPLOAD_DIR = MATERIAL_UPLOADS_DIR;
 
@@ -26,33 +27,7 @@ router.get('/admin', requiereRol('Administrador'), async (req, res) => {
     const idAcademia = idPositivo(req.usuario?.idAcademia);
     if (!idAcademia) return res.status(401).json({ error: 'Academia de sesión inválida.' });
     if (idCiclo !== undefined && !idPositivo(idCiclo)) return res.status(400).json({ error: 'IdCiclo no válido.' });
-    const params = [idAcademia];
-    let where = 'ma.EstadoRegistro = 1 AND c.IdAcademia = ?';
-
-    if (idCiclo) {
-      where += ' AND ma.IdCiclo = ?';
-      params.push(Number(idCiclo));
-    }
-
-    const [rows] = await pool.query(`
-      SELECT
-        ma.IdMaterial,
-        ma.IdCiclo,
-        ma.IdCurso,
-        ma.Titulo,
-        ma.Descripcion,
-        ma.NombreArchivo,
-        ma.UrlArchivo,
-        ma.TipoMime,
-        ma.FechaPublicacion,
-        c.Nombre AS Ciclo,
-        cu.Nombre AS Curso
-      FROM MaterialAcademico ma
-      INNER JOIN Ciclo c ON c.IdCiclo = ma.IdCiclo
-      INNER JOIN Curso cu ON cu.IdCurso = ma.IdCurso
-      WHERE ${where}
-      ORDER BY ma.FechaPublicacion DESC, ma.IdMaterial DESC
-    `, params);
+    const [rows] = await consultar(pool, 'sp_materiales_listar_admin', [idAcademia, idCiclo ? Number(idCiclo) : null]);
 
     res.json(rows);
   } catch (error) {
@@ -90,22 +65,7 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
 
   let conexion;
   try {
-    const [relacion] = await pool.query(`
-      SELECT
-        c.IdCiclo,
-        cu.IdCurso,
-        cu.Nombre AS Curso
-      FROM CicloCurso cc
-      INNER JOIN Ciclo c ON c.IdCiclo = cc.IdCiclo
-      INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
-      WHERE cc.IdCiclo = ?
-        AND cc.IdCurso = ?
-        AND cc.EstadoRegistro = 1
-        AND c.EstadoRegistro = 1
-        AND cu.EstadoRegistro = 1
-        AND c.IdAcademia = ?
-      LIMIT 1
-    `, [Number(idCiclo), Number(idCurso), idAcademia]);
+    const [relacion] = await consultar(pool, 'sp_materiales_obtener_ciclo_curso', [Number(idCiclo), Number(idCurso), idAcademia]);
 
     if (relacion.length === 0) {
       return res.status(400).json({
@@ -135,24 +95,17 @@ router.post('/', requiereRol('Administrador'), async (req, res) => {
     const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
     conexion = await pool.getConnection();
     await conexion.beginTransaction();
-    const [insert] = await conexion.query(`
-      INSERT INTO MaterialAcademico
-        (IdCiclo, IdCurso, Titulo, Descripcion, NombreArchivo, UrlArchivo, TipoMime, IdUsuarioCreacion, FechaPublicacion, EstadoRegistro)
-      VALUES (?, ?, ?, ?, ?, '', 'application/pdf', ?, NOW(), 1)
-    `, [
-      Number(idCiclo),
-      Number(idCurso),
-      String(titulo).trim(),
-      String(descripcion || '').trim(),
-      nombreSeguro,
-      req.usuario.idUsuario || req.usuario.id
-    ]);
+    const [insert] = await ejecutar(conexion, 'sp_materiales_registrar_material', [
+        Number(idCiclo),
+        Number(idCurso),
+        String(titulo).trim(),
+        String(descripcion || '').trim(),
+        nombreSeguro,
+        req.usuario.idUsuario || req.usuario.id,
+      ]);
     const urlArchivo = `${apiBase(req)}/api/materiales/${insert.insertId}/descargar`;
-    await conexion.query(
-      'INSERT INTO MaterialArchivo (IdMaterial, Contenido, TamanoBytes, Sha256) VALUES (?, ?, ?, ?)',
-      [insert.insertId, buffer, buffer.length, sha256],
-    );
-    await conexion.query('UPDATE MaterialAcademico SET UrlArchivo = ? WHERE IdMaterial = ?', [urlArchivo, insert.insertId]);
+    await ejecutar(conexion, 'sp_materiales_registrar_archivo_material', [insert.insertId, buffer, buffer.length, sha256]);
+    await ejecutar(conexion, 'sp_materiales_actualizar_material', [urlArchivo, insert.insertId]);
     await conexion.commit();
 
     res.status(201).json({
@@ -209,33 +162,16 @@ router.get('/:id/descargar', async (req, res) => {
   if (!idAcademia || !idUsuario) return res.status(401).json({ error: 'Sesión inválida.' });
   const rol = rolNormalizado(req.usuario?.rol);
   try {
-    const [rows] = await pool.query(`
-      SELECT ma.IdMaterial, ma.IdCiclo, ma.IdCurso, ma.NombreArchivo, ma.UrlArchivo
-      FROM MaterialAcademico ma
-      INNER JOIN Ciclo c ON c.IdCiclo = ma.IdCiclo
-      WHERE ma.IdMaterial = ? AND ma.EstadoRegistro = 1 AND c.IdAcademia = ?
-      LIMIT 1
-    `, [idMaterial, idAcademia]);
+    const [rows] = await consultar(pool, 'sp_materiales_obtener_material_descarga', [idMaterial, idAcademia]);
     const material = rows[0];
     if (!material) return res.status(404).json({ error: 'Material no encontrado.' });
 
     let autorizado = ROLES_ADMIN.has(rol);
     if (!autorizado && rol === 'alumno') {
-      const [matriculas] = await pool.query(`
-        SELECT m.IdMatricula FROM Matricula m
-        INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-        WHERE m.IdUsuario = ? AND m.IdCiclo = ? AND m.EstadoRegistro = 1
-          AND u.IdAcademia = ? AND u.EstadoRegistro = 1
-        LIMIT 1
-      `, [idUsuario, material.IdCiclo, idAcademia]);
+      const [matriculas] = await consultar(pool, 'sp_materiales_obtener_matricula', [idUsuario, material.IdCiclo, idAcademia]);
       autorizado = matriculas.length > 0;
     } else if (!autorizado && rol === 'docente') {
-      const [asignaciones] = await pool.query(`
-        SELECT aa.IdAsignacion FROM Asignacion_Aula aa
-        WHERE aa.IdUsuario = ? AND aa.IdCiclo = ? AND aa.IdCurso = ?
-          AND aa.IdAcademia = ? AND aa.EstadoRegistro = 1
-        LIMIT 1
-      `, [idUsuario, material.IdCiclo, material.IdCurso, idAcademia]);
+      const [asignaciones] = await consultar(pool, 'sp_materiales_obtener_asignacion', [idUsuario, material.IdCiclo, material.IdCurso, idAcademia]);
       autorizado = asignaciones.length > 0;
     }
     if (!autorizado) return res.status(404).json({ error: 'Material no encontrado.' });
@@ -243,8 +179,7 @@ router.get('/:id/descargar', async (req, res) => {
     const nombreDescarga = limpiarNombreArchivo(material.NombreArchivo || 'material.pdf');
     let guardado = null;
     try {
-      const [archivos] = await pool.query(
-        'SELECT Contenido FROM MaterialArchivo WHERE IdMaterial = ? LIMIT 1', [idMaterial]);
+      const [archivos] = await consultar(pool, 'sp_materiales_obtener_archivo_material', [idMaterial]);
       guardado = archivos[0]?.Contenido || null;
     } catch (error) {
       // Sin la tabla todavía se intenta el archivo antiguo en disco.
@@ -283,25 +218,16 @@ router.delete('/:id', requiereRol('Administrador'), async (req, res) => {
     if (!idAcademia) return res.status(401).json({ error: 'Academia de sesión inválida.' });
     if (!idPositivo(id)) return res.status(400).json({ error: 'IdMaterial no válido.' });
 
-    const [rows] = await pool.query(`
-      SELECT ma.IdMaterial, ma.UrlArchivo
-      FROM MaterialAcademico ma INNER JOIN Ciclo c ON c.IdCiclo = ma.IdCiclo
-      WHERE ma.IdMaterial = ? AND ma.EstadoRegistro = 1 AND c.IdAcademia = ?
-      LIMIT 1
-    `, [Number(id), idAcademia]);
+    const [rows] = await consultar(pool, 'sp_materiales_obtener_material', [Number(id), idAcademia]);
 
     if (rows.length === 0) {
       return res.status(404).json({ error: 'Material no encontrado.' });
     }
 
-    await pool.query(
-      `UPDATE MaterialAcademico ma INNER JOIN Ciclo c ON c.IdCiclo = ma.IdCiclo
-       SET ma.EstadoRegistro = -1 WHERE ma.IdMaterial = ? AND c.IdAcademia = ? AND ma.EstadoRegistro = 1`,
-      [Number(id), idAcademia]
-    );
+    await ejecutar(pool, 'sp_materiales_cambiar_estado_material', [Number(id), idAcademia]);
 
     try {
-      await pool.query('DELETE FROM MaterialArchivo WHERE IdMaterial = ?', [Number(id)]);
+      await ejecutar(pool, 'sp_materiales_eliminar_archivo_material', [Number(id)]);
     } catch (blobError) {
       if (blobError?.code !== 'ER_NO_SUCH_TABLE') console.warn('No se pudo liberar el PDF guardado:', blobError.message);
     }

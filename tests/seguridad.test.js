@@ -270,7 +270,7 @@ test("materiales filtra por academia antes de listar, escribir archivos o elimin
   const fin = secuencia([
     {
       sql: /FROM MaterialAcademico ma.*c.IdAcademia = \?/,
-      params: [1],
+      params: [1, null, null],
       rows: [],
     },
     {
@@ -360,18 +360,8 @@ test("cambio de perfil deja una sola asignacion activa y conserva historial", as
     },
     { sql: /^UPDATE Usuario /, rows: { affectedRows: 1 } },
     {
-      sql: /SELECT IdUsuarioPerfil.*IdUsuario = \? AND IdPerfil = \?.*FOR UPDATE/,
+      sql: /^CALL sp_usuario_asignar_perfil\(\?, \?\)$/,
       params: [10, 3],
-      rows: [{ IdUsuarioPerfil: 8 }],
-    },
-    {
-      sql: /UPDATE Usuario_Perfiles SET EstadoRegistro = 0/,
-      params: [10],
-      rows: { affectedRows: 2 },
-    },
-    {
-      sql: /UPDATE Usuario_Perfiles SET EstadoRegistro = 1 WHERE IdUsuarioPerfil = \?/,
-      params: [8],
       rows: { affectedRows: 1 },
     },
   ]);
@@ -465,12 +455,13 @@ test("usuarios/me permite autoservicio sin cambiar identidad, academia, clave ni
     { sql: /INFORMATION_SCHEMA\.COLUMNS.*FotoUrl/, rows: [] },
     { sql: /SELECT IdAcademia FROM Academia.*FOR UPDATE/, rows: [] },
     {
-      sql: /SELECT DNI, CorreoElectronico FROM Usuario.*FOR UPDATE/,
+      sql: /SELECT DNI, CorreoElectronico, FotoUrl FROM Usuario.*FOR UPDATE/,
       rows: [{ DNI: null, CorreoElectronico: null }],
     },
     {
-      sql: /^UPDATE Usuario SET Nombres=\? WHERE IdUsuario = \? AND IdAcademia = \? AND EstadoRegistro = 1$/,
-      params: ["Nuevo ficticio", 10, 1],
+      sql: /^UPDATE Usuario SET DNI = IF\(/,
+      // Solo cambia Nombres: el resto de indicadores va en 0 y el usuario debe estar activo.
+      params: [0, null, 1, "Nuevo ficticio", 0, null, 0, null, 0, null, 0, null, 0, null, 0, null, 0, null, 10, 1, 1],
       rows: { affectedRows: 1 },
     },
     {
@@ -674,7 +665,7 @@ for (const rol of [
         },
         {
           sql: /FROM Matricula m/,
-          params: ["2026-10-20", "2026-10-20", 1, 7],
+          params: ["2026-10-20", "2026-10-20", 1, 7, 7, null, null, 1],
           rows: [{ idMatricula: 100 }],
           verificar(q) {
             assert.match(q, /c.IdAcademia = u.IdAcademia/);
@@ -698,7 +689,7 @@ for (const rol of [
         },
         {
           sql: /SELECT DISTINCT m.IdMatricula/,
-          params: [1, 7, 100],
+          params: [1, 7, 7, "[100]", 7, null, null],
           rows: [{ IdMatricula: 100 }],
           verificar(q) {
             assert.match(q, /m.IdCiclo = \?/);

@@ -12,6 +12,7 @@ const { calificacionEntera, idPositivo, rollbackSeguro } = require('../utils/val
    muestra, la que se valida y la que se normaliza.
    ============================================================ */
 const { escalaMaximaPorUniversidad } = require('../utils/escalas');
+const { consultar, ejecutar } = require('../config/procedimientos');
 
 const obtenerMaximoPermitido = (universidad = "") => escalaMaximaPorUniversidad(universidad);
 
@@ -32,21 +33,7 @@ function normalizarTipoEvaluacion(valor) {
    ============================================================ */
 router.get("/", requiereGestionNotas, async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      `SELECT e.IdEvaluacion, e.IdMatricula, e.TipoEvaluacion, e.Periodo, e.Calificacion, e.FechaCreacion,
-              e.EstadoRegistro AS EstadoRegistro,
-              u.CodigoUsuario, CONCAT(u.Nombres, ' ', u.ApellidoPaterno) AS Alumno,
-              COALESCE(c.Nombre, 'Simulacro General') AS Curso,
-              ci.Nombre AS Ciclo,
-              ci.UniversidadObjetivo
-       FROM Evaluacion e
-       INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
-       INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
-       LEFT JOIN Curso c ON m.IdCurso = c.IdCurso
-       INNER JOIN Ciclo ci ON ci.IdCiclo = m.IdCiclo AND ci.IdAcademia = u.IdAcademia
-        WHERE e.EstadoRegistro IN (1, 2) AND u.IdAcademia = ?`,
-      [req.usuario.idAcademia],
-    );
+    const [rows] = await consultar(pool, 'sp_notas_listar_evaluacion_todos', [req.usuario.idAcademia]);
     res.json(rows);
   } catch (error) {
     console.error("Error en GET /notas:", error.message);
@@ -69,15 +56,7 @@ router.get("/contexto/:idCiclo", requiereGestionNotas, async (req, res) => {
       });
     }
 
-    const [rows] = await pool.query(
-      `SELECT ci.IdCiclo, ci.Nombre, ci.UniversidadObjetivo
-       FROM Ciclo ci
-       WHERE ci.IdCiclo = ?
-         AND ci.IdAcademia = ?
-         AND ci.EstadoRegistro = 1
-       LIMIT 1`,
-      [idCiclo, idAcademia],
-    );
+    const [rows] = await consultar(pool, 'sp_notas_obtener_ciclo', [idCiclo, idAcademia]);
 
     if (rows.length === 0) {
       return res.status(404).json({
@@ -115,21 +94,7 @@ router.get("/matriculas/:idCiclo", requiereGestionNotas, async (req, res) => {
       return res.status(400).json({ error: "El idCiclo no es valido." });
     }
 
-    const [rows] = await pool.query(
-      `SELECT m.IdMatricula, m.IdUsuario, m.IdCiclo,
-              u.CodigoUsuario, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno
-       FROM Matricula m
-       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-       INNER JOIN Ciclo ci ON ci.IdCiclo = m.IdCiclo
-       WHERE m.IdCiclo = ?
-         AND m.EstadoRegistro = 1
-         AND u.EstadoRegistro = 1
-         AND u.IdAcademia = ?
-         AND ci.IdAcademia = ?
-         AND ci.EstadoRegistro = 1
-       ORDER BY u.ApellidoPaterno, u.ApellidoMaterno, u.Nombres`,
-      [idCiclo, idAcademia, idAcademia],
-    );
+    const [rows] = await consultar(pool, 'sp_notas_listar_matricula', [idCiclo, idAcademia]);
 
     return res.json(
       rows.map((row) => ({
@@ -155,21 +120,7 @@ router.get("/alumno/:id", autorizarHistorialAlumno, async (req, res) => {
   try {
     const { id } = req.params;
 
-    const [notas] = await pool.query(
-      `SELECT COALESCE(c.Nombre, 'Simulacro General') AS Curso,
-              e.TipoEvaluacion, e.Periodo, e.Calificacion, e.FechaCreacion,
-              e.EstadoRegistro AS EstadoRegistro,
-              ci.UniversidadObjetivo, ci.Nombre AS Ciclo
-       FROM Evaluacion e
-       INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
-       INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
-       LEFT JOIN Curso c ON m.IdCurso = c.IdCurso
-       INNER JOIN Ciclo ci ON ci.IdCiclo = m.IdCiclo AND ci.IdAcademia = u.IdAcademia
-        WHERE u.IdUsuario = ? AND u.IdAcademia = ?
-          AND e.EstadoRegistro IN (1, 2)
-        ORDER BY e.FechaCreacion DESC, e.IdEvaluacion DESC`,
-      [id, req.usuario.idAcademia],
-    );
+    const [notas] = await consultar(pool, 'sp_notas_listar_evaluacion_por_id_usuario', [id, req.usuario.idAcademia]);
 
     let promedio = 0;
     if (notas.length > 0) {
@@ -234,13 +185,7 @@ router.post(
       await connection.beginTransaction();
 
       /* ---------- 1. Universidad objetivo del ciclo ---------- */
-      const [cicloData] = await connection.query(
-        `SELECT IdCiclo, Nombre, UniversidadObjetivo
-         FROM Ciclo
-         WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1
-         LIMIT 1 FOR UPDATE`,
-        [idCiclo, idAcademia],
-      );
+      const [cicloData] = await consultar(connection, 'sp_notas_bloquear_ciclo_universidad', [idCiclo, idAcademia]);
 
       if (cicloData.length === 0) {
         await connection.rollback();
@@ -295,21 +240,7 @@ router.post(
         }
 
         // 2.5 La matrícula debe pertenecer al ciclo enviado y a la academia del usuario
-        const [matValida] = await connection.query(
-          `SELECT m.IdMatricula, m.IdCurso
-           FROM Matricula m
-           INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
-           INNER JOIN Ciclo ci ON ci.IdCiclo = m.IdCiclo
-           WHERE m.IdMatricula = ?
-             AND m.IdCiclo = ?
-             AND m.EstadoRegistro = 1
-             AND u.EstadoRegistro = 1
-             AND u.IdAcademia = ?
-             AND ci.IdAcademia = ?
-             AND ci.EstadoRegistro = 1
-           LIMIT 1 FOR UPDATE`,
-          [idMat, idCiclo, idAcademia, idAcademia],
-        );
+        const [matValida] = await consultar(connection, 'sp_notas_bloquear_matricula', [idMat, idCiclo, idAcademia]);
 
         if (matValida.length === 0) {
           await connection.rollback();
@@ -321,12 +252,7 @@ router.post(
         const clave = `${idMat}:${tipo}`;
         // Contrato heredado de main: NULL y General comparten la misma clave.
         // General no identifica una semana; no inventar fechas ni cambiar esta regla aqu?.
-        const [duplicadas] = await connection.query(
-          `SELECT IdEvaluacion FROM Evaluacion
-           WHERE IdMatricula = ? AND COALESCE(Periodo, 'General') = ? AND TipoEvaluacion = ?
-             AND EstadoRegistro IN (1, 2) LIMIT 1 FOR UPDATE`,
-          [idMat, periodo, tipo],
-        );
+        const [duplicadas] = await consultar(connection, 'sp_notas_bloquear_evaluacion_por_id_matricula', [idMat, periodo, tipo]);
         if (claves.has(clave) || duplicadas.length) {
           await connection.rollback();
           return res.status(409).json({ error: 'Ya existe una evaluación registrada para este alumno, periodo y tipo.' });
@@ -336,12 +262,7 @@ router.post(
         // Un cierre se aplica por ciclo + curso + periodo + tipo. La fila de
         // Ciclo ya está bloqueada en esta transacción, igual que en actas.routes.
         const idCurso = matValida[0].IdCurso;
-        const [cierres] = await connection.query(
-          `SELECT IdCierre FROM Auditoria_Cierres
-           WHERE IdCiclo = ? AND IdCurso <=> ? AND Periodo = ? AND TipoEvaluacion = ?
-           LIMIT 1 FOR UPDATE`,
-          [idCiclo, idCurso, periodo, tipo],
-        );
+        const [cierres] = await consultar(connection, 'sp_notas_bloquear_cierre', [idCiclo, idCurso, periodo, tipo]);
         if (cierres.length > 0) {
           await connection.rollback();
           return res.status(403).json({
@@ -352,18 +273,13 @@ router.post(
 
       /* ---------- 3. Inserción masiva ---------- */
       for (const nota of notas) {
-        await connection.query(
-          `INSERT INTO Evaluacion
-             (IdMatricula, Calificacion, TipoEvaluacion, Periodo, UsuarioCreacion, FechaCreacion, EstadoRegistro)
-           VALUES (?, ?, ?, ?, ?, NOW(), 1)`,
-          [
+        await ejecutar(connection, 'sp_notas_registrar_evaluacion', [
             Number(nota.IdMatricula),
             Number(nota.Calificacion),
             normalizarTipoEvaluacion(nota.TipoEvaluacion),
             periodo,
             idUsuario,
-          ],
-        );
+          ]);
       }
 
       await connection.commit();
@@ -412,21 +328,7 @@ router.put(
       await connection.beginTransaction();
 
       /* ---------- 1. Obtener la universidad objetivo del ciclo de esa evaluación ---------- */
-      const [evalData] = await connection.query(
-        `SELECT e.IdEvaluacion, e.EstadoRegistro, e.Periodo, e.TipoEvaluacion, m.IdCiclo, m.IdCurso,
-                ci.UniversidadObjetivo, ci.Nombre AS CicloNombre
-         FROM Evaluacion e
-         INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
-         INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
-         INNER JOIN Ciclo ci ON m.IdCiclo = ci.IdCiclo
-         WHERE e.IdEvaluacion = ?
-           AND u.IdAcademia = ?
-            AND ci.IdAcademia = u.IdAcademia
-            AND m.EstadoRegistro = 1 AND u.EstadoRegistro = 1
-            AND e.EstadoRegistro IN (1, 2)
-         LIMIT 1`,
-        [id, idAcademia],
-      );
+      const [evalData] = await consultar(connection, 'sp_notas_obtener_evaluacion', [id, idAcademia]);
 
       if (evalData.length === 0) {
         await connection.rollback();
@@ -438,31 +340,24 @@ router.put(
       const evaluacionActual = evalData[0];
       // Mantiene el mismo orden de bloqueo que el cierre de actas: primero Ciclo,
       // después se comprueba la auditoría y finalmente se actualiza la evaluación.
-      const [cicloBloqueado] = await connection.query(
-        `SELECT IdCiclo FROM Ciclo
-         WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1
-         LIMIT 1 FOR UPDATE`,
-        [evaluacionActual.IdCiclo, idAcademia],
-      );
+      const [cicloBloqueado] = await consultar(connection, 'sp_notas_bloquear_ciclo', [evaluacionActual.IdCiclo, idAcademia]);
       if (!cicloBloqueado.length) {
         await connection.rollback();
         return res.status(404).json({ error: 'El ciclo de la evaluación no está disponible para esta academia.' });
       }
 
       // Lectura bloqueante actual: el cierre pudo terminar mientras esperábamos al ciclo.
-      const [[estadoActual]] = await connection.query(
-        'SELECT EstadoRegistro FROM Evaluacion WHERE IdEvaluacion = ? FOR UPDATE', [id],
-      );
+      const [[estadoActual]] = await consultar(connection, 'sp_notas_bloquear_evaluacion_por_id_evaluacion', [id]);
       if (!estadoActual || Number(estadoActual.EstadoRegistro) !== 1) {
         await connection.rollback();
         return res.status(403).json({ error: 'Esta evaluación está cerrada o no admite modificaciones.' });
       }
-      const [cierres] = await connection.query(
-        `SELECT IdCierre FROM Auditoria_Cierres
-         WHERE IdCiclo = ? AND IdCurso <=> ? AND Periodo = ? AND TipoEvaluacion = ?
-         LIMIT 1 FOR UPDATE`,
-        [evaluacionActual.IdCiclo, evaluacionActual.IdCurso, evaluacionActual.Periodo || 'General', evaluacionActual.TipoEvaluacion],
-      );
+      const [cierres] = await consultar(connection, 'sp_notas_bloquear_cierre', [
+          evaluacionActual.IdCiclo,
+          evaluacionActual.IdCurso,
+          evaluacionActual.Periodo || 'General',
+          evaluacionActual.TipoEvaluacion,
+        ]);
       if (cierres.length > 0 || Number(evaluacionActual.EstadoRegistro) === 2) {
         await connection.rollback();
         return res.status(403).json({ error: 'Esta acta está cerrada y no admite modificaciones.' });
@@ -480,14 +375,7 @@ router.put(
       }
 
       /* ---------- 3. Update ---------- */
-      const [result] = await connection.query(
-        `UPDATE Evaluacion e
-         INNER JOIN Matricula m ON e.IdMatricula = m.IdMatricula
-         INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
-         SET e.Calificacion = ?, e.UsuarioModificacion = ?, e.FechaModificacion = NOW()
-          WHERE e.IdEvaluacion = ? AND u.IdAcademia = ? AND e.EstadoRegistro = 1`,
-        [calif, idUsuario, id, idAcademia],
-      );
+      const [result] = await ejecutar(connection, 'sp_notas_actualizar_evaluacion', [calif, idUsuario, id, idAcademia]);
 
       if (result.affectedRows === 0) {
         await connection.rollback();

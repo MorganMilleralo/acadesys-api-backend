@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const pool = require('../config/db');
+const { consultar, ejecutar } = require('../config/procedimientos');
 
 const router = express.Router();
 
@@ -170,40 +171,7 @@ router.post('/recuperar-password', limitarSolicitudes('recuperacion', 5), async 
   const identificadorLower = identificador.toLowerCase();
 
   try {
-    const [usuarios] = await pool.query(
-      `SELECT
-         u.IdUsuario,
-         u.CodigoUsuario,
-         u.DNI,
-         u.Nombres,
-         u.ApellidoPaterno,
-         u.CorreoElectronico,
-         u.Clave
-       FROM Usuario u
-       WHERE u.EstadoRegistro = 1
-         AND (
-           LOWER(TRIM(COALESCE(u.CorreoElectronico, ''))) = ?
-           OR LOWER(TRIM(COALESCE(u.CodigoUsuario, ''))) = ?
-           OR TRIM(COALESCE(u.DNI, '')) = ?
-           OR (
-             LOWER(SUBSTRING_INDEX(TRIM(COALESCE(u.CorreoElectronico, '')), '@', 1)) = ?
-             AND (
-               SELECT COUNT(*)
-               FROM Usuario ux
-               WHERE ux.EstadoRegistro = 1
-                 AND LOWER(SUBSTRING_INDEX(TRIM(COALESCE(ux.CorreoElectronico, '')), '@', 1)) = ?
-             ) = 1
-           )
-         )
-       LIMIT 2`,
-      [
-        identificadorLower,
-        identificadorLower,
-        identificador,
-        identificadorLower,
-        identificadorLower,
-      ],
-    );
+    const [usuarios] = await consultar(pool, 'sp_recuperacion_listar_usuario', [identificadorLower, identificador]);
 
     // Respuesta uniforme para cuenta inexistente o identificador ambiguo.
     if (usuarios.length !== 1) {
@@ -307,13 +275,7 @@ router.post('/restablecer-password', limitarSolicitudes('restablecer', 10), asyn
     await connection.beginTransaction();
     enTransaccion = true;
 
-    const [[usuario]] = await connection.query(
-      `SELECT IdUsuario, CorreoElectronico, Clave
-       FROM Usuario
-       WHERE IdUsuario = ? AND EstadoRegistro = 1
-       LIMIT 1 FOR UPDATE`,
-      [Number(payload.idUsuario)],
-    );
+    const [[usuario]] = await consultar(connection, 'sp_recuperacion_bloquear_usuario', [Number(payload.idUsuario)]);
 
     if (
       !usuario ||
@@ -326,10 +288,7 @@ router.post('/restablecer-password', limitarSolicitudes('restablecer', 10), asyn
     }
 
     const claveHasheada = await bcrypt.hash(nuevaClave, 10);
-    const [actualizacion] = await connection.query(
-      'UPDATE Usuario SET Clave = ? WHERE IdUsuario = ? AND EstadoRegistro = 1',
-      [claveHasheada, Number(usuario.IdUsuario)],
-    );
+    const [actualizacion] = await ejecutar(connection, 'sp_recuperacion_actualizar_usuario', [claveHasheada, Number(usuario.IdUsuario)]);
 
     if (actualizacion.affectedRows !== 1) {
       await connection.rollback();

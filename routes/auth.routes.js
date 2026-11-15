@@ -4,6 +4,7 @@ const pool = require("../config/db");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
 const { validarDatosUsuario, usuarioDuplicado, bloquearIdentidades, rollbackSeguro, idPositivo } = require('../utils/validaciones');
+const { consultar, ejecutar } = require('../config/procedimientos');
 
 const universidadDesdeNombre = (nombre = "") => {
   const n = String(nombre).toLowerCase();
@@ -26,15 +27,7 @@ const horarioDesdeTurno = (turno = "") => {
 };
 
 const obtenerPerfilPorNombre = async (connection, nombre) => {
-  const [rows] = await connection.query(
-    `SELECT IdPerfil,
-            COALESCE(NULLIF(Nombre, ''), 'Sin Rol') AS Nombre
-       FROM perfil
-      WHERE EstadoRegistro = 1
-        AND LOWER(COALESCE(NULLIF(Nombre, ''), '')) = LOWER(?)
-      LIMIT 1`,
-    [nombre],
-  );
+  const [rows] = await consultar(connection, 'sp_auth_obtener_perfil', [nombre]);
   return rows[0]?.IdPerfil || null;
 };
 
@@ -75,7 +68,7 @@ const registerHandler = async (req, res) => {
     await connection.beginTransaction();
     enTransaccion = true;
     await bloquearIdentidades(connection);
-    const [[academia]] = await connection.query('SELECT IdAcademia FROM Academia WHERE IdAcademia = ?', [idAcademia]);
+    const [[academia]] = await consultar(connection, 'sp_auth_listar_academia', [idAcademia]);
     if (!academia) { await connection.rollback(); return res.status(503).json({ error: 'El registro no está disponible temporalmente.' }); }
 
     if (await usuarioDuplicado(connection, validado.datos)) {
@@ -104,10 +97,7 @@ const registerHandler = async (req, res) => {
     for (let intento = 0; intento < 10; intento += 1) {
       const sufijo = String(Math.floor(1000 + Math.random() * 9000));
       const candidato = `${baseCodigo}-${sufijo}`;
-      const [existenteCodigo] = await connection.query(
-        "SELECT IdUsuario FROM Usuario WHERE CodigoUsuario = ? LIMIT 1",
-        [candidato],
-      );
+      const [existenteCodigo] = await consultar(connection, 'sp_auth_obtener_usuario', [candidato]);
       if (existenteCodigo.length === 0) {
         codigoUsuario = candidato;
         break;
@@ -121,21 +111,21 @@ const registerHandler = async (req, res) => {
         .json({ error: "No se pudo generar un código de alumno disponible." });
     }
 
-    const [resUser] = await connection.query(
-      `INSERT INTO Usuario
-        (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular,
-         CorreoElectronico, Clave, FechaCreacion, EstadoRegistro, IdAcademia)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1, ?)`,
-      [codigoUsuario, docIdentidad, nom, apeP, apeM, tel, email, claveHasheada, idAcademia],
-    );
+    const [resUser] = await ejecutar(connection, 'sp_auth_registrar_usuario', [
+        codigoUsuario,
+        docIdentidad,
+        nom,
+        apeP,
+        apeM,
+        tel,
+        email,
+        claveHasheada,
+        idAcademia,
+      ]);
 
     const nuevoIdUsuario = resUser.insertId;
 
-    await connection.query(
-      `INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro)
-       VALUES (?, ?, 1)`,
-      [nuevoIdUsuario, idPerfilAlumno],
-    );
+    await ejecutar(connection, 'sp_auth_registrar_usuario_perfil', [nuevoIdUsuario, idPerfilAlumno]);
 
     await connection.commit();
     enTransaccion = false;
@@ -188,65 +178,7 @@ const loginHandler = async (req, res) => {
     const clave = String(passwordInput);
     const termLower = termino.toLowerCase();
 
-    const [rows] = await pool.query(
-      `SELECT
-        u.IdUsuario,
-        u.DNI,
-        u.Nombres,
-        u.ApellidoPaterno,
-        u.ApellidoMaterno,
-        CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno) AS NombreCompleto,
-        u.CorreoElectronico,
-        u.Clave,
-        u.EstadoRegistro,
-        u.CodigoUsuario,
-        u.IdAcademia,
-        up.IdPerfil,
-        COALESCE(NULLIF(p.Nombre, ''), 'Sin Rol') AS Rol,
-        a.NombreAcademia,
-        a.ColorTema,
-        a.LogoUrl
-      FROM Usuario u
-      INNER JOIN Usuario_Perfiles up
-        ON u.IdUsuario = up.IdUsuario
-       AND up.EstadoRegistro = 1
-      INNER JOIN perfil p
-        ON up.IdPerfil = p.IdPerfil AND p.EstadoRegistro = 1
-      LEFT JOIN Academia a
-        ON u.IdAcademia = a.IdAcademia
-      WHERE u.EstadoRegistro = 1
-        AND (
-          LOWER(TRIM(u.CorreoElectronico)) = ?
-          OR LOWER(TRIM(u.CodigoUsuario)) = ?
-          OR TRIM(COALESCE(u.DNI, '')) = ?
-          OR (
-            LOWER(SUBSTRING_INDEX(u.CorreoElectronico, '@', 1)) = ?
-            AND (
-              SELECT COUNT(*)
-              FROM Usuario ux
-              WHERE ux.EstadoRegistro = 1
-                AND LOWER(SUBSTRING_INDEX(ux.CorreoElectronico, '@', 1)) = ?
-            ) = 1
-          )
-        )
-      ORDER BY CASE
-        WHEN LOWER(TRIM(u.CorreoElectronico)) = ? THEN 1
-        WHEN LOWER(TRIM(u.CodigoUsuario)) = ? THEN 2
-        WHEN TRIM(COALESCE(u.DNI, '')) = ? THEN 3
-        ELSE 4
-      END
-      LIMIT 2`,
-      [
-        termLower,
-        termLower,
-        termino,
-        termLower,
-        termLower,
-        termLower,
-        termLower,
-        termino,
-      ],
-    );
+    const [rows] = await consultar(pool, 'sp_auth_buscar_usuario_login', [termLower, termino]);
 
     if (rows.length === 0) {
       return res.status(401).json({
@@ -288,10 +220,7 @@ const loginHandler = async (req, res) => {
       const claveHash = await bcrypt.hash(clave, 10);
       // No sobrescribir una clave cambiada por recuperacion mientras se calcula
       // el hash. La comparacion binaria evita la collation insensible a mayusculas.
-      const [actualizacion] = await pool.query(
-        'UPDATE Usuario SET Clave = ? WHERE IdUsuario = ? AND BINARY Clave = BINARY ? AND EstadoRegistro = 1',
-        [claveHash, user.IdUsuario, claveEnBD],
-      );
+      const [actualizacion] = await ejecutar(pool, 'sp_auth_actualizar_usuario', [claveHash, user.IdUsuario, claveEnBD]);
       if (actualizacion.affectedRows !== 1) {
         return res.status(401).json({ error: 'Las credenciales cambiaron. Inicia sesion nuevamente.' });
       }
@@ -314,33 +243,7 @@ const loginHandler = async (req, res) => {
     const esAlumno =
       ["alumno", "estudiante"].includes(String(rol).trim().toLowerCase());
     if (esAlumno) {
-      const [matriculas] = await pool.query(
-        `SELECT
-          m.IdMatricula,
-          c.IdCiclo,
-          c.Nombre AS NombreCiclo,
-          c.Turno,
-          c.Horario,
-          c.DiasClase,
-          c.UniversidadObjetivo,
-          c.FechaInicio,
-          c.FechaFin,
-          (
-            SELECT COUNT(*)
-            FROM Matricula m2
-            WHERE m2.IdCiclo = c.IdCiclo
-              AND m2.EstadoRegistro = 1
-          ) AS TotalAlumnos
-        FROM Matricula m
-        INNER JOIN Ciclo c ON c.IdCiclo = m.IdCiclo
-        WHERE m.IdUsuario = ?
-          AND c.IdAcademia = ?
-          AND m.EstadoRegistro = 1
-          AND c.EstadoRegistro = 1
-        ORDER BY m.IdMatricula DESC
-        LIMIT 1`,
-        [user.IdUsuario, user.IdAcademia],
-      );
+      const [matriculas] = await consultar(pool, 'sp_auth_obtener_matricula', [user.IdUsuario, user.IdAcademia]);
 
       if (matriculas.length > 0) {
         const m = matriculas[0];

@@ -5,6 +5,7 @@ const pool = require("../config/db");
 // por lo que este router NO debe volver a ejecutarla.
 const requiereRol = require("../middlewares/roles.middleware");
 const { bloquearIdentidades, rollbackSeguro } = require('../utils/validaciones');
+const { consultar, ejecutar } = require('../config/procedimientos');
 
 function idPositivo(valor) {
   if (!['string', 'number'].includes(typeof valor) || !/^\d+$/.test(String(valor))) return null;
@@ -26,9 +27,7 @@ function responderError(res, error) {
 // 1. Listar los menús principales activos (GET)
 router.get("/menus", async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      "SELECT IdOpcionMenu, Nombre, UrlMenu, Descripcion, IdPadre, EstadoRegistro FROM OpcionesMenu WHERE (IdPadre IS NULL OR IdPadre = 0) AND EstadoRegistro = 1 ORDER BY IdOpcionMenu",
-    );
+    const [rows] = await consultar(pool, 'sp_menu_listar_menus_principales', []);
     res.json(rows);
   } catch (error) {
     responderError(res, error);
@@ -40,15 +39,9 @@ router.get("/menus/:idPadre/submenus", async (req, res) => {
   const idPadre = idPositivo(req.params.idPadre);
   if (!idPadre) return res.status(400).json({ error: 'IdPadre debe ser un entero positivo válido.' });
   try {
-    const [padres] = await pool.query(
-      'SELECT IdOpcionMenu FROM OpcionesMenu WHERE IdOpcionMenu = ? AND EstadoRegistro = 1',
-      [idPadre],
-    );
+    const [padres] = await consultar(pool, 'sp_menu_listar_menu_por_id_opcion_menu', [idPadre]);
     if (!padres.length) return res.status(404).json({ error: 'El menú padre no existe o no está activo.' });
-    const [rows] = await pool.query(
-      "SELECT IdOpcionMenu, Nombre, UrlMenu, Descripcion, IdPadre, EstadoRegistro FROM OpcionesMenu WHERE IdPadre = ? AND EstadoRegistro = 1 ORDER BY IdOpcionMenu",
-      [idPadre],
-    );
+    const [rows] = await consultar(pool, 'sp_menu_listar_menu_por_id_padre', [idPadre]);
     res.json(rows);
   } catch (error) {
     responderError(res, error);
@@ -60,25 +53,11 @@ router.get('/menus/perfil/:idPerfil', async (req, res) => {
   const idPerfil = idPositivo(req.params.idPerfil);
   if (!idPerfil) return res.status(400).json({ error: 'IdPerfil debe ser un entero positivo válido.' });
   try {
-    const [perfiles] = await pool.query(
-      'SELECT IdPerfil, Nombre, EstadoRegistro FROM perfil WHERE IdPerfil = ? AND EstadoRegistro = 1',
-      [idPerfil],
-    );
+    const [perfiles] = await consultar(pool, 'sp_menu_obtener_perfil', [idPerfil]);
     if (!perfiles.length) return res.status(404).json({ error: 'El perfil no existe o no está activo.' });
-    const [rows] = await pool.query(
-      `SELECT m.IdOpcionMenu, m.Nombre, m.UrlMenu, m.Descripcion, m.IdPadre,
-              m.EstadoRegistro, MIN(mp.Orden) AS Orden
-       FROM OpcionesMenu m
-       INNER JOIN OpcionesMenu_Perfiles mp ON mp.IdOpcionMenu = m.IdOpcionMenu
-       WHERE mp.IdPerfil = ? AND mp.EstadoRegistro = 1 AND m.EstadoRegistro = 1
-       GROUP BY m.IdOpcionMenu, m.Nombre, m.UrlMenu, m.Descripcion, m.IdPadre, m.EstadoRegistro
-       ORDER BY Orden, m.IdOpcionMenu`,
-      [idPerfil],
-    );
+    const [rows] = await consultar(pool, 'sp_menu_listar_menu_por_id_perfil', [idPerfil]);
     // Descarta huérfanos/ciclos y descendientes de padres inactivos, sin dar permiso a sus hermanos.
-    const [activos] = await pool.query(
-      'SELECT IdOpcionMenu, IdPadre FROM OpcionesMenu WHERE EstadoRegistro = 1',
-    );
+    const [activos] = await consultar(pool, 'sp_menu_listar_jerarquia', []);
     const padres = new Map(activos.map((m) => [Number(m.IdOpcionMenu), m.IdPadre]));
     const jerarquiaActiva = (id) => {
       const visitados = new Set();
@@ -115,19 +94,19 @@ router.post("/menus", requiereRol('Administrador'), async (req, res) => {
     await connection.beginTransaction();
     await bloquearIdentidades(connection);
     if (padre) {
-      const [padres] = await connection.query(
-        'SELECT IdOpcionMenu FROM OpcionesMenu WHERE IdOpcionMenu = ? AND EstadoRegistro = 1', [padre],
-      );
+      const [padres] = await consultar(connection, 'sp_menu_listar_menu_por_id_opcion_menu', [padre]);
       if (!padres.length) { await connection.rollback(); return res.status(404).json({ error: 'El menú padre no existe o no está activo.' }); }
     }
-    const [duplicados] = await connection.query(`SELECT IdOpcionMenu FROM OpcionesMenu WHERE UrlMenu = ?
-      AND COALESCE(IdPadre, 0) = COALESCE(?, 0) AND EstadoRegistro IN (0, 1) LIMIT 1 FOR UPDATE`, [UrlMenu.trim(), padre]);
+    const [duplicados] = await consultar(connection, 'sp_menu_bloquear_menu', [UrlMenu.trim(), padre]);
     if (duplicados.length) { await connection.rollback(); return res.status(409).json({ error: 'Ya existe un menú con esa ruta y padre.' }); }
 
-    const [result] = await connection.query(
-      "INSERT INTO OpcionesMenu (Nombre, UrlMenu, Descripcion, IdPadre, EstadoRegistro) VALUES (?, ?, ?, ?, ?)",
-      [Nombre.trim(), UrlMenu.trim(), Descripcion.trim(), padre, EstadoRegistro],
-    );
+    const [result] = await ejecutar(connection, 'sp_menu_registrar_menu', [
+        Nombre.trim(),
+        UrlMenu.trim(),
+        Descripcion.trim(),
+        padre,
+        EstadoRegistro,
+      ]);
     if (result.affectedRows !== 1) { await connection.rollback(); return res.status(500).json({ error: 'No se confirmó la creación del menú.' }); }
     await connection.commit();
     res.status(201).json({ message: "Menú creado con éxito", id: result.insertId });
@@ -153,25 +132,15 @@ router.post("/menus/asignar", requiereRol('Administrador'), async (req, res) => 
     connection = await pool.getConnection();
     await connection.beginTransaction();
     await bloquearIdentidades(connection);
-    const [menus] = await connection.query(
-      'SELECT IdOpcionMenu FROM OpcionesMenu WHERE IdOpcionMenu = ? AND EstadoRegistro = 1', [idMenu],
-    );
+    const [menus] = await consultar(connection, 'sp_menu_listar_menu_por_id_opcion_menu', [idMenu]);
     if (!menus.length) { await connection.rollback(); return res.status(404).json({ error: 'El menú no existe o no está activo.' }); }
-    const [perfiles] = await connection.query(
-      'SELECT IdPerfil FROM perfil WHERE IdPerfil = ? AND EstadoRegistro = 1', [idPerfil],
-    );
+    const [perfiles] = await consultar(connection, 'sp_menu_verificar_perfil', [idPerfil]);
     if (!perfiles.length) { await connection.rollback(); return res.status(404).json({ error: 'El perfil no existe o no está activo.' }); }
     // Reintentar la misma asignación confirmada no crea otra fila.
-    const [existentes] = await connection.query(
-      'SELECT IdOpcionMenu FROM OpcionesMenu_Perfiles WHERE IdOpcionMenu = ? AND IdPerfil = ? AND EstadoRegistro = ? ORDER BY Orden LIMIT 1',
-      [idMenu, idPerfil, EstadoRegistro],
-    );
+    const [existentes] = await consultar(connection, 'sp_menu_obtener_menu_perfil', [idMenu, idPerfil, EstadoRegistro]);
     if (existentes.length) { await connection.commit(); return res.json({ message: 'La asignación ya existe', id: existentes[0].IdOpcionMenu }); }
 
-    const [result] = await connection.query(
-      "INSERT INTO OpcionesMenu_Perfiles (IdOpcionMenu, IdPerfil, Orden, EstadoRegistro) VALUES (?, ?, ?, ?)",
-      [idMenu, idPerfil, orden, EstadoRegistro],
-    );
+    const [result] = await ejecutar(connection, 'sp_menu_registrar_menu_perfil', [idMenu, idPerfil, orden, EstadoRegistro]);
     if (result.affectedRows !== 1) { await connection.rollback(); return res.status(500).json({ error: 'No se confirmó la asignación.' }); }
     await connection.commit();
     res.status(201).json({

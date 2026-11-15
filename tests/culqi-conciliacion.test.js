@@ -55,7 +55,7 @@ const filaRef = { IdTransaccion: 31, IdPago: 7, ReferenciaInterna: ref, IdOrdenP
 test('conciliación administrativa usa Culqi y solo transacciones de la academia', async t => {
   reiniciar(); ordenSimulada = orden('paid', 'APROBADA');
   const pedir = await servir(t, [['/api/admin/pagos', 'admin-pagos.routes']], { id: 1, idAcademia: 4, rol: 'Administrador' });
-  let fin = secuencia([{ sql: /FROM PagoTransaccion WHERE .*IdTransaccion = \?/, params: [4, 'CULQI', 31], rows: [filaRef] }]);
+  let fin = secuencia([{ sql: /FROM PagoTransaccion WHERE .*IdTransaccion = \?/, params: [4, 'CULQI', null, null, 31, 31, null, null], rows: [filaRef] }]);
   let r = await pedir('POST', '/api/admin/pagos/transacciones/31/conciliar');
   assert.equal(r.status, 200); assert.equal(r.body.confirmada, true); fin();
   fin = secuencia([{ sql: /FROM PagoTransaccion/, rows: [] }]);

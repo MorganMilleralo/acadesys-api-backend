@@ -6,7 +6,7 @@ test('cobertura informa pendientes de docente y horario sin duplicar cursos', as
   const pedir = await servir(t, [['/api', 'academico.routes']]);
   simular((sql, params) => {
     if (/AS TieneDocente/.test(sql)) {
-      assert.deepEqual(params, [1, 7]);
+      assert.deepEqual(params, [1, 7, 7]);
       for (const campo of ['docente.EstadoRegistro = 1', 'p.EstadoRegistro = 1', 'a.EstadoRegistro = 1', 'aa.IdAcademia = c.IdAcademia']) assert.ok(sql.includes(campo));
       assert.match(sql, /EXISTS/);
       assert.doesNotMatch(sql, /h.IdDocente/);

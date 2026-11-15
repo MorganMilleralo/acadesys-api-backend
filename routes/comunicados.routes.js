@@ -1,6 +1,7 @@
 const express = require('express');
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
+const { consultar, ejecutar } = require('../config/procedimientos');
 
 const router = express.Router();
 const CATEGORIAS_VALIDAS = new Set(['Académico', 'Reunión', 'Salud', 'Feriado']);
@@ -42,45 +43,12 @@ function prepararDatos(body = {}) {
 }
 
 async function obtenerAutor(idUsuario, idAcademia, connection = pool) {
-  const [rows] = await connection.query(
-    `SELECT CONCAT_WS(' ', Nombres, ApellidoPaterno, NULLIF(ApellidoMaterno, '')) AS nombreCompleto
-       FROM Usuario
-      WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1
-      LIMIT 1`,
-    [idUsuario, idAcademia],
-  );
+  const [rows] = await consultar(connection, 'sp_comunicados_obtener_usuario', [idUsuario, idAcademia]);
   return rows[0]?.nombreCompleto || null;
 }
 
-const SELECT_COMUNICADO = `
-  SELECT
-    c.IdComunicado AS id,
-    c.Titulo AS titulo,
-    c.Categoria AS categoria,
-    c.Prioridad AS prioridad,
-    c.DirigidoA AS dirigidoA,
-    c.Contenido AS contenido,
-    c.AutorNombre AS autor,
-    DATE_FORMAT(c.FechaCreacion, '%d/%m/%Y') AS fecha,
-    DATE_FORMAT(c.FechaCreacion, '%h:%i %p') AS hora,
-    CASE WHEN cl.IdComunicadoLectura IS NULL THEN 0 ELSE 1 END AS confirmado,
-    CASE WHEN cl.IdComunicadoLectura IS NULL THEN 0 ELSE 1 END AS leido,
-    c.EstadoRegistro AS estadoRegistro,
-    c.FechaCreacion AS fechaCreacion
-  FROM Comunicado c
-  LEFT JOIN Comunicado_Lectura cl
-    ON cl.IdComunicado = c.IdComunicado
-   AND cl.IdUsuario = ?
-   AND cl.EstadoRegistro = 1
-`;
-
 async function consultarComunicado(idComunicado, idAcademia, idUsuario, connection = pool) {
-  const [rows] = await connection.query(
-    `${SELECT_COMUNICADO}
-     WHERE c.IdComunicado = ? AND c.IdAcademia = ? AND c.EstadoRegistro = 1
-     LIMIT 1`,
-    [idUsuario || 0, idComunicado, idAcademia],
-  );
+  const [rows] = await consultar(connection, 'sp_comunicados_obtener_comunicado', [idUsuario || 0, idComunicado, idAcademia]);
   return rows[0] || null;
 }
 
@@ -90,12 +58,7 @@ router.get('/comunicados', async (req, res) => {
   if (!idAcademia) return res.status(401).json({ error: 'El usuario autenticado no tiene una academia válida.' });
 
   try {
-    const [rows] = await pool.query(
-      `${SELECT_COMUNICADO}
-       WHERE c.IdAcademia = ? AND c.EstadoRegistro = 1
-       ORDER BY c.FechaCreacion DESC, c.IdComunicado DESC`,
-      [idUsuario || 0, idAcademia],
-    );
+    const [rows] = await consultar(pool, 'sp_comunicados_listar_comunicado', [idUsuario || 0, idAcademia]);
     res.json(rows);
   } catch (error) {
     console.error('GET /api/comunicados:', error);
@@ -116,12 +79,16 @@ router.post('/comunicados', requiereRol('Administrador'), async (req, res) => {
     if (!autorNombre) return res.status(401).json({ error: 'El usuario autenticado no está activo en esta academia.' });
 
     const { titulo, categoria, prioridad, dirigidoA, contenido } = preparado.datos;
-    const [result] = await pool.query(
-      `INSERT INTO Comunicado
-        (IdAcademia, Titulo, Categoria, Prioridad, DirigidoA, Contenido, IdAutor, AutorNombre, EstadoRegistro)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-      [idAcademia, titulo, categoria, prioridad, dirigidoA, contenido, idUsuario, autorNombre],
-    );
+    const [result] = await ejecutar(pool, 'sp_comunicados_registrar_comunicado', [
+        idAcademia,
+        titulo,
+        categoria,
+        prioridad,
+        dirigidoA,
+        contenido,
+        idUsuario,
+        autorNombre,
+      ]);
 
     const comunicado = await consultarComunicado(result.insertId, idAcademia, idUsuario);
     res.status(201).json(comunicado || { id: result.insertId, message: 'Comunicado publicado correctamente.' });
@@ -142,12 +109,15 @@ router.put('/comunicados/:id', requiereRol('Administrador'), async (req, res) =>
 
   try {
     const { titulo, categoria, prioridad, dirigidoA, contenido } = preparado.datos;
-    const [result] = await pool.query(
-      `UPDATE Comunicado
-          SET Titulo = ?, Categoria = ?, Prioridad = ?, DirigidoA = ?, Contenido = ?, FechaModificacion = CURRENT_TIMESTAMP
-        WHERE IdComunicado = ? AND IdAcademia = ? AND EstadoRegistro = 1`,
-      [titulo, categoria, prioridad, dirigidoA, contenido, idComunicado, idAcademia],
-    );
+    const [result] = await ejecutar(pool, 'sp_comunicados_actualizar_comunicado', [
+        titulo,
+        categoria,
+        prioridad,
+        dirigidoA,
+        contenido,
+        idComunicado,
+        idAcademia,
+      ]);
     if (!result.affectedRows) {
       const actual = await consultarComunicado(idComunicado, idAcademia, idUsuario);
       if (!actual) return res.status(404).json({ error: 'Comunicado no encontrado o ya desactivado.' });
@@ -168,12 +138,7 @@ router.delete('/comunicados/:id', requiereRol('Administrador'), async (req, res)
   if (!idAcademia || !idComunicado) return res.status(400).json({ error: 'La academia o el identificador del comunicado no son válidos.' });
 
   try {
-    const [result] = await pool.query(
-      `UPDATE Comunicado
-          SET EstadoRegistro = 0, FechaModificacion = CURRENT_TIMESTAMP
-        WHERE IdComunicado = ? AND IdAcademia = ? AND EstadoRegistro = 1`,
-      [idComunicado, idAcademia],
-    );
+    const [result] = await ejecutar(pool, 'sp_comunicados_eliminar_comunicado', [idComunicado, idAcademia]);
     if (!result.affectedRows) return res.status(404).json({ error: 'Comunicado no encontrado o ya desactivado.' });
     res.json({ message: 'Comunicado desactivado correctamente.', id: idComunicado });
   } catch (error) {
@@ -192,12 +157,7 @@ router.put('/comunicados/:id/lectura', async (req, res) => {
     const comunicado = await consultarComunicado(idComunicado, idAcademia, idUsuario);
     if (!comunicado) return res.status(404).json({ error: 'Comunicado no encontrado o no disponible en esta academia.' });
 
-    await pool.query(
-      `INSERT INTO Comunicado_Lectura (IdComunicado, IdUsuario, FechaLectura, EstadoRegistro)
-       VALUES (?, ?, CURRENT_TIMESTAMP, 1)
-       ON DUPLICATE KEY UPDATE FechaLectura = CURRENT_TIMESTAMP, EstadoRegistro = 1`,
-      [idComunicado, idUsuario],
-    );
+    await ejecutar(pool, 'sp_comunicados_registrar_lectura_comunicado', [idComunicado, idUsuario]);
     res.json({ message: 'Lectura confirmada correctamente.', id: idComunicado, confirmado: true });
   } catch (error) {
     console.error('PUT /api/comunicados/:id/lectura:', error);

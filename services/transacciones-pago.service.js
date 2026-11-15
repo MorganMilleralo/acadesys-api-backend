@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const pool = require('../config/db');
 const { rollbackSeguro } = require('../utils/validaciones');
 const { ErrorPago, aCentimos, idOrdenCulqi } = require('../utils/pagos-proveedor');
+const { consultar, ejecutar } = require('../config/procedimientos');
 
 const PROVEEDOR = 'CULQI';
 const MONEDA = 'PEN';
@@ -26,12 +27,7 @@ function idPositivo(valor) {
 }
 
 async function auditar(connection, datos) {
-  const [resultado] = await connection.query(
-    `INSERT INTO PagoAuditoria
-      (IdPago, IdComprobante, IdUsuarioActor, IdAcademia, Evento,
-       EstadoAnterior, EstadoNuevo, MontoAnterior, MontoNuevo, Motivo, FechaCreacion)
-     VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-    [
+  const [resultado] = await ejecutar(connection, 'sp_transacciones_registrar_auditoria_pago', [
       datos.idPago,
       datos.idAcademia,
       datos.evento,
@@ -40,17 +36,12 @@ async function auditar(connection, datos) {
       datos.montoAnterior ?? null,
       datos.montoNuevo ?? null,
       datos.motivo ?? null,
-    ],
-  );
+    ]);
   if (resultado.affectedRows !== 1) throw errorPago(503, 'AUDITORIA_NO_GUARDADA', 'No se pudo registrar la auditoría del pago.');
 }
 
 async function descartarTransaccion(connection, tx, idAcademia, cuota, estadoNuevo, evento, motivo) {
-  const [cambio] = await connection.query(
-    `UPDATE PagoTransaccion SET FechaActualizacion = NOW(), Estado = ?
-     WHERE IdTransaccion = ? AND Estado = ? AND EstadoRegistro = 1`,
-    [estadoNuevo, tx.IdTransaccion, tx.Estado],
-  );
+  const [cambio] = await ejecutar(connection, 'sp_transacciones_cambiar_estado_si_coincide', [estadoNuevo, tx.IdTransaccion, tx.Estado]);
   if (cambio.affectedRows !== 1) throw errorPago(409, 'CHECKOUT_EN_PREPARACION', 'El checkout cambió de estado; actualiza la pantalla.');
   await auditar(connection, {
     idPago: tx.IdPago ?? cuota.IdPago, idAcademia, evento,
@@ -82,20 +73,7 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
     connection = await pool.getConnection();
     await connection.beginTransaction();
 
-    const [pagos] = await connection.query(
-      `SELECT p.IdPago, p.IdUsuario, p.IdCiclo, p.Mes, p.Monto, p.Estado,
-              u.IdAcademia, u.CorreoElectronico, u.Celular AS Telefono,
-              u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno,
-              CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, NULLIF(u.ApellidoMaterno, '')) AS Alumno,
-              c.Nombre AS Ciclo
-       FROM PagosMensualidad p
-       INNER JOIN Usuario u ON u.IdUsuario = p.IdUsuario
-       INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = u.IdAcademia
-       WHERE p.IdPago = ? AND p.IdUsuario = ? AND u.IdAcademia = ?
-         AND p.EstadoRegistro = 1 AND u.EstadoRegistro = 1
-       LIMIT 1 FOR UPDATE`,
-      [pagoId, usuarioId, academiaId],
-    );
+    const [pagos] = await consultar(connection, 'sp_transacciones_bloquear_cuota_alumno', [pagoId, usuarioId, academiaId]);
 
     if (!pagos.length) {
       await connection.rollback();
@@ -126,31 +104,14 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
 
     // El pago manual y el online no se superponen. Mientras administración
     // revisa un comprobante, no se abre un cobro online de la misma cuota.
-    const [enRevision] = await connection.query(
-      `SELECT IdComprobante FROM PagoComprobante
-       WHERE IdPago = ? AND IdUsuario = ? AND IdAcademia = ?
-         AND EstadoRevision = 'EN_REVISION' AND EstadoRegistro = 1
-       LIMIT 1 FOR UPDATE`,
-      [pagoId, usuarioId, academiaId],
-    );
+    const [enRevision] = await consultar(connection, 'sp_transacciones_bloquear_comprobante', [pagoId, usuarioId, academiaId]);
     if (enRevision.length) {
       await connection.rollback();
       throw errorPago(409, 'COMPROBANTE_EN_REVISION',
         'Esta cuota tiene un comprobante en revisión. Espera la respuesta de la academia antes de pagar online.');
     }
 
-    const filtroTerminal = "Estado NOT IN ('ERROR', 'EXPIRADA', 'CANCELADA', 'RECHAZADA')";
-    const [existentes] = await connection.query(
-      `SELECT IdTransaccion, IdPago, ReferenciaInterna, IdOrdenProveedor, ClaveIdempotencia,
-              Monto, Moneda, Estado, UrlCheckout, CodigoEstadoProveedor,
-              TIMESTAMPDIFF(SECOND, FechaCreacion, NOW()) AS AntiguedadSegundos
-       FROM PagoTransaccion
-       WHERE IdPago = ? AND IdUsuario = ? AND IdAcademia = ?
-         AND Proveedor = ? AND EstadoRegistro = 1
-         AND ${filtroTerminal}
-       ORDER BY IdTransaccion DESC LIMIT 1 FOR UPDATE`,
-      [pagoId, usuarioId, academiaId, proveedorActual],
-    );
+    const [existentes] = await consultar(connection, 'sp_transacciones_bloquear_transaccion_por_id_pago', [pagoId, usuarioId, academiaId, proveedorActual]);
 
     const datosAlumno = {
       emailAlumno: pago.CorreoElectronico || null,
@@ -225,13 +186,16 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
 
     const referenciaInterna = `ACS-${pagoId}-${crypto.randomUUID()}`;
     const idempotencyKey = `ACS-${crypto.randomUUID()}`;
-    const [insertado] = await connection.query(
-      `INSERT INTO PagoTransaccion
-        (IdPago, IdUsuario, IdAcademia, Proveedor, ReferenciaInterna,
-         ClaveIdempotencia, Monto, Moneda, Estado, FechaCreacion, FechaActualizacion, EstadoRegistro)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CREANDO', NOW(), NOW(), 1)`,
-      [pagoId, usuarioId, academiaId, proveedorActual, referenciaInterna, idempotencyKey, Number(pago.Monto), MONEDA],
-    );
+    const [insertado] = await ejecutar(connection, 'sp_transacciones_registrar_transaccion', [
+        pagoId,
+        usuarioId,
+        academiaId,
+        proveedorActual,
+        referenciaInterna,
+        idempotencyKey,
+        Number(pago.Monto),
+        MONEDA,
+      ]);
 
     await connection.commit();
     return {
@@ -276,26 +240,9 @@ async function guardarOrdenCreada({
     throw errorPago(409, 'ESTADO_ORDEN_CULQI_INVALIDO', 'Culqi devolvió un estado de orden no esperado.');
   }
 
-  await pool.query(
-    `UPDATE PagoTransaccion
-     SET IdOrdenProveedor = ?, UrlCheckout = NULL,
-         CodigoEstadoProveedor = IF(Estado = 'CREANDO', ?, CodigoEstadoProveedor),
-         Estado = IF(Estado = 'CREANDO' AND ? = 'pending', 'PENDIENTE', Estado),
-         FechaActualizacion = NOW()
-     WHERE IdTransaccion = ? AND EstadoRegistro = 1
-       AND Proveedor = 'CULQI'
-       AND (IdOrdenProveedor IS NULL OR IdOrdenProveedor = ?)
-       AND Estado <> 'ERROR'`,
-    [orden, estadoProveedorActual, estadoProveedorActual, id, orden],
-  );
+  await ejecutar(pool, 'sp_transacciones_guardar_orden_proveedor', [orden, estadoProveedorActual, id]);
 
-  const [rows] = await pool.query(
-    `SELECT IdTransaccion, Estado, UrlCheckout, IdOrdenProveedor
-     FROM PagoTransaccion
-     WHERE IdTransaccion = ? AND EstadoRegistro = 1
-     LIMIT 1`,
-    [id],
-  );
+  const [rows] = await consultar(pool, 'sp_transacciones_obtener_transaccion_por_id_transaccion', [id]);
   if (!rows.length) {
     throw errorPago(404, 'TRANSACCION_NO_ENCONTRADA', 'No se encontró la transacción creada.');
   }
@@ -309,14 +256,7 @@ async function marcarErrorCreacion(idTransaccion, proveedor = PROVEEDOR) {
   const id = idPositivo(idTransaccion);
   const proveedorActual = String(proveedor || PROVEEDOR).trim().toUpperCase();
   if (!id || proveedorActual !== 'CULQI') return;
-  await pool.query(
-    `UPDATE PagoTransaccion
-     SET Estado = 'ERROR', FechaActualizacion = NOW()
-     WHERE IdTransaccion = ? AND Estado = 'CREANDO'
-       AND IdOrdenProveedor IS NULL AND Proveedor = 'CULQI'
-       AND EstadoRegistro = 1`,
-    [id],
-  );
+  await ejecutar(pool, 'sp_transacciones_marcar_error_creacion', [id]);
 }
 
 async function obtenerEstadoPagoAlumno({ idPago, idUsuario, idAcademia }) {
@@ -324,25 +264,7 @@ async function obtenerEstadoPagoAlumno({ idPago, idUsuario, idAcademia }) {
   const usuarioId = idPositivo(idUsuario);
   const academiaId = idPositivo(idAcademia);
   if (!pagoId || !usuarioId || !academiaId) throw errorPago(400, 'DATOS_INVALIDOS', 'La cuota seleccionada no es válida.');
-  const [rows] = await pool.query(
-    `SELECT p.IdPago, p.Estado AS EstadoPago, p.Monto,
-            pt.IdTransaccion, pt.Proveedor, pt.Estado AS EstadoTransaccion,
-            pt.IdOrdenProveedor, pt.ReferenciaInterna, pt.UrlCheckout,
-            pt.Monto AS MontoTransaccion, pt.Moneda, pt.FechaCreacion,
-            pt.FechaConfirmacion
-     FROM PagosMensualidad p
-     INNER JOIN Usuario u ON u.IdUsuario = p.IdUsuario
-     INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = u.IdAcademia
-     LEFT JOIN PagoTransaccion pt ON pt.IdTransaccion = (
-       SELECT MAX(pt2.IdTransaccion) FROM PagoTransaccion pt2
-       WHERE pt2.IdPago = p.IdPago AND pt2.IdUsuario = p.IdUsuario
-         AND pt2.IdAcademia = u.IdAcademia AND pt2.EstadoRegistro = 1
-     )
-     WHERE p.IdPago = ? AND p.IdUsuario = ? AND u.IdAcademia = ?
-       AND p.EstadoRegistro = 1 AND u.EstadoRegistro = 1
-     LIMIT 1`,
-    [pagoId, usuarioId, academiaId],
-  );
+  const [rows] = await consultar(pool, 'sp_transacciones_obtener_estado_pago', [pagoId, usuarioId, academiaId]);
   if (!rows.length) throw errorPago(404, 'CUOTA_NO_ENCONTRADA', 'La cuota no existe en tu cuenta.');
   const row = rows[0];
   return {
@@ -402,30 +324,14 @@ async function aplicarPagoProveedor(datos) {
   let connection;
   try {
     // Localizar sin lock, luego tomar cuota ANTES de transacción, como checkout.
-    const [localizadas] = await pool.query(
-      'SELECT IdPago FROM PagoTransaccion WHERE Proveedor = ? AND ReferenciaInterna = ? AND EstadoRegistro = 1 LIMIT 1',
-      [proveedorActual, referencia],
-    );
+    const [localizadas] = await consultar(pool, 'sp_transacciones_obtener_transaccion_por_proveedor', [proveedorActual, referencia]);
     if (!localizadas.length) throw errorPago(404, 'TRANSACCION_NO_ENCONTRADA', 'No existe la transacción notificada.');
     connection = await pool.getConnection();
     await connection.beginTransaction();
-    const [cuotas] = await connection.query(
-      `SELECT p.IdPago, p.IdUsuario, p.Monto, p.Estado, u.IdAcademia
-       FROM PagosMensualidad p
-       INNER JOIN Usuario u ON u.IdUsuario = p.IdUsuario
-       INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = u.IdAcademia
-       WHERE p.IdPago = ? AND p.EstadoRegistro = 1 AND u.EstadoRegistro = 1
-       LIMIT 1 FOR UPDATE`, [localizadas[0].IdPago],
-    );
+    const [cuotas] = await consultar(connection, 'sp_transacciones_bloquear_cuota', [localizadas[0].IdPago]);
     if (!cuotas.length) throw errorPago(404, 'CUOTA_NO_ENCONTRADA', 'No existe la cuota relacionada.');
     const cuota = cuotas[0];
-    const [rows] = await connection.query(
-      `SELECT IdTransaccion, IdPago, IdUsuario, IdAcademia, ReferenciaInterna,
-              IdOrdenProveedor, Monto, Moneda, Estado, CodigoEstadoProveedor
-       FROM PagoTransaccion
-       WHERE Proveedor = ? AND ReferenciaInterna = ? AND EstadoRegistro = 1
-       LIMIT 1 FOR UPDATE`, [proveedorActual, referencia],
-    );
+    const [rows] = await consultar(connection, 'sp_transacciones_bloquear_transaccion_por_proveedor', [proveedorActual, referencia]);
     const tx = rows[0];
     if (!tx || Number(tx.IdTransaccion) !== Number(idTransaccion) || tx.ReferenciaInterna !== referencia
         || Number(tx.IdPago) !== Number(cuota.IdPago) || Number(tx.IdUsuario) !== Number(cuota.IdUsuario)
@@ -442,11 +348,7 @@ async function aplicarPagoProveedor(datos) {
     }
 
     const eventoEstado = `${proveedorActual}_EVENTO`;
-    const [auditorias] = await connection.query(
-      `SELECT IdAuditoria, Motivo FROM PagoAuditoria
-       WHERE IdPago = ? AND IdAcademia = ? AND Evento = ?
-       ORDER BY IdAuditoria DESC FOR UPDATE`, [tx.IdPago, tx.IdAcademia, eventoEstado],
-    );
+    const [auditorias] = await consultar(connection, 'sp_transacciones_bloquear_auditoria_pago', [tx.IdPago, tx.IdAcademia, eventoEstado]);
     const recibos = auditorias.map(row => {
       let recibo;
       try { recibo = JSON.parse(row.Motivo); } catch { /* falla cerrada */ }
@@ -499,11 +401,7 @@ async function aplicarPagoProveedor(datos) {
         if (!['CREANDO', 'PENDIENTE', 'RECHAZADA', 'CANCELADA', 'EXPIRADA'].includes(tx.Estado)) {
           throw errorPago(409, 'ESTADO_TRANSACCION_NO_CONFIRMABLE', 'La transacción requiere conciliación.');
         }
-        const [cambio] = await connection.query(
-          `UPDATE PagosMensualidad SET Estado = 'Pagado', FechaPago = COALESCE(FechaPago, NOW())
-           WHERE IdPago = ? AND IdUsuario = ? AND EstadoRegistro = 1 AND Estado IN ('Pendiente', 'Moroso')`,
-          [tx.IdPago, tx.IdUsuario],
-        );
+        const [cambio] = await ejecutar(connection, 'sp_transacciones_actualizar_estado_cuota', [tx.IdPago, tx.IdUsuario]);
         if (cambio.affectedRows !== 1) throw errorPago(409, 'CUOTA_NO_ACTUALIZADA', 'No se pudo confirmar la cuota.');
         estadoTx = 'APROBADA';
         confirmada = true;
@@ -521,13 +419,13 @@ async function aplicarPagoProveedor(datos) {
       codigoProveedor = estadoProveedor;
     }
 
-    const [cambioTx] = await connection.query(
-      `UPDATE PagoTransaccion SET Estado = ?, IdOrdenProveedor = ?,
-         CodigoEstadoProveedor = ?, FechaActualizacion = NOW(),
-         FechaConfirmacion = IF(? = 'APROBADA', COALESCE(FechaConfirmacion, NOW()), FechaConfirmacion)
-       WHERE IdTransaccion = ? AND EstadoRegistro = 1 AND Proveedor = ?`,
-      [estadoTx, orden, codigoProveedor || estadoProveedor, estadoTx, tx.IdTransaccion, proveedorActual],
-    );
+    const [cambioTx] = await ejecutar(connection, 'sp_transacciones_actualizar_estado_proveedor', [
+        estadoTx,
+        orden,
+        codigoProveedor || estadoProveedor,
+        tx.IdTransaccion,
+        proveedorActual,
+      ]);
     if (cambioTx.affectedRows !== 1) throw errorPago(409, 'TRANSACCION_NO_ACTUALIZADA', 'No se pudo actualizar la transacción.');
     await auditar(connection, {
       idPago: tx.IdPago, idAcademia: tx.IdAcademia, evento: eventoEstado,
@@ -620,35 +518,19 @@ function motivoRevision(row) {
 async function listarTransaccionesAdmin({ idAcademia, filtros }) {
   const academiaId = idPositivo(idAcademia);
   if (!academiaId || !filtros) throw errorPago(400, 'FILTROS_INVALIDOS', 'Los filtros de transacciones no son válidos.');
-  const condiciones = ['pt.IdAcademia = ?', 'pt.EstadoRegistro = 1', 'p.EstadoRegistro = 1'];
-  const params = [academiaId];
-  if (filtros.idCiclo) { condiciones.push('p.IdCiclo = ?'); params.push(filtros.idCiclo); }
-  if (filtros.periodo) { condiciones.push('p.Mes = ?'); params.push(filtros.periodo); }
-  if (filtros.estado === 'REQUIERE_REVISION') {
-    condiciones.push(`(pt.Estado IN ('PAGO_DUPLICADO', 'REEMBOLSADA', 'CONTRACARGO')
-      OR (pt.Estado = 'CREANDO' AND pt.FechaCreacion < NOW() - INTERVAL ${CREACION_HUERFANA_SEGUNDOS} SECOND))`);
-  } else if (filtros.estado) {
-    condiciones.push('pt.Estado = ?'); params.push(filtros.estado);
-  }
-  const desde = `FROM PagoTransaccion pt
-     INNER JOIN PagosMensualidad p ON p.IdPago = pt.IdPago AND p.IdUsuario = pt.IdUsuario
-     INNER JOIN Usuario u ON u.IdUsuario = pt.IdUsuario AND u.IdAcademia = pt.IdAcademia
-     INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = pt.IdAcademia
-     WHERE ${condiciones.join(' AND ')}`;
-  const [totales] = await pool.query(`SELECT COUNT(*) AS Total ${desde}`, params);
-  const [rows] = await pool.query(
-    `SELECT pt.IdTransaccion, pt.IdPago, pt.Proveedor, pt.ReferenciaInterna, pt.IdOrdenProveedor,
-            pt.Monto, pt.Moneda, pt.Estado, pt.CodigoEstadoProveedor,
-            pt.FechaCreacion, pt.FechaActualizacion, pt.FechaConfirmacion,
-            TIMESTAMPDIFF(SECOND, pt.FechaCreacion, NOW()) AS AntiguedadSegundos,
-            p.IdCiclo, c.Nombre AS Ciclo, p.Mes AS Periodo, p.Estado AS EstadoCuota, p.Monto AS MontoCuota,
-            u.IdUsuario, u.CodigoUsuario,
-            CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, NULLIF(u.ApellidoMaterno, '')) AS Alumno
-     ${desde}
-     ORDER BY pt.IdTransaccion DESC
-     LIMIT ? OFFSET ?`,
-    [...params, filtros.limite, filtros.desde],
-  );
+  const filtrosSql = [
+    academiaId,
+    filtros.idCiclo || null,
+    filtros.periodo || null,
+    filtros.estado || null,
+    CREACION_HUERFANA_SEGUNDOS,
+  ];
+  const [totales] = await consultar(pool, 'sp_transacciones_contar_admin', filtrosSql);
+  const [rows] = await consultar(pool, 'sp_transacciones_listar_admin', [
+    ...filtrosSql,
+    filtros.limite,
+    filtros.desde,
+  ]);
   return {
     transacciones: rows.map((row) => {
       const revision = motivoRevision(row);
@@ -686,21 +568,9 @@ async function auditoriaPagoAdmin({ idPago, idAcademia }) {
   const pagoId = idPositivo(idPago);
   const academiaId = idPositivo(idAcademia);
   if (!pagoId || !academiaId) throw errorPago(400, 'DATOS_INVALIDOS', 'La cuota no es válida.');
-  const [cuotas] = await pool.query(
-    `SELECT p.IdPago FROM PagosMensualidad p
-     INNER JOIN Usuario u ON u.IdUsuario = p.IdUsuario
-     INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = u.IdAcademia
-     WHERE p.IdPago = ? AND u.IdAcademia = ? AND p.EstadoRegistro = 1 LIMIT 1`,
-    [pagoId, academiaId],
-  );
+  const [cuotas] = await consultar(pool, 'sp_transacciones_verificar_cuota', [pagoId, academiaId]);
   if (!cuotas.length) throw errorPago(404, 'CUOTA_NO_ENCONTRADA', 'La cuota no existe en tu academia.');
-  const [rows] = await pool.query(
-    `SELECT IdAuditoria, IdComprobante, IdUsuarioActor, Evento, EstadoAnterior, EstadoNuevo,
-            MontoAnterior, MontoNuevo, Motivo, FechaCreacion
-     FROM PagoAuditoria WHERE IdPago = ? AND IdAcademia = ?
-     ORDER BY IdAuditoria DESC LIMIT 200`,
-    [pagoId, academiaId],
-  );
+  const [rows] = await consultar(pool, 'sp_transacciones_listar_auditoria_pago', [pagoId, academiaId]);
   return rows.map((row) => {
     let detalle = null;
     if (/_EVENTO$/.test(String(row.Evento || ''))) {
@@ -734,17 +604,13 @@ async function obtenerReferenciaConciliable({ idPago = null, idTransaccion = nul
   if (!academiaId || (!pagoId && !txId) || (idUsuario !== null && !usuarioId)) {
     throw errorPago(400, 'DATOS_INVALIDOS', 'No se pudo identificar la transacción.');
   }
-  const condiciones = ['IdAcademia = ?', 'Proveedor = ?', 'EstadoRegistro = 1', 'IdOrdenProveedor IS NOT NULL'];
-  const params = [academiaId, PROVEEDOR];
-  if (pagoId) { condiciones.push('IdPago = ?'); params.push(pagoId); }
-  if (txId) { condiciones.push('IdTransaccion = ?'); params.push(txId); }
-  if (usuarioId) { condiciones.push('IdUsuario = ?'); params.push(usuarioId); }
-  const [rows] = await pool.query(
-    `SELECT IdTransaccion, IdPago, ReferenciaInterna, IdOrdenProveedor, Estado FROM PagoTransaccion
-     WHERE ${condiciones.join(' AND ')}
-     ORDER BY IdTransaccion DESC LIMIT 1`,
-    params,
-  );
+  const [rows] = await consultar(pool, 'sp_transacciones_obtener_conciliable', [
+    academiaId,
+    PROVEEDOR,
+    pagoId || null,
+    txId || null,
+    usuarioId || null,
+  ]);
   if (!rows.length) return null;
   return { idTransaccion: Number(rows[0].IdTransaccion), idPago: Number(rows[0].IdPago),
     referenciaInterna: rows[0].ReferenciaInterna, idOrdenProveedor: rows[0].IdOrdenProveedor,

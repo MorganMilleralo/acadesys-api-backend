@@ -134,11 +134,11 @@ test('error de esquema falla cerrado sin exponer detalles internos',async t=>{
 
 test('regresion de esquema: rutas activas no requieren columnas retiradas de la consolidacion',()=>{
  const fs=require('node:fs'),path=require('node:path');
- for(const folder of ['routes','middlewares'])for(const file of fs.readdirSync(path.join(__dirname,'..',folder)).filter(f=>f.endsWith('.js'))){
+ for(const folder of ['routes','middlewares','database/procedimientos'])for(const file of fs.readdirSync(path.join(__dirname,'..',folder)).filter(f=>/\.(js|sql)$/.test(f))){
   const source=fs.readFileSync(path.join(__dirname,'..',folder,file),'utf8');
   assert.doesNotMatch(source,/\be\d*\.IdCurso\b|\bEvaluacion\.IdCurso\b|\bRegistrosAfectados\b/,file);
  }
- const source=fs.readFileSync(path.join(__dirname,'../routes/notas.routes.js'),'utf8');
+ const source=fs.readFileSync(path.join(__dirname,'../database/procedimientos/notas.sql'),'utf8');
  const insert=source.match(/INSERT INTO Evaluacion\s*\(([^)]+)\)/);
  assert.ok(insert);assert.doesNotMatch(insert[1],/IdCurso/);
 });

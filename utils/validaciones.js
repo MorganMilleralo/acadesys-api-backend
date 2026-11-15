@@ -1,3 +1,4 @@
+const { consultar } = require('../config/procedimientos');
 // Límites conservadores del esquema existente; no modifica la BD.
 function idPositivo(valor) {
   if (!['string', 'number'].includes(typeof valor) || !/^\d+$/.test(String(valor).trim())) return null;
@@ -102,20 +103,14 @@ async function usuarioDuplicado(connection, datos, excluir = 0, actual = null) {
   }
 
   if (!correoEfectivo && !dniEfectivo) return false;
-  const [rows] = await connection.query(
-    `SELECT IdUsuario FROM Usuario
-     WHERE IdUsuario <> ? AND
-       ((? IS NOT NULL AND LOWER(TRIM(CorreoElectronico)) = ?) OR (? IS NOT NULL AND TRIM(DNI) = ?))
-     LIMIT 1 FOR UPDATE`,
-    [excluir, correoEfectivo, correoEfectivo, dniEfectivo, dniEfectivo],
-  );
+  const [rows] = await consultar(connection, 'sp_comun_bloquear_usuario', [excluir, correoEfectivo, dniEfectivo]);
   return rows.length > 0;
 }
 
 async function bloquearIdentidades(connection) {
   // Sin UNIQUE todavía: serializa altas/cambios de identidad de todos los flujos.
   // Siempre antes de Ciclo/Usuario, para mantener un orden de locks consistente.
-  await connection.query('SELECT IdAcademia FROM Academia ORDER BY IdAcademia FOR UPDATE');
+  await consultar(connection, 'sp_comun_bloquear_academia', []);
 }
 
 async function rollbackSeguro(connection) {

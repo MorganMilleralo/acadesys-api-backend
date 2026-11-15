@@ -14,7 +14,7 @@ cp .env.example .env    # completar las variables
 npm run dev             # http://localhost:3000
 ```
 
-Para una base de datos nueva, ejecutar `database/esquema_inicial.sql` y después los archivos de `database/migraciones/` en orden numérico.
+Para una base de datos nueva, ejecutar `database/esquema_inicial.sql`, después los archivos de `database/migraciones/` en orden numérico y, por último, todos los archivos de `database/procedimientos/`.
 
 ## Scripts
 
@@ -30,16 +30,35 @@ Para una base de datos nueva, ejecutar `database/esquema_inicial.sql` y después
 ## Estructura
 
 ```
-config/        Conexión MySQL, CORS y carpetas de archivos
+config/        Conexión MySQL, llamada a procedimientos, CORS y carpetas de archivos
 middlewares/   Autenticación JWT, roles, cierre de actas y manejo de errores
 routes/        Endpoints agrupados por módulo
 services/      Integración con Culqi y lógica de transacciones de pago
 utils/         Reglas de negocio reutilizables (precios, capacidad, escalas, validaciones)
-database/      Esquema inicial y migraciones
+database/      Esquema inicial, migraciones y procedimientos almacenados
 scripts/       Pruebas, verificaciones y tareas programadas
 tests/         Pruebas unitarias y de integración (node:test)
 docs/          Colección de Postman
 ```
+
+## Acceso a datos: procedimientos almacenados
+
+La API no contiene consultas SQL. Toda la lectura y escritura en MySQL (CRUD, reportes, pagos y matrícula) se realiza con procedimientos almacenados definidos en `database/procedimientos/`, un archivo por módulo:
+
+| Archivo | Módulo |
+|---|---|
+| `academico.sql` | Aulas, cursos, horarios, asignaciones y asistencia |
+| `admin_ciclos.sql`, `ciclos.sql` | Administración y catálogo público de ciclos |
+| `alumno.sql` | Intranet del alumno |
+| `auth.sql`, `recuperacion.sql` | Inicio de sesión, registro y recuperación de contraseña |
+| `comunicados.sql`, `menu.sql`, `perfil.sql`, `usuario.sql` | Comunicados, menús, perfiles y usuarios |
+| `matriculas.sql`, `pagos.sql`, `cuotas.sql`, `transacciones.sql` | Matrícula, pagos manuales, cuotas mensuales y pagos con Culqi |
+| `materiales.sql`, `notas.sql`, `actas.sql`, `dashboard.sql`, `tutor_ia.sql` | Materiales, notas, cierre de actas, dashboard y Tutor IA |
+
+- Los nombres siguen el formato `sp_<modulo>_<accion>_<entidad>`, por ejemplo `sp_academico_registrar_curso`.
+- El código invoca los procedimientos con `config/procedimientos.js` (`consultar` para lecturas y `ejecutar` para escrituras, que devuelve `affectedRows` e `insertId`).
+- Las transacciones (matrícula, pagos, cierres de actas) se abren en la API y cada paso es un procedimiento, de modo que se confirman o revierten juntos.
+- Para instalarlos o actualizarlos, ejecutar cada archivo en la base de datos (por ejemplo, con DBeaver). Cada procedimiento se elimina y se vuelve a crear, así que pueden ejecutarse las veces que haga falta.
 
 ## Módulos principales
 

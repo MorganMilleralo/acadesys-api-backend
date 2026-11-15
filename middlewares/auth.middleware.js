@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
 const { enteroPositivo } = require("../utils/evaluaciones");
+const { consultar } = require('../config/procedimientos');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -44,24 +45,7 @@ const verificarToken = async (req, res, next) => {
     let usuarios;
 
     try {
-      [usuarios] = await pool.query(
-        `SELECT
-            u.IdUsuario,
-            u.IdAcademia,
-            up.IdPerfil,
-            p.Nombre AS Rol
-         FROM Usuario u
-         INNER JOIN Usuario_Perfiles up
-           ON up.IdUsuario = u.IdUsuario
-           AND up.EstadoRegistro = 1
-         INNER JOIN perfil p
-           ON p.IdPerfil = up.IdPerfil
-           AND p.EstadoRegistro = 1
-         WHERE u.IdUsuario = ?
-           AND u.EstadoRegistro = 1
-         LIMIT 2`,
-        [Number(decoded.id)]
-      );
+      [usuarios] = await consultar(pool, 'sp_auth_obtener_sesion_usuario', [Number(decoded.id)]);
     } catch (dbError) {
       console.error("Error al verificar permisos:", dbError);
 

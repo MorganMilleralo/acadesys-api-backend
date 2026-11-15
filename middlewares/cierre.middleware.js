@@ -3,6 +3,7 @@
 const pool = require('../config/db');
 
 const { idPositivo } = require('../utils/validaciones');
+const { consultar } = require('../config/procedimientos');
 
 function textoPeriodo(valor) {
   const s = String(valor ?? 'General').trim().replace(/\s+/g, ' ');
@@ -25,17 +26,7 @@ const verificarPeriodoAbierto = async (req, res, next) => {
   }
 
   try {
-    const [rows] = await pool.query(
-      `SELECT e.IdEvaluacion, e.EstadoRegistro, e.Periodo, e.TipoEvaluacion,
-              m.IdCiclo, m.IdCurso, u.IdAcademia
-       FROM Evaluacion e
-       INNER JOIN Matricula m ON m.IdMatricula = e.IdMatricula
-       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-       INNER JOIN Ciclo ci ON ci.IdCiclo = m.IdCiclo AND ci.IdAcademia = u.IdAcademia
-        WHERE e.IdEvaluacion = ? AND u.IdAcademia = ?
-       LIMIT 1`,
-      [idEvaluacion, idAcademia],
-    );
+    const [rows] = await consultar(pool, 'sp_actas_obtener_evaluacion', [idEvaluacion, idAcademia]);
 
     // Si no se encuentra, dejamos que el controlador de la ruta responda 404.
     if (!rows.length) return next();
@@ -50,18 +41,13 @@ const verificarPeriodoAbierto = async (req, res, next) => {
       return res.status(409).json({ error: 'La evaluación tiene un periodo inválido; revisa sus datos antes de editarla.' });
     }
 
-    const [cierres] = await pool.query(
-      `SELECT ac.IdCierre
-       FROM Auditoria_Cierres ac
-       INNER JOIN Ciclo ci ON ci.IdCiclo = ac.IdCiclo
-       WHERE ac.IdCiclo = ?
-         AND ac.IdCurso <=> ?
-         AND ac.Periodo = ?
-         AND ac.TipoEvaluacion = ?
-         AND ci.IdAcademia = ?
-       LIMIT 1`,
-      [evaluacion.IdCiclo, evaluacion.IdCurso, periodo, evaluacion.TipoEvaluacion, evaluacion.IdAcademia],
-    );
+    const [cierres] = await consultar(pool, 'sp_actas_obtener_cierre', [
+        evaluacion.IdCiclo,
+        evaluacion.IdCurso,
+        periodo,
+        evaluacion.TipoEvaluacion,
+        evaluacion.IdAcademia,
+      ]);
 
     if (cierres.length) {
       return res.status(403).json({

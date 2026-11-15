@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require("../config/db");
 const requiereRol = require("../middlewares/roles.middleware");
 const { bloquearIdentidades, rollbackSeguro } = require('../utils/validaciones');
+const { consultar, ejecutar } = require('../config/procedimientos');
 
 // ============================================================
 // UTILIDADES
@@ -22,9 +23,7 @@ const idPerfilValido = (valor) => {
 
 // ¿Queda algún perfil administrativo activo distinto del indicado?
 const existeOtroAdministradorActivo = async (idPerfilExcluido, connection = pool) => {
-  const [rows] = await connection.query(
-    "SELECT IdPerfil, Nombre FROM perfil WHERE EstadoRegistro = 1",
-  );
+  const [rows] = await consultar(connection, 'sp_perfil_listar_activos', []);
   return rows.some(
     (p) =>
       Number(p.IdPerfil) !== Number(idPerfilExcluido) &&
@@ -34,16 +33,7 @@ const existeOtroAdministradorActivo = async (idPerfilExcluido, connection = pool
 
 // Usuarios ACTIVOS vinculados al perfil (los que quedarían sin perfil válido).
 const contarUsuariosActivosDePerfil = async (idPerfil, connection = pool) => {
-  const [rows] = await connection.query(
-    `SELECT COUNT(*) AS total
-       FROM Usuario_Perfiles up
-       INNER JOIN Usuario u
-         ON u.IdUsuario = up.IdUsuario
-        AND u.EstadoRegistro = 1
-      WHERE up.IdPerfil = ?
-        AND up.EstadoRegistro = 1`,
-    [idPerfil],
-  );
+  const [rows] = await consultar(connection, 'sp_perfil_contar_usuario_perfil', [idPerfil]);
   return Number(rows[0]?.total || 0);
 };
 
@@ -51,9 +41,7 @@ const contarUsuariosActivosDePerfil = async (idPerfil, connection = pool) => {
 // Activos (1) e Inactivos (0); se ocultan los Eliminados (-1).
 router.get("/perfiles", requiereRol("Administrador"), async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      "SELECT * FROM perfil WHERE EstadoRegistro IN (0, 1) ORDER BY IdPerfil",
-    );
+    const [rows] = await consultar(pool, 'sp_perfil_listar_todos', []);
     res.json(rows);
   } catch (error) {
     console.error("Error en GET /perfiles:", error.message);
@@ -91,12 +79,9 @@ router.post("/perfiles", requiereRol("Administrador"), async (req, res) => {
     connection = await pool.getConnection();
     await connection.beginTransaction();
     await bloquearIdentidades(connection);
-    const [duplicados] = await connection.query('SELECT IdPerfil FROM perfil WHERE LOWER(TRIM(Nombre)) = LOWER(?) AND EstadoRegistro IN (0, 1) LIMIT 1 FOR UPDATE', [NombrePerfil.trim()]);
+    const [duplicados] = await consultar(connection, 'sp_perfil_bloquear_perfil_por_nombre_perfil', [NombrePerfil.trim()]);
     if (duplicados.length) { await connection.rollback(); return res.status(409).json({ error: 'Ya existe un perfil con ese nombre.' }); }
-    const [result] = await connection.query(
-      "INSERT INTO perfil (Nombre, Descripcion, EstadoRegistro) VALUES (?, ?, ?)",
-      [NombrePerfil.trim(), Descripcion.trim(), estado],
-    );
+    const [result] = await ejecutar(connection, 'sp_perfil_registrar_perfil', [NombrePerfil.trim(), Descripcion.trim(), estado]);
     if (result.affectedRows !== 1) {
       await connection.rollback();
       return res
@@ -169,10 +154,7 @@ router.put("/perfiles/:id", requiereRol("Administrador"), async (req, res) => {
     connection = await pool.getConnection();
     await connection.beginTransaction();
     await bloquearIdentidades(connection);
-    const [actuales] = await connection.query(
-      "SELECT IdPerfil, Nombre, EstadoRegistro FROM perfil WHERE IdPerfil = ? AND EstadoRegistro IN (0, 1)",
-      [idPerfil],
-    );
+    const [actuales] = await consultar(connection, 'sp_perfil_listar_perfil_por_id_perfil', [idPerfil]);
     if (!actuales.length) {
       await connection.rollback();
       return res.status(404).json({ error: "El perfil no existe o fue eliminado." });
@@ -182,7 +164,7 @@ router.put("/perfiles/:id", requiereRol("Administrador"), async (req, res) => {
     const nombreFinal = nombre === undefined ? actual.Nombre : nombre;
     const estadoFinal = estado === undefined ? Number(actual.EstadoRegistro) : estado;
     if (nombre !== undefined) {
-      const [duplicados] = await connection.query('SELECT IdPerfil FROM perfil WHERE LOWER(TRIM(Nombre)) = LOWER(?) AND IdPerfil <> ? AND EstadoRegistro IN (0, 1) LIMIT 1 FOR UPDATE', [nombre, idPerfil]);
+      const [duplicados] = await consultar(connection, 'sp_perfil_bloquear_perfil_por_nombre', [nombre, idPerfil]);
       if (duplicados.length) { await connection.rollback(); return res.status(409).json({ error: 'Ya existe otro perfil con ese nombre.' }); }
     }
 
@@ -220,26 +202,12 @@ router.put("/perfiles/:id", requiereRol("Administrador"), async (req, res) => {
       }
     }
 
-    const sets = [];
-    const params = [];
-    if (nombre !== undefined) {
-      sets.push("Nombre = ?");
-      params.push(nombre);
-    }
-    if (descripcion !== undefined) {
-      sets.push("Descripcion = ?");
-      params.push(descripcion);
-    }
-    if (estado !== undefined) {
-      sets.push("EstadoRegistro = ?");
-      params.push(estado);
-    }
-    params.push(idPerfil);
-
-    const [result] = await connection.query(
-      `UPDATE perfil SET ${sets.join(", ")} WHERE IdPerfil = ? AND EstadoRegistro IN (0, 1)`,
-      params,
-    );
+    const [result] = await ejecutar(connection, 'sp_perfil_actualizar', [
+      idPerfil,
+      nombre ?? null,
+      descripcion ?? null,
+      estado ?? null,
+    ]);
 
     await connection.commit();
     if (result.affectedRows === 0) {
@@ -272,10 +240,7 @@ router.delete("/perfiles/:id", requiereRol("Administrador"), async (req, res) =>
     connection = await pool.getConnection();
     await connection.beginTransaction();
     await bloquearIdentidades(connection);
-    const [actuales] = await connection.query(
-      "SELECT IdPerfil, Nombre, EstadoRegistro FROM perfil WHERE IdPerfil = ? AND EstadoRegistro IN (0, 1)",
-      [idPerfil],
-    );
+    const [actuales] = await consultar(connection, 'sp_perfil_listar_perfil_por_id_perfil', [idPerfil]);
     if (!actuales.length) {
       await connection.rollback();
       return res
@@ -303,10 +268,7 @@ router.delete("/perfiles/:id", requiereRol("Administrador"), async (req, res) =>
       });
     }
 
-    const [result] = await connection.query(
-      "UPDATE perfil SET EstadoRegistro = -1 WHERE IdPerfil = ? AND EstadoRegistro IN (0, 1)",
-      [idPerfil],
-    );
+    const [result] = await ejecutar(connection, 'sp_perfil_cambiar_estado_perfil', [idPerfil]);
     if (result.affectedRows !== 1) {
       await connection.rollback();
       return res

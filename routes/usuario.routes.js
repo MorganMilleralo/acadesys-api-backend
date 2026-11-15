@@ -9,13 +9,11 @@ const path = require("path");
 const fs = require("fs");
 const { validarTipoArchivo, generarNombreSeguro } = require("../utils/validar-foto");
 const { PROFILE_UPLOADS_DIR } = require("../config/storage");
+const { consultar, ejecutar } = require('../config/procedimientos');
 
 async function perfilActivo(connection, idPerfil) {
   if (!enteroPositivo(idPerfil)) return false;
-  const [perfiles] = await connection.query(
-    "SELECT IdPerfil FROM perfil WHERE IdPerfil = ? AND EstadoRegistro = 1 LIMIT 1 FOR SHARE",
-    [Number(idPerfil)]
-  );
+  const [perfiles] = await consultar(connection, 'sp_usuario_verificar_perfil', [Number(idPerfil)]);
   return perfiles.length === 1;
 }
 
@@ -36,16 +34,7 @@ const existeOtroAdminActivo = async (
   idAcademia,
   idUsuarioExcluido,
 ) => {
-  const [rows] = await connection.query(
-    `SELECT u.IdUsuario, p.Nombre AS NombrePerfil
-       FROM Usuario u
-       INNER JOIN Usuario_Perfiles up
-         ON up.IdUsuario = u.IdUsuario AND up.EstadoRegistro = 1
-       INNER JOIN perfil p
-         ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
-      WHERE u.IdAcademia = ? AND u.EstadoRegistro = 1 AND u.IdUsuario <> ?`,
-    [idAcademia, idUsuarioExcluido],
-  );
+  const [rows] = await consultar(connection, 'sp_usuario_listar_perfiles_usuario', [idAcademia, idUsuarioExcluido]);
   const administradores = new Set();
   for (const fila of rows) {
     if (esPerfilAdministrativo(fila.NombrePerfil)) {
@@ -68,16 +57,22 @@ const responderError = (res, error, contexto) => {
     .json({ error: "No se pudo completar la operación de usuarios." });
 };
 
-// Proyección común del usuario con su perfil ACTIVO (si existe).
-const SELECT_USUARIO = `
-  SELECT
-    u.IdUsuario, u.DNI, u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno,
-    CONCAT(u.Nombres, ' ', COALESCE(u.ApellidoPaterno, ''), ' ', COALESCE(u.ApellidoMaterno, '')) AS NombreCompleto,
-    u.CorreoElectronico, u.CorreoElectronico AS Correo, u.Celular, u.CodigoUsuario, u.EstadoRegistro,
-    up.IdPerfil, p.Nombre AS NombrePerfil, p.Nombre AS Perfil, p.EstadoRegistro AS EstadoPerfil
-  FROM Usuario u
-  LEFT JOIN Usuario_Perfiles up ON u.IdUsuario = up.IdUsuario AND up.EstadoRegistro = 1
-  LEFT JOIN perfil p ON up.IdPerfil = p.IdPerfil`;
+// Orden de los campos que acepta sp_usuario_actualizar_datos.
+const CAMPOS_ACTUALIZABLES = [
+  "DNI", "Nombres", "ApellidoPaterno", "ApellidoMaterno", "Celular",
+  "CorreoElectronico", "Clave", "EstadoRegistro", "FotoUrl",
+];
+
+// Convierte { campo: valor } en los parámetros de sp_usuario_actualizar_datos:
+// por cada campo, un indicador (1 = cambiar) y su valor.
+function parametrosActualizacion(idUsuario, idAcademia, soloActivos, cambios) {
+  const params = [idUsuario, idAcademia, soloActivos ? 1 : 0];
+  for (const campo of CAMPOS_ACTUALIZABLES) {
+    const presente = Object.prototype.hasOwnProperty.call(cambios, campo);
+    params.push(presente ? 1 : 0, presente ? cambios[campo] : null);
+  }
+  return params;
+}
 
 // La columna Usuario.FotoUrl es opcional: puede no existir todavía en una BD
 // sin la migración 03_usuario_fotourl.sql. Se detecta una sola vez y se
@@ -86,9 +81,7 @@ let fotoUrlDisponibleCache = null;
 async function columnaFotoUrlDisponible() {
   if (fotoUrlDisponibleCache !== null) return fotoUrlDisponibleCache;
   try {
-    const [rows] = await pool.query(
-      "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'Usuario' AND COLUMN_NAME = 'FotoUrl' LIMIT 1",
-    );
+    const [rows] = await consultar(pool, 'sp_usuario_verificar_columna_foto', []);
     fotoUrlDisponibleCache = rows.length === 1;
   } catch {
     // No cachear el fallo: un error transitorio no debe deshabilitar la foto
@@ -100,10 +93,7 @@ async function columnaFotoUrlDisponible() {
 
 async function leerFotoUrl(idUsuario) {
   if (!(await columnaFotoUrlDisponible())) return null;
-  const [[fila]] = await pool.query(
-    "SELECT FotoUrl FROM Usuario WHERE IdUsuario = ? LIMIT 1",
-    [idUsuario],
-  );
+  const [[fila]] = await consultar(pool, 'sp_usuario_obtener_foto', [idUsuario]);
   return fila?.FotoUrl ?? null;
 }
 
@@ -129,7 +119,7 @@ const TIPOS_FOTO = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
 async function borrarFotoGuardada(fotoUrl) {
   if (!fotoUrl) return;
   try {
-    await pool.query("DELETE FROM FotoPerfil WHERE NombreArchivo = ?", [path.basename(String(fotoUrl))]);
+    await ejecutar(pool, 'sp_usuario_eliminar_foto', [path.basename(String(fotoUrl))]);
   } catch (error) {
     if (error?.code !== "ER_NO_SUCH_TABLE") console.error("No se pudo eliminar la foto guardada:", error.message);
   }
@@ -172,7 +162,7 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
     connection = await pool.getConnection();
     await connection.beginTransaction();
     await bloquearIdentidades(connection);
-    const [[academia]] = await connection.query('SELECT IdAcademia FROM Academia WHERE IdAcademia = ?', [idAcademia]);
+    const [[academia]] = await consultar(connection, 'sp_usuario_listar_academia', [idAcademia]);
     if (!academia) { await connection.rollback(); return res.status(401).json({ error: 'Academia de sesión inválida.' }); }
     if (await usuarioDuplicado(connection, validado.datos)) {
       await connection.rollback();
@@ -200,21 +190,14 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
       const candidato = intento === 0
         ? codigoUsuario
         : `${baseCodigo}-${String(Date.now() + intento).slice(-6)}`;
-      const [existeCodigo] = await connection.query(
-        "SELECT IdUsuario FROM Usuario WHERE CodigoUsuario = ? LIMIT 1",
-        [candidato]
-      );
+      const [existeCodigo] = await consultar(connection, 'sp_usuario_obtener_usuario_por_codigo_usuario', [candidato]);
       if (existeCodigo.length === 0) {
         codigoUsuario = candidato;
         break;
       }
     }
 
-    const [resultUsuario] = await connection.query(
-      `INSERT INTO Usuario
-                (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno, Celular, CorreoElectronico, Clave, IdAcademia, FechaCreacion, EstadoRegistro)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), 1)`,
-      [
+    const [resultUsuario] = await ejecutar(connection, 'sp_usuario_registrar_usuario', [
         codigoUsuario,
         DNI || null,
         Nombres,
@@ -224,15 +207,11 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
         CorreoElectronico || null,
         claveHasheada,
         idAcademia,
-      ],
-    );
+      ]);
 
     const idGenerado = resultUsuario.insertId;
 
-    await connection.query(
-      "INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)",
-      [idGenerado, idPerfilSolicitado],
-    );
+    await ejecutar(connection, 'sp_usuario_registrar_usuario_perfil', [idGenerado, idPerfilSolicitado]);
 
     await connection.commit();
     res.status(201).json({
@@ -251,12 +230,7 @@ router.post("/usuarios", requiereRol("Administrador"), async (req, res) => {
 // 2. LISTAR USUARIOS (SOLO Administrador; filtra por academia; sin hashes)
 router.get("/usuarios", requiereRol("Administrador"), async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      `${SELECT_USUARIO}
-             WHERE u.EstadoRegistro IN (0, 1) AND u.IdAcademia = ?
-             ORDER BY u.IdUsuario DESC`,
-      [req.usuario.idAcademia],
-    );
+    const [rows] = await consultar(pool, 'sp_usuario_listar_usuario_todos', [req.usuario.idAcademia]);
     res.json(rows);
   } catch (error) {
     console.error("Error en GET /usuarios:", error.message);
@@ -273,21 +247,11 @@ router.get(
   requiereRol("Administrador", "Docente", "Tutor de Aula", "Tutor"),
   async (req, res) => {
     try {
-      const [rows] = await pool.query(
-        `SELECT
-             u.IdUsuario,
-             CONCAT(u.Nombres, ' ', COALESCE(u.ApellidoPaterno, ''), ' ', COALESCE(u.ApellidoMaterno, '')) AS NombreCompleto,
-             p.Nombre AS Perfil
-           FROM Usuario u
-           INNER JOIN Usuario_Perfiles up
-             ON up.IdUsuario = u.IdUsuario AND up.EstadoRegistro = 1
-           INNER JOIN perfil p
-             ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
-           WHERE u.EstadoRegistro = 1 AND u.IdAcademia = ?
-             AND (? = 1 OR u.IdUsuario = ?)
-           ORDER BY u.Nombres ASC, u.ApellidoPaterno ASC`,
-        [req.usuario.idAcademia, esPerfilAdministrativo(req.usuario.rol) ? 1 : 0, req.usuario.id],
-      );
+      const [rows] = await consultar(pool, 'sp_usuario_listar_usuario_por_rol', [
+          req.usuario.idAcademia,
+          esPerfilAdministrativo(req.usuario.rol) ? 1 : 0,
+          req.usuario.id,
+        ]);
       res.json(rows);
     } catch (error) {
       console.error("Error en GET /usuarios/directorio:", error.message);
@@ -307,12 +271,7 @@ router.get("/usuarios/me", async (req, res) => {
         .json({ error: "Sesión inválida. Inicia sesión nuevamente." });
     }
 
-    const [rows] = await pool.query(
-      `${SELECT_USUARIO}
-             WHERE u.IdUsuario = ? AND u.EstadoRegistro = 1
-             LIMIT 1`,
-      [idUsuario],
-    );
+    const [rows] = await consultar(pool, 'sp_usuario_obtener_detalle', [idUsuario]);
 
     if (!rows.length) {
       return res.status(404).json({ error: "No se encontró tu usuario." });
@@ -392,11 +351,9 @@ router.put("/usuarios/me", async (req, res) => {
     }
     const { Nombres, DNI, CorreoElectronico, Celular } = validado.datos;
 
-    const campos = [];
-    const params = [];
+    const cambios = {};
     const asignar = (columna, valor) => {
-      campos.push(`${columna}=?`);
-      params.push(valor);
+      cambios[columna] = valor;
     };
 
     // Persistir la nueva foto junto con los datos personales (misma transacción).
@@ -434,7 +391,7 @@ router.put("/usuarios/me", async (req, res) => {
     }
 
     // Verificar que al menos haya un cambio (datos o foto)
-    const hayCambios = campos.length > 0 || req.body?.fotoBase64 !== undefined;
+    const hayCambios = Object.keys(cambios).length > 0 || req.body?.fotoBase64 !== undefined;
     if (!hayCambios) {
       return res
         .status(400)
@@ -444,10 +401,7 @@ router.put("/usuarios/me", async (req, res) => {
     connection = await pool.getConnection();
     await connection.beginTransaction();
     await bloquearIdentidades(connection);
-    const consultaActual = fotoUrl
-      ? 'SELECT DNI, CorreoElectronico, FotoUrl FROM Usuario WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1 FOR UPDATE'
-      : 'SELECT DNI, CorreoElectronico FROM Usuario WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1 FOR UPDATE';
-    const [[actual]] = await connection.query(consultaActual, [idUsuario, req.usuario.idAcademia]);
+    const [[actual]] = await consultar(connection, 'sp_usuario_bloquear_datos_actuales', [idUsuario, req.usuario.idAcademia]);
     if (!actual) { await connection.rollback(); borrarArchivoFoto(fotoUrl); return res.status(404).json({ error: 'No se encontró tu usuario.' }); }
     fotoAnteriorUrl = actual.FotoUrl || null;
     if (await usuarioDuplicado(connection, validado.datos, idUsuario, actual)) {
@@ -455,24 +409,22 @@ router.put("/usuarios/me", async (req, res) => {
       borrarArchivoFoto(fotoUrl);
       return res.status(409).json({ error: 'Ya existe un usuario con ese DNI o correo electrónico.' });
     }
-    params.push(idUsuario, req.usuario.idAcademia);
-    await connection.query(
-      `UPDATE Usuario SET ${campos.join(", ")} WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro = 1`,
-      params,
+    await ejecutar(
+      connection,
+      'sp_usuario_actualizar_datos',
+      parametrosActualizacion(idUsuario, req.usuario.idAcademia, true, cambios),
     );
     if (fotoNueva) {
-      await connection.query(
-        "INSERT INTO FotoPerfil (NombreArchivo, IdUsuario, Contenido, TipoMime, TamanoBytes) VALUES (?, ?, ?, ?, ?)",
-        [fotoNueva.nombreArchivo, idUsuario, fotoNueva.buffer, fotoNueva.tipoMime, fotoNueva.buffer.length],
-      );
+      await ejecutar(connection, 'sp_usuario_registrar_foto', [
+          fotoNueva.nombreArchivo,
+          idUsuario,
+          fotoNueva.buffer,
+          fotoNueva.tipoMime,
+          fotoNueva.buffer.length,
+        ]);
     }
 
-    const [rows] = await connection.query(
-      `${SELECT_USUARIO}
-             WHERE u.IdUsuario = ? AND u.EstadoRegistro = 1
-             LIMIT 1`,
-      [idUsuario],
-    );
+    const [rows] = await consultar(connection, 'sp_usuario_obtener_detalle', [idUsuario]);
     if (!rows.length) {
       await connection.rollback();
       borrarArchivoFoto(fotoUrl);
@@ -540,10 +492,7 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
     const { EstadoRegistro, IdPerfil } = req.body || {};
 
     // El usuario objetivo debe pertenecer a la academia del administrador.
-    const [objetivoRows] = await connection.query(
-      "SELECT IdUsuario, EstadoRegistro, DNI, CorreoElectronico FROM Usuario WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro IN (0, 1) FOR UPDATE",
-      [idUsuarioObjetivo, req.usuario.idAcademia],
-    );
+    const [objetivoRows] = await consultar(connection, 'sp_usuario_bloquear_usuario', [idUsuarioObjetivo, req.usuario.idAcademia]);
     if (!objetivoRows.length) {
       await connection.rollback();
       return res
@@ -557,14 +506,7 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
     }
 
     // ¿El usuario objetivo es administrador ACTIVO actualmente?
-    const [perfilActualRows] = await connection.query(
-      `SELECT p.Nombre AS NombrePerfil
-         FROM Usuario_Perfiles up
-         INNER JOIN perfil p ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
-        WHERE up.IdUsuario = ? AND up.EstadoRegistro = 1
-        FOR SHARE`,
-      [idUsuarioObjetivo],
-    );
+    const [perfilActualRows] = await consultar(connection, 'sp_usuario_listar_usuario_perfil', [idUsuarioObjetivo]);
     const esAdminActual = perfilActualRows.some((perfil) => esPerfilAdministrativo(perfil.NombrePerfil));
 
     // Validar IdPerfil (existente y activo) antes de tocar al usuario.
@@ -577,10 +519,7 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
           .status(400)
           .json({ error: "El IdPerfil enviado no es un identificador válido." });
       }
-      const [perfilValido] = await connection.query(
-        "SELECT IdPerfil, Nombre FROM perfil WHERE IdPerfil = ? AND EstadoRegistro = 1 LIMIT 1 FOR SHARE",
-        [idPerfilNuevo],
-      );
+      const [perfilValido] = await consultar(connection, 'sp_usuario_obtener_perfil', [idPerfilNuevo]);
       if (!perfilValido.length) {
         await connection.rollback();
         return res
@@ -633,12 +572,10 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
       }
     }
 
-    // UPDATE PARCIAL: solo se modifican los campos realmente enviados.
-    const campos = [];
-    const params = [];
+    // Actualización parcial: solo se modifican los campos realmente enviados.
+    const cambios = {};
     const asignar = (columna, valor) => {
-      campos.push(`${columna}=?`);
-      params.push(valor);
+      cambios[columna] = valor;
     };
 
     if (DNI !== undefined) {
@@ -675,45 +612,28 @@ router.put("/usuarios/:id", requiereRol("Administrador"), async (req, res) => {
       asignar("EstadoRegistro", estadoNum);
     }
 
-    if (campos.length === 0 && !idPerfilNuevo) {
+    const hayCambios = Object.keys(cambios).length > 0;
+    if (!hayCambios && !idPerfilNuevo) {
       await connection.rollback();
       return res
         .status(400)
         .json({ error: "No se enviaron cambios para el usuario." });
     }
 
-    if (campos.length > 0) {
-      params.push(idUsuarioObjetivo, req.usuario.idAcademia);
-      // La existencia ya fue verificada; affectedRows=0 solo significa que los
+    if (hayCambios) {
+      // La existencia ya fue verificada; affectedRows = 0 solo significa que los
       // valores enviados eran idénticos (no es un error).
-      await connection.query(
-        `UPDATE Usuario SET ${campos.join(", ")} WHERE IdUsuario = ? AND IdAcademia = ?`,
-        params,
+      await ejecutar(
+        connection,
+        'sp_usuario_actualizar_datos',
+        parametrosActualizacion(idUsuarioObjetivo, req.usuario.idAcademia, false, cambios),
       );
     }
 
     if (idPerfilNuevo) {
-      const [existentes] = await connection.query(
-        "SELECT IdUsuarioPerfil FROM Usuario_Perfiles WHERE IdUsuario = ? AND IdPerfil = ? ORDER BY IdUsuarioPerfil LIMIT 1 FOR UPDATE",
-        [idUsuarioObjetivo, idPerfilNuevo],
-      );
-      // El usuario esta bloqueado desde el inicio de la transaccion. Se conserva
-      // el historial y se reactiva una sola relacion, nunca todas las anteriores.
-      await connection.query(
-        "UPDATE Usuario_Perfiles SET EstadoRegistro = 0 WHERE IdUsuario = ?",
-        [idUsuarioObjetivo],
-      );
-      if (existentes.length > 0) {
-        await connection.query(
-          "UPDATE Usuario_Perfiles SET EstadoRegistro = 1 WHERE IdUsuarioPerfil = ?",
-          [existentes[0].IdUsuarioPerfil],
-        );
-      } else {
-        await connection.query(
-          "INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro) VALUES (?, ?, 1)",
-          [idUsuarioObjetivo, idPerfilNuevo],
-        );
-      }
+      // Se conserva el historial: se desactivan los perfiles anteriores y se
+      // reactiva (o crea) solo el perfil indicado.
+      await ejecutar(connection, 'sp_usuario_asignar_perfil', [idUsuarioObjetivo, idPerfilNuevo]);
     }
 
     await connection.commit();
@@ -744,15 +664,7 @@ router.delete(
       await connection.beginTransaction();
       await bloquearIdentidades(connection);
 
-      const [objetivoRows] = await connection.query(
-        `SELECT u.IdUsuario, u.EstadoRegistro, p.Nombre AS NombrePerfil
-           FROM Usuario u
-           LEFT JOIN Usuario_Perfiles up ON up.IdUsuario = u.IdUsuario AND up.EstadoRegistro = 1
-           LEFT JOIN perfil p ON p.IdPerfil = up.IdPerfil AND p.EstadoRegistro = 1
-          WHERE u.IdUsuario = ? AND u.IdAcademia = ?
-          LIMIT 1`,
-        [idUsuarioObjetivo, req.usuario.idAcademia],
-      );
+      const [objetivoRows] = await consultar(connection, 'sp_usuario_obtener_estado_perfil', [idUsuarioObjetivo, req.usuario.idAcademia]);
       if (!objetivoRows.length) {
         await connection.rollback();
         return res
@@ -775,10 +687,7 @@ router.delete(
           .json({ error: "No puedes eliminar al último administrador activo." });
       }
 
-      const [result] = await connection.query(
-        "UPDATE Usuario SET EstadoRegistro = -1 WHERE IdUsuario = ? AND IdAcademia = ? AND EstadoRegistro IN (0, 1)",
-        [idUsuarioObjetivo, req.usuario.idAcademia],
-      );
+      const [result] = await ejecutar(connection, 'sp_usuario_cambiar_estado_usuario', [idUsuarioObjetivo, req.usuario.idAcademia]);
 
       if (result.affectedRows === 0) {
         await connection.rollback();
@@ -787,10 +696,7 @@ router.delete(
           .json({ error: "Usuario no encontrado o ya eliminado." });
       }
 
-      await connection.query(
-        "UPDATE Usuario_Perfiles SET EstadoRegistro = -1 WHERE IdUsuario = ?",
-        [idUsuarioObjetivo],
-      );
+      await ejecutar(connection, 'sp_usuario_cambiar_estado_usuario_perfil', [idUsuarioObjetivo]);
 
       await connection.commit();
       res.json({ message: "Usuario eliminado lógicamente con éxito (-1)" });
@@ -828,20 +734,14 @@ router.delete(
       await connection.beginTransaction();
 
       // Verificar que el usuario existe
-      const [[usuario]] = await connection.query(
-        'SELECT IdUsuario, FotoUrl FROM Usuario WHERE IdUsuario = ? AND EstadoRegistro = 1',
-        [idUsuario],
-      );
+      const [[usuario]] = await consultar(connection, 'sp_usuario_listar_foto_activa', [idUsuario]);
       if (!usuario) {
         await connection.rollback();
         return res.status(404).json({ error: 'No se encontró tu usuario.' });
       }
 
       // Quitar referencia de foto en la BD (poner NULL)
-      await connection.query(
-        'UPDATE Usuario SET FotoUrl = NULL WHERE IdUsuario = ? AND EstadoRegistro = 1',
-        [idUsuario],
-      );
+      await ejecutar(connection, 'sp_usuario_actualizar_usuario', [idUsuario]);
 
       await connection.commit();
 

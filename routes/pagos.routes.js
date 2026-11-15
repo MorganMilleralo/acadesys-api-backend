@@ -5,11 +5,10 @@ const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
 const { idPositivo, rollbackSeguro } = require('../utils/validaciones');
+const { consultar, ejecutar } = require('../config/procedimientos');
 const {
   normalizarPeriodoMensualidad,
   fechaISOValida,
-  normalizarReferenciaPago,
-  normalizarUrlComprobante,
   esEstadoPago,
 } = require('../utils/pagos');
 
@@ -19,12 +18,7 @@ const idActor = (req) => idPositivo(req.usuario?.idUsuario ?? req.usuario?.id);
 const idAcademiaActor = (req) => idPositivo(req.usuario?.idAcademia);
 
 async function auditarPago(connection, datos) {
-  await connection.query(
-    `INSERT INTO PagoAuditoria
-      (IdPago, IdComprobante, IdUsuarioActor, IdAcademia, Evento,
-       EstadoAnterior, EstadoNuevo, MontoAnterior, MontoNuevo, Motivo, FechaCreacion)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-    [
+  await ejecutar(connection, 'sp_pagos_registrar_auditoria_pago', [
       datos.idPago,
       datos.idComprobante ?? null,
       datos.idUsuarioActor ?? null,
@@ -35,8 +29,7 @@ async function auditarPago(connection, datos) {
       datos.montoAnterior ?? null,
       datos.montoNuevo ?? null,
       datos.motivo ?? null,
-    ],
-  );
+    ]);
 }
 
 // Monitor administrativo. Mantiene los alias PascalCase que consume la vista actual.
@@ -47,31 +40,7 @@ router.get('/pagos/ciclo/:idCiclo', requiereRol('Administrador'), async (req, re
   if (!idAcademia) return res.status(401).json({ error: 'El administrador no tiene una academia válida.' });
 
   try {
-    const [rows] = await pool.query(
-      `SELECT p.IdPago, u.IdUsuario, u.CodigoUsuario,
-              CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, NULLIF(u.ApellidoMaterno, '')) AS Alumno,
-              c.Nombre AS Ciclo, p.Mes, p.Monto,
-              COALESCE(p.Estado, 'Sin registro') AS Estado, p.FechaPago,
-              p.FechaVencimiento,
-              pc.IdComprobante, pc.Referencia AS ReferenciaComprobante,
-              pc.UrlComprobante, pc.EstadoRevision AS EstadoRevisionComprobante,
-              pc.MotivoRevision, pc.FechaCreacion AS FechaSolicitudComprobante
-       FROM Matricula m
-       INNER JOIN Usuario u ON m.IdUsuario = u.IdUsuario
-       INNER JOIN Ciclo c ON m.IdCiclo = c.IdCiclo AND c.IdAcademia = u.IdAcademia
-       LEFT JOIN PagosMensualidad p
-         ON p.IdUsuario = m.IdUsuario AND p.IdCiclo = m.IdCiclo AND p.EstadoRegistro = 1
-       LEFT JOIN PagoComprobante pc ON pc.IdComprobante = (
-         SELECT MAX(pc2.IdComprobante)
-         FROM PagoComprobante pc2
-         WHERE pc2.IdPago = p.IdPago AND pc2.IdAcademia = u.IdAcademia AND pc2.EstadoRegistro = 1
-       )
-       WHERE m.IdCiclo = ? AND m.EstadoRegistro = 1
-         AND u.IdAcademia = ? AND u.EstadoRegistro = 1
-         AND c.EstadoRegistro IN (0, 1)
-       ORDER BY u.ApellidoPaterno ASC, u.Nombres ASC, p.IdPago ASC`,
-      [idCiclo, idAcademia],
-    );
+    const [rows] = await consultar(pool, 'sp_pagos_listar_matricula', [idCiclo, idAcademia]);
     res.json(rows);
   } catch (error) {
     console.error('Error en GET /api/pagos/ciclo/:idCiclo:', error?.name || 'Error');
@@ -98,11 +67,7 @@ router.post('/pagos/ciclo/:idCiclo/mensualidades', requiereRol('Administrador'),
     connection = await pool.getConnection();
     await connection.beginTransaction();
 
-    const [ciclos] = await connection.query(
-      `SELECT IdCiclo, IdAcademia, Nombre, PrecioMensual
-       FROM Ciclo WHERE IdCiclo = ? AND IdAcademia = ? LIMIT 1 FOR UPDATE`,
-      [idCiclo, idAcademia],
-    );
+    const [ciclos] = await consultar(connection, 'sp_pagos_bloquear_ciclo', [idCiclo, idAcademia]);
     if (!ciclos.length) {
       await connection.rollback();
       return res.status(404).json({ error: 'El ciclo no existe en tu academia.' });
@@ -114,15 +79,7 @@ router.post('/pagos/ciclo/:idCiclo/mensualidades', requiereRol('Administrador'),
       return res.status(409).json({ code: 'PRECIO_MENSUAL_NO_CONFIGURADO', error: 'Configura un precio mensual válido para este ciclo antes de generar cuotas.' });
     }
 
-    const [matriculas] = await connection.query(
-      `SELECT m.IdUsuario
-       FROM Matricula m
-       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-       WHERE m.IdCiclo = ? AND m.EstadoRegistro = 1
-         AND u.IdAcademia = ? AND u.EstadoRegistro = 1
-       ORDER BY m.IdUsuario ASC FOR UPDATE`,
-      [idCiclo, idAcademia],
-    );
+    const [matriculas] = await consultar(connection, 'sp_pagos_bloquear_matricula', [idCiclo, idAcademia]);
     const idUsuarios = [...new Set(matriculas.map((row) => Number(row.IdUsuario)).filter((id) => Number.isSafeInteger(id) && id > 0))];
     if (idUsuarios.length === 0) {
       await connection.rollback();
@@ -132,24 +89,13 @@ router.post('/pagos/ciclo/:idCiclo/mensualidades', requiereRol('Administrador'),
     let creadas = 0;
     let existentes = 0;
     for (const idUsuario of idUsuarios) {
-      const [pagosExistentes] = await connection.query(
-        `SELECT IdPago, Estado, Monto
-         FROM PagosMensualidad
-         WHERE IdUsuario = ? AND IdCiclo = ? AND Mes = ? AND EstadoRegistro = 1
-         ORDER BY IdPago ASC LIMIT 1 FOR UPDATE`,
-        [idUsuario, idCiclo, periodo],
-      );
+      const [pagosExistentes] = await consultar(connection, 'sp_pagos_bloquear_cuota_por_id_usuario', [idUsuario, idCiclo, periodo]);
       if (pagosExistentes.length) {
         existentes += 1;
         continue;
       }
 
-      const [insertado] = await connection.query(
-        `INSERT INTO PagosMensualidad
-          (IdUsuario, IdCiclo, Mes, Monto, Estado, FechaPago, FechaVencimiento, EstadoRegistro)
-         VALUES (?, ?, ?, ?, 'Pendiente', NULL, ?, 1)`,
-        [idUsuario, idCiclo, periodo, monto, fechaVencimiento],
-      );
+      const [insertado] = await ejecutar(connection, 'sp_pagos_registrar_cuota', [idUsuario, idCiclo, periodo, monto, fechaVencimiento]);
       await auditarPago(connection, {
         idPago: insertado.insertId,
         idUsuarioActor: idAdministrador,
@@ -193,21 +139,7 @@ router.get('/pagos/comprobantes', requiereRol('Administrador'), async (req, res)
   if (!estadosRevision.has(estado)) return res.status(400).json({ error: 'El filtro de comprobante no es válido.' });
 
   try {
-    const [rows] = await pool.query(
-      `SELECT pc.IdComprobante, pc.IdPago, pc.IdUsuario, pc.Referencia, pc.UrlComprobante,
-              pc.EstadoRevision, pc.MotivoRevision, pc.FechaCreacion, pc.FechaRevision,
-              p.IdCiclo, c.Nombre AS Ciclo, p.Mes, p.Monto, p.Estado AS EstadoPago,
-              u.CodigoUsuario,
-              CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, NULLIF(u.ApellidoMaterno, '')) AS Alumno
-       FROM PagoComprobante pc
-       INNER JOIN PagosMensualidad p ON p.IdPago = pc.IdPago AND p.IdUsuario = pc.IdUsuario
-       INNER JOIN Usuario u ON u.IdUsuario = pc.IdUsuario AND u.IdAcademia = pc.IdAcademia
-       INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = pc.IdAcademia
-       WHERE pc.IdAcademia = ? AND pc.EstadoRevision = ? AND pc.EstadoRegistro = 1
-         AND p.EstadoRegistro = 1 AND u.EstadoRegistro = 1
-       ORDER BY pc.FechaCreacion ASC, pc.IdComprobante ASC`,
-      [idAcademia, estado],
-    );
+    const [rows] = await consultar(pool, 'sp_pagos_listar_comprobante', [idAcademia, estado]);
     res.json(rows);
   } catch (error) {
     console.error('Error en GET /api/pagos/comprobantes:', error?.name || 'Error');
@@ -232,18 +164,7 @@ router.put('/pagos/comprobantes/:idComprobante/estado', requiereRol('Administrad
   try {
     connection = await pool.getConnection();
     await connection.beginTransaction();
-    const [rows] = await connection.query(
-      `SELECT pc.IdComprobante, pc.IdPago, pc.IdUsuario, pc.EstadoRevision,
-              p.Estado AS EstadoPago, p.Monto, p.FechaPago, u.IdAcademia
-       FROM PagoComprobante pc
-       INNER JOIN PagosMensualidad p ON p.IdPago = pc.IdPago AND p.IdUsuario = pc.IdUsuario
-       INNER JOIN Usuario u ON u.IdUsuario = pc.IdUsuario AND u.IdAcademia = pc.IdAcademia
-       INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = pc.IdAcademia
-       WHERE pc.IdComprobante = ? AND pc.IdAcademia = ? AND pc.EstadoRegistro = 1
-         AND p.EstadoRegistro = 1 AND u.EstadoRegistro = 1
-       LIMIT 1 FOR UPDATE`,
-      [idComprobante, idAcademia],
-    );
+    const [rows] = await consultar(connection, 'sp_pagos_bloquear_comprobante_por_id_comprobante', [idComprobante, idAcademia]);
     if (!rows.length) {
       await connection.rollback();
       return res.status(404).json({ error: 'El comprobante no existe en tu academia.' });
@@ -259,21 +180,16 @@ router.put('/pagos/comprobantes/:idComprobante/estado', requiereRol('Administrad
     }
 
     const nuevoEstado = estado === 'APROBADO' ? 'APROBADO' : 'RECHAZADO';
-    await connection.query(
-      `UPDATE PagoComprobante
-       SET EstadoRevision = ?, MotivoRevision = ?, FechaRevision = NOW(), IdRevisadoPor = ?
-       WHERE IdComprobante = ? AND IdAcademia = ? AND EstadoRevision = 'EN_REVISION' AND EstadoRegistro = 1`,
-      [nuevoEstado, estado === 'RECHAZADO' ? motivo : null, idAdministrador, idComprobante, idAcademia],
-    );
+    await ejecutar(connection, 'sp_pagos_actualizar_estado_comprobante', [
+        nuevoEstado,
+        estado === 'RECHAZADO' ? motivo : null,
+        idAdministrador,
+        idComprobante,
+        idAcademia,
+      ]);
 
     if (estado === 'APROBADO') {
-      await connection.query(
-        `UPDATE PagosMensualidad p
-         INNER JOIN Usuario u ON u.IdUsuario = p.IdUsuario
-         SET p.Estado = 'Pagado', p.FechaPago = COALESCE(p.FechaPago, NOW())
-         WHERE p.IdPago = ? AND p.IdUsuario = ? AND u.IdAcademia = ? AND p.EstadoRegistro = 1`,
-        [comprobante.IdPago, comprobante.IdUsuario, idAcademia],
-      );
+      await ejecutar(connection, 'sp_pagos_marcar_cuota_pagada', [comprobante.IdPago, comprobante.IdUsuario, idAcademia]);
     }
 
     await auditarPago(connection, {
@@ -322,15 +238,7 @@ router.put('/pagos/:id/estado', requiereRol('Administrador'), async (req, res) =
   try {
     connection = await pool.getConnection();
     await connection.beginTransaction();
-    const [pagos] = await connection.query(
-      `SELECT p.IdPago, p.Estado, p.Mes, p.Monto, p.FechaPago, p.IdUsuario
-       FROM PagosMensualidad p
-       INNER JOIN Usuario u ON p.IdUsuario = u.IdUsuario
-       INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = u.IdAcademia
-       WHERE p.IdPago = ? AND u.IdAcademia = ? AND p.EstadoRegistro = 1 AND u.EstadoRegistro = 1
-       LIMIT 1 FOR UPDATE`,
-      [idPago, idAcademia],
-    );
+    const [pagos] = await consultar(connection, 'sp_pagos_bloquear_cuota_por_id_pago', [idPago, idAcademia]);
     if (!pagos.length) {
       await connection.rollback();
       return res.status(404).json({ error: 'Registro de pago no encontrado en tu academia.' });
@@ -357,12 +265,7 @@ router.put('/pagos/:id/estado', requiereRol('Administrador'), async (req, res) =
       });
     }
 
-    const [comprobantes] = await connection.query(
-      `SELECT IdComprobante FROM PagoComprobante
-       WHERE IdPago = ? AND IdAcademia = ? AND EstadoRevision = 'EN_REVISION' AND EstadoRegistro = 1
-       LIMIT 1 FOR UPDATE`,
-      [idPago, idAcademia],
-    );
+    const [comprobantes] = await consultar(connection, 'sp_pagos_bloquear_comprobante_por_id_pago', [idPago, idAcademia]);
     if (comprobantes.length) {
       await connection.rollback();
       return res.status(409).json({ error: 'Existe un comprobante en revisión; resuélvelo antes de cambiar el estado del pago.' });
@@ -376,13 +279,7 @@ router.put('/pagos/:id/estado', requiereRol('Administrador'), async (req, res) =
       return res.status(409).json({ error: 'El pago ya está marcado como moroso.' });
     }
 
-    await connection.query(
-      `UPDATE PagosMensualidad p
-       INNER JOIN Usuario u ON p.IdUsuario = u.IdUsuario
-       SET p.Estado = 'Moroso', p.FechaPago = NULL
-       WHERE p.IdPago = ? AND u.IdAcademia = ? AND p.EstadoRegistro = 1`,
-      [idPago, idAcademia],
-    );
+    await ejecutar(connection, 'sp_pagos_marcar_cuota_morosa', [idPago, idAcademia]);
     await auditarPago(connection, {
       idPago,
       idUsuarioActor: idAdministrador,

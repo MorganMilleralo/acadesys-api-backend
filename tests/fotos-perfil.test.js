@@ -83,7 +83,7 @@ test('subir foto la guarda en FotoPerfil en la transacción y borra la anterior 
   assert.match(ins.params[0], /^foto-perfil-10-[a-z0-9]+-[a-f0-9]{16}\.png$/);
   assert.equal(ins.params[1], 10); assert.ok(ins.params[2].equals(png)); assert.equal(ins.params[3], 'image/png');
   const upd = vistas.find(v => /^UPDATE Usuario SET/.test(v.sql));
-  assert.equal(upd.params[0], '/uploads/perfiles/' + ins.params[0]);
+  assert.ok(upd.params.includes('/uploads/perfiles/' + ins.params[0]));
   const iIns = vistas.indexOf(ins);
   const del = vistas.findIndex(v => /^DELETE FROM FotoPerfil/.test(v.sql));
   assert.ok(del > iIns); assert.deepEqual(vistas[del].params, ['foto-perfil-10-old-aaaaaaaaaaaaaaaa.jpg']);

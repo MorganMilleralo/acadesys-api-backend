@@ -17,6 +17,7 @@ const {
 } = require("../utils/reglas-matricula");
 const { obtenerPrecioInscripcion } = require("../utils/pagos");
 const autenticacionOpcional = require("../middlewares/autenticacion-opcional.middleware");
+const { consultar, ejecutar } = require('../config/procedimientos');
 const {
   validarAutorizacionReinscripcion,
 } = require("../utils/autorizacion-reinscripcion");
@@ -32,21 +33,6 @@ const API_PUBLIC_URL = (
 ).replace(/\/+$/, "");
 const PROPOSITO_RESET = "reinscripcion-password-reset";
 
-const UNIVERSIDADES = new Set([
-  "UNMSM",
-  "UNI",
-  "PUCP",
-  "UNFV",
-  "UNAC",
-  "UNT",
-  "UNALM",
-  "UPCH",
-  "ULIMA",
-  "UPC",
-  "USMP",
-  "UTP",
-  "Preuniversitario",
-]);
 
 function normalizarCorreo(correo = "") {
   return String(correo).trim().toLowerCase();
@@ -313,82 +299,12 @@ async function obtenerCicloDisponible(
   connection = pool,
   bloquear = false,
 ) {
-  const lock = bloquear ? " FOR UPDATE" : "";
-  const [rows] = await connection.query(
-    `
-    SELECT
-      c.IdCiclo,
-      c.IdAcademia,
-      c.Nombre,
-      c.PrefijoCodigo,
-      c.UniversidadObjetivo,
-      c.Turno,
-      c.Horario,
-      c.DiasClase,
-      c.FechaInicio,
-      c.FechaFin,
-      c.PrecioInscripcion,
-      c.PrecioMensual,
-      c.Precio,
-      c.Capacidad,
-      c.EstadoRegistro,
-      (
-        SELECT COUNT(*)
-        FROM Matricula m
-        INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-        WHERE m.IdCiclo = c.IdCiclo
-          AND m.EstadoRegistro = 1
-          AND u.EstadoRegistro = 1
-          AND u.IdAcademia = c.IdAcademia
-      ) AS TotalAlumnos
-    FROM Ciclo c
-    WHERE c.IdCiclo = ?
-    LIMIT 1${lock}
-  `,
-    [idCiclo],
-  );
+  const procedimiento = bloquear
+    ? "sp_matriculas_bloquear_ciclo_disponible"
+    : "sp_matriculas_obtener_ciclo_disponible";
+  const [rows] = await consultar(connection, procedimiento, [idCiclo]);
 
   return rows[0] || null;
-}
-
-async function buscarAlumnoActivoPorCorreo(
-  correo,
-  idAcademia,
-  connection = pool,
-  bloquear = false,
-) {
-  const lock = bloquear ? " FOR UPDATE" : "";
-  const [rows] = await connection.query(
-    `
-    SELECT
-      u.IdUsuario,
-      u.CodigoUsuario,
-      u.Nombres,
-      u.ApellidoPaterno,
-      u.ApellidoMaterno,
-      u.CorreoElectronico,
-      u.IdAcademia,
-      u.EstadoRegistro,
-      up.IdPerfil,
-      p.Nombre AS NombrePerfil
-    FROM Usuario u
-    INNER JOIN Usuario_Perfiles up
-      ON up.IdUsuario = u.IdUsuario
-     AND up.EstadoRegistro = 1
-    INNER JOIN perfil p
-      ON p.IdPerfil = up.IdPerfil
-     AND p.EstadoRegistro = 1
-    WHERE LOWER(TRIM(u.CorreoElectronico)) = ?
-      AND u.EstadoRegistro = 1
-    ORDER BY CASE WHEN u.IdAcademia = ? THEN 0 ELSE 1 END,
-             CASE WHEN LOWER(TRIM(p.Nombre)) = 'alumno' THEN 0 ELSE 1 END
-    LIMIT 1${lock}
-  `,
-    [correo, idAcademia],
-  );
-
-  if (rows.length === 0) return null;
-  return rows[0];
 }
 
 /* ============================================================
@@ -571,17 +487,7 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
 
     // Count active registrations after the cycle row is locked. Every checkout
     // locks the same cycle row first, so concurrent requests cannot oversell seats.
-    const [matriculasActivasCiclo] = await connection.query(
-      `SELECT m.IdMatricula
-       FROM Matricula m
-       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-       WHERE m.IdCiclo = ?
-         AND m.EstadoRegistro = 1
-         AND u.EstadoRegistro = 1
-         AND u.IdAcademia = ?
-       FOR UPDATE`,
-      [idCiclo, ciclo.IdAcademia],
-    );
+    const [matriculasActivasCiclo] = await consultar(connection, 'sp_matriculas_bloquear_matricula_por_id_ciclo', [idCiclo, ciclo.IdAcademia]);
     const totalAlumnos = matriculasActivasCiclo.length;
     // Capacidad real del ciclo (0/null => sin límite definido).
     const capacidad = Number(ciclo.Capacidad || 0);
@@ -621,34 +527,7 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
     }
 
     /* 3. Si existe usuario, bloqueamos su fila antes de revisar duplicados. */
-    const [usuarios] = await connection.query(
-      `
-      SELECT
-        u.IdUsuario,
-        u.CodigoUsuario,
-        u.Nombres,
-        u.ApellidoPaterno,
-        u.Clave AS ClaveHash,
-        u.CorreoElectronico,
-        u.IdAcademia,
-        u.EstadoRegistro,
-        up.IdPerfil,
-        p.Nombre AS NombrePerfil
-      FROM Usuario u
-      INNER JOIN Usuario_Perfiles up
-        ON up.IdUsuario = u.IdUsuario
-       AND up.EstadoRegistro = 1
-      INNER JOIN perfil p
-        ON p.IdPerfil = up.IdPerfil
-       AND p.EstadoRegistro = 1
-      WHERE LOWER(TRIM(u.CorreoElectronico)) = ?
-        AND u.EstadoRegistro = 1
-      ORDER BY CASE WHEN LOWER(TRIM(p.Nombre)) = 'alumno' THEN 0 ELSE 1 END
-      LIMIT 2
-      FOR UPDATE
-    `,
-      [correo],
-    );
+    const [usuarios] = await consultar(connection, 'sp_matriculas_bloquear_usuario_por_correo', [correo]);
 
     if (usuarios.length > 1) {
       await connection.rollback();
@@ -710,18 +589,7 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
       // nueva mediante un enlace verificado enviado a su correo.
       claveVersion = huellaClave(existente.ClaveHash);
 
-      const [yaMatriculado] = await connection.query(
-        `
-        SELECT IdMatricula
-        FROM Matricula
-        WHERE IdUsuario = ?
-          AND IdCiclo = ?
-          AND EstadoRegistro = 1
-        LIMIT 1
-        FOR UPDATE
-      `,
-        [idAlumnoFinal, idCiclo],
-      );
+      const [yaMatriculado] = await consultar(connection, 'sp_matriculas_bloquear_matricula_por_id_usuario', [idAlumnoFinal, idCiclo]);
 
       if (yaMatriculado.length > 0) {
         await connection.rollback();
@@ -753,13 +621,7 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
         });
       }
       /* 4. Alumno nuevo. */
-      const [perfilesAlumno] = await connection.query(`
-        SELECT IdPerfil
-        FROM perfil
-        WHERE EstadoRegistro = 1
-          AND LOWER(TRIM(Nombre)) = 'alumno'
-        LIMIT 1
-      `);
+      const [perfilesAlumno] = await consultar(connection, 'sp_matriculas_obtener_perfil', []);
 
       if (perfilesAlumno.length === 0) {
         await connection.rollback();
@@ -775,10 +637,7 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
         const candidato = generarCodigo(
           ciclo.PrefijoCodigo || universidadDesdeNombre(ciclo.Nombre),
         );
-        const [codigoExistente] = await connection.query(
-          "SELECT IdUsuario FROM Usuario WHERE CodigoUsuario = ? LIMIT 1",
-          [candidato],
-        );
+        const [codigoExistente] = await consultar(connection, 'sp_matriculas_obtener_usuario', [candidato]);
         if (codigoExistente.length === 0) {
           codigoUsuario = candidato;
           break;
@@ -797,54 +656,26 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
       claveSinEncriptar = generarClaveTemporal();
       const claveHasheada = await bcrypt.hash(claveSinEncriptar, 10);
 
-      const [resultUsuario] = await connection.query(
-        `
-        INSERT INTO Usuario
-          (CodigoUsuario, DNI, Nombres, ApellidoPaterno, ApellidoMaterno,
-           Celular, CorreoElectronico, Clave, FechaCreacion,
-           EstadoRegistro, IdAcademia)
-        VALUES (?, NULL, ?, ?, '', '', ?, ?, NOW(), 1, ?)
-      `,
-        [
+      const [resultUsuario] = await ejecutar(connection, 'sp_matriculas_registrar_usuario', [
           codigoUsuario,
           nombre,
           apellidos,
           correo,
           claveHasheada,
           ciclo.IdAcademia,
-        ],
-      );
+        ]);
 
       idAlumnoFinal = resultUsuario.insertId;
       codigoUsuarioFinal = codigoUsuario;
 
-      await connection.query(
-        `
-        INSERT INTO Usuario_Perfiles (IdUsuario, IdPerfil, EstadoRegistro)
-        VALUES (?, ?, 1)
-      `,
-        [idAlumnoFinal, perfilesAlumno[0].IdPerfil],
-      );
+      await ejecutar(connection, 'sp_matriculas_registrar_usuario_perfil', [idAlumnoFinal, perfilesAlumno[0].IdPerfil]);
     }
 
     /* 5. Matrícula nueva. El IdUsuario puede repetirse en distintos ciclos. */
-    const [insertMatricula] = await connection.query(
-      `
-      INSERT INTO Matricula (IdUsuario, IdCiclo, EstadoRegistro)
-      VALUES (?, ?, 1)
-    `,
-      [idAlumnoFinal, idCiclo],
-    );
+    await ejecutar(connection, 'sp_matriculas_registrar_matricula', [idAlumnoFinal, idCiclo]);
 
     /* 6. Una sola cuota de inscripción por alumno/ciclo. El precio procede del servidor. */
-    const [pagosInscripcion] = await connection.query(
-      `SELECT IdPago, Monto, Estado
-       FROM PagosMensualidad
-       WHERE IdUsuario = ? AND IdCiclo = ?
-         AND LOWER(TRIM(Mes)) = 'inscripcion' AND EstadoRegistro = 1
-       ORDER BY IdPago ASC LIMIT 1 FOR UPDATE`,
-      [idAlumnoFinal, idCiclo],
-    );
+    const [pagosInscripcion] = await consultar(connection, 'sp_matriculas_bloquear_cuota', [idAlumnoFinal, idCiclo]);
 
     if (pagosInscripcion.length > 0) {
       // Si ya existía una cuota (incluida una cuota histórica pendiente), se
@@ -861,12 +692,7 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
     } else if (precioReal > 0) {
       // Solo se crea una deuda de inscripción cuando el precio canónico del
       // ciclo es mayor que cero. El importe siempre procede de la BD.
-      const [insertPago] = await connection.query(
-        `INSERT INTO PagosMensualidad
-          (IdUsuario, IdCiclo, Mes, Monto, Estado, FechaPago, FechaVencimiento, EstadoRegistro)
-         VALUES (?, ?, 'Inscripcion', ?, 'Pendiente', NULL, NULL, 1)`,
-        [idAlumnoFinal, idCiclo, precioReal],
-      );
+      const [insertPago] = await ejecutar(connection, 'sp_matriculas_registrar_cuota', [idAlumnoFinal, idCiclo, precioReal]);
       pagoCheckout = {
         idPago: Number(insertPago.insertId),
         monto: precioReal,
@@ -874,13 +700,13 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
         creadoAhora: true,
         requierePago: true,
       };
-      await connection.query(
-        `INSERT INTO PagoAuditoria
-          (IdPago, IdComprobante, IdUsuarioActor, IdAcademia, Evento,
-           EstadoAnterior, EstadoNuevo, MontoAnterior, MontoNuevo, Motivo, FechaCreacion)
-         VALUES (?, NULL, ?, ?, 'INSCRIPCION_CREADA', NULL, 'Pendiente', NULL, ?, ?, NOW())`,
-        [pagoCheckout.idPago, idAlumnoFinal, ciclo.IdAcademia, precioReal, 'Cuota de inscripción generada por checkout.'],
-      );
+      await ejecutar(connection, 'sp_matriculas_registrar_auditoria_pago', [
+          pagoCheckout.idPago,
+          idAlumnoFinal,
+          ciclo.IdAcademia,
+          precioReal,
+          'Cuota de inscripción generada por checkout.',
+        ]);
     } else {
       // Inscripción gratuita: no insertar una cuota artificial de S/ 0.00.
       // Las mensualidades se generan por separado según el periodo académico.
@@ -893,18 +719,7 @@ async function procesarCheckout(req, res, { correoVerificado = false } = {}) {
       };
     }
 
-    const [nuevoConteo] = await connection.query(
-      `
-      SELECT COUNT(*) AS TotalAlumnos
-      FROM Matricula m
-      INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-      WHERE m.IdCiclo = ?
-        AND m.EstadoRegistro = 1
-        AND u.EstadoRegistro = 1
-        AND u.IdAcademia = ?
-    `,
-      [idCiclo, ciclo.IdAcademia],
-    );
+    const [nuevoConteo] = await consultar(connection, 'sp_matriculas_contar_matricula', [idCiclo, ciclo.IdAcademia]);
 
     await connection.commit();
     enTransaccion = false;
@@ -1147,15 +962,7 @@ router.post("/restablecer-clave", async (req, res) => {
   try {
     connection = await pool.getConnection();
     await connection.beginTransaction();
-    const [[usuario]] = await connection.query(
-      `
-      SELECT IdUsuario, CorreoElectronico, Clave
-      FROM Usuario
-      WHERE IdUsuario = ? AND LOWER(TRIM(CorreoElectronico)) = ? AND EstadoRegistro = 1
-      LIMIT 1 FOR UPDATE
-    `,
-      [payload.idUsuario, normalizarCorreo(payload.correo)],
-    );
+    const [[usuario]] = await consultar(connection, 'sp_matriculas_bloquear_usuario_por_id_usuario', [payload.idUsuario, normalizarCorreo(payload.correo)]);
 
     if (!usuario || huellaClave(usuario.Clave) !== payload.claveVersion) {
       await connection.rollback();
@@ -1169,10 +976,7 @@ router.post("/restablecer-clave", async (req, res) => {
 
     claveTemporal = generarClaveTemporal();
     const claveHasheada = await bcrypt.hash(claveTemporal, 10);
-    await connection.query("UPDATE Usuario SET Clave = ? WHERE IdUsuario = ?", [
-      claveHasheada,
-      usuario.IdUsuario,
-    ]);
+    await ejecutar(connection, 'sp_matriculas_actualizar_usuario', [claveHasheada, usuario.IdUsuario]);
 
     // Enviamos primero el correo dentro de la transacción: si el proveedor falla,
     // hacemos rollback y el alumno conserva la contraseña con la que ingresaba.

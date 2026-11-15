@@ -11,3 +11,11 @@ Module._load = function (nombre, ...args) {
 process.env.JWT_SECRET = 'secreto-ficticio-exclusivo-pruebas-locales';
 
 
+
+// Las pruebas no usan MySQL: los procedimientos almacenados se traducen a su
+// sentencia SQL para que los dobles de cada prueba puedan verificarla.
+const rutaProcedimientos = require.resolve('../config/procedimientos');
+require.cache[rutaProcedimientos] = {
+  id: rutaProcedimientos, filename: rutaProcedimientos, loaded: true,
+  exports: require('./procedimientos-prueba'),
+};

@@ -16,12 +16,19 @@ const fila = {
   IdUsuario: 10, CodigoUsuario: 'A001', Alumno: 'Alumno Ficticio',
 };
 
+
+// Parámetros, en orden de aparición, de los filtros de sp_transacciones_*_admin.
+// El estado llega como constante validada (nunca texto libre del usuario).
+function filtros(academia, ciclo, periodo, estado) {
+  return [academia, ciclo, ciclo, periodo, periodo, estado, estado, 120, estado, estado];
+}
+
 test('lista transacciones de la academia con filtros parametrizados y paginación', async t => {
   const fin = secuencia([
-    { sql: /SELECT COUNT\(\*\) AS Total FROM PagoTransaccion pt/, params: [4, 3, '2026-11', 'PAGO_DUPLICADO'],
+    { sql: /SELECT COUNT\(\*\) AS Total FROM PagoTransaccion pt/, params: filtros(4, 3, '2026-11', 'PAGO_DUPLICADO'),
       rows: [{ Total: 1 }], verificar(q) { assert.match(q, /pt\.IdAcademia = \?/); } },
     { sql: /FROM PagoTransaccion pt.*ORDER BY pt\.IdTransaccion DESC LIMIT \? OFFSET \?/,
-      params: [4, 3, '2026-11', 'PAGO_DUPLICADO', 20, 40], rows: [fila] },
+      params: [...filtros(4, 3, '2026-11', 'PAGO_DUPLICADO'), 20, 40], rows: [fila] },
   ]);
   const pedir = await servir(t, rutas, admin);
   const r = await pedir('GET', '/api/admin/pagos/transacciones?idCiclo=3&periodo=2026-11&estado=pago_duplicado&limite=20&desde=40');
@@ -35,9 +42,9 @@ test('lista transacciones de la academia con filtros parametrizados y paginació
 
 test('filtro REQUIERE_REVISION usa estados fijos, sin texto del usuario en el SQL', async t => {
   const fin = secuencia([
-    { sql: /COUNT/, params: [4, 'Inscripcion'], rows: [{ Total: 0 }],
-      verificar(q) { assert.match(q, /'PAGO_DUPLICADO', 'REEMBOLSADA', 'CONTRACARGO'/); assert.doesNotMatch(q, /requiere/i); } },
-    { sql: /LIMIT \? OFFSET \?/, params: [4, 'Inscripcion', 50, 0], rows: [] },
+    { sql: /COUNT/, params: filtros(4, null, 'Inscripcion', 'REQUIERE_REVISION'), rows: [{ Total: 0 }],
+      verificar(q) { assert.match(q, /'PAGO_DUPLICADO', 'REEMBOLSADA', 'CONTRACARGO'/); } },
+    { sql: /LIMIT \? OFFSET \?/, params: [...filtros(4, null, 'Inscripcion', 'REQUIERE_REVISION'), 50, 0], rows: [] },
   ]);
   const pedir = await servir(t, rutas, admin);
   const r = await pedir('GET', '/api/admin/pagos/transacciones?estado=requiere_revision&periodo=inscripcion');

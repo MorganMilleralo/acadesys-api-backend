@@ -1,0 +1,2 @@
+# Archivos SQL siempre con fin de línea LF
+*.sql text eol=lf

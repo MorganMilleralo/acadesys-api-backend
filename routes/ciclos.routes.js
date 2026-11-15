@@ -21,6 +21,7 @@ const UNIVERSIDADES_VALIDAS = new Set([
 
 const { MIN_CAPACIDAD, MAX_CAPACIDAD, disponibilidadCiclo } = require('../utils/capacidad-ciclo');
 const { MAX_PRECIO, salidaPrecios } = require('../utils/precios-ciclo');
+const { consultar } = require('../config/procedimientos');
 
 function idAcademiaRegistroPublico() {
   const raw = process.env.PUBLIC_REGISTRATION_ACADEMY_ID;
@@ -175,48 +176,7 @@ router.get('/publicos', async (req, res) => {
   }
 
   try {
-    const [ciclos] = await pool.query(`
-      SELECT
-        c.IdCiclo,
-        c.IdAcademia,
-        c.Nombre,
-        c.PrefijoCodigo,
-        c.Turno,
-        c.Horario,
-        c.DiasClase,
-        c.UniversidadObjetivo,
-        c.FechaInicio,
-        c.FechaFin,
-        c.Precio,
-        c.PrecioInscripcion,
-        c.PrecioMensual,
-        c.Capacidad,
-        c.EstadoRegistro,
-        (
-          SELECT COUNT(*)
-          FROM Matricula m
-          INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-          WHERE m.IdCiclo = c.IdCiclo
-            AND m.EstadoRegistro = 1
-            AND u.EstadoRegistro = 1
-            AND u.IdAcademia = c.IdAcademia
-        ) AS TotalAlumnos,
-        (
-          SELECT COUNT(*)
-          FROM CicloCurso cc
-          INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
-          WHERE cc.IdCiclo = c.IdCiclo
-            AND cc.EstadoRegistro = 1
-            AND cu.EstadoRegistro = 1
-        ) AS TotalCursos
-      FROM Ciclo c
-      WHERE c.IdAcademia = ?
-        AND c.EstadoRegistro = 1
-      ORDER BY
-        CASE WHEN c.FechaInicio IS NULL THEN 1 ELSE 0 END,
-        c.FechaInicio ASC,
-        c.IdCiclo ASC
-    `, [idAcademia]);
+    const [ciclos] = await consultar(pool, 'sp_ciclos_listar_publicos', [idAcademia]);
 
     const salida = ciclos.map(normalizarSalida);
     res.status(200).json(salida);
@@ -245,46 +205,7 @@ router.get('/publicos/:id/detalle', async (req, res) => {
   }
 
   try {
-    const [ciclos] = await pool.query(`
-      SELECT
-        c.IdCiclo,
-        c.IdAcademia,
-        c.Nombre,
-        c.PrefijoCodigo,
-        c.Turno,
-        c.Horario,
-        c.DiasClase,
-        c.UniversidadObjetivo,
-        c.FechaInicio,
-        c.FechaFin,
-        c.Precio,
-        c.PrecioInscripcion,
-        c.PrecioMensual,
-        c.Capacidad,
-        c.EstadoRegistro,
-        (
-          SELECT COUNT(*)
-          FROM Matricula m
-          INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-          WHERE m.IdCiclo = c.IdCiclo
-            AND m.EstadoRegistro = 1
-            AND u.EstadoRegistro = 1
-            AND u.IdAcademia = c.IdAcademia
-        ) AS TotalAlumnos,
-        (
-          SELECT COUNT(*)
-          FROM CicloCurso cc
-          INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
-          WHERE cc.IdCiclo = c.IdCiclo
-            AND cc.EstadoRegistro = 1
-            AND cu.EstadoRegistro = 1
-        ) AS TotalCursos
-      FROM Ciclo c
-      WHERE c.IdCiclo = ?
-        AND c.IdAcademia = ?
-        AND c.EstadoRegistro = 1
-      LIMIT 1
-    `, [idCiclo, idAcademia]);
+    const [ciclos] = await consultar(pool, 'sp_ciclos_obtener_ciclo', [idCiclo, idAcademia]);
 
     if (ciclos.length === 0) {
       return res.status(404).json({ error: 'El ciclo no existe o ya no está publicado.' });
@@ -292,63 +213,9 @@ router.get('/publicos/:id/detalle', async (req, res) => {
 
     const ciclo = normalizarSalida(ciclos[0]);
 
-    const [cursos] = await pool.query(`
-      SELECT
-        cc.IdCiclo,
-        cc.IdCurso,
-        cc.Orden,
-        cu.Nombre,
-        cu.Codigo,
-        cu.Descripcion
-      FROM CicloCurso cc
-      INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
-      WHERE cc.IdCiclo = ?
-        AND cc.EstadoRegistro = 1
-        AND cu.EstadoRegistro = 1
-      ORDER BY cc.Orden ASC, cu.Nombre ASC
-    `, [idCiclo]);
+    const [cursos] = await consultar(pool, 'sp_ciclos_listar_ciclo_curso', [idCiclo]);
 
-    const [horarios] = await pool.query(`
-      SELECT
-        h.IdHorario,
-        h.IdCiclo,
-        h.IdCurso,
-        h.DiaNumero,
-        h.DiaSemana,
-        TIME_FORMAT(h.HoraInicio, '%H:%i') AS HoraInicio,
-        TIME_FORMAT(h.HoraFin, '%H:%i') AS HoraFin,
-        COALESCE(doc.Docentes, 'Por asignar') AS Docente,
-        h.Orden,
-        cu.Nombre AS Curso
-      FROM HorarioCurso h
-      INNER JOIN Curso cu ON cu.IdCurso = h.IdCurso
-      LEFT JOIN (
-        SELECT
-          aa.IdCiclo,
-          aa.IdCurso,
-          GROUP_CONCAT(
-            DISTINCT TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno))
-            ORDER BY TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno)) ASC
-            SEPARATOR ', '
-          ) AS Docentes
-        FROM Asignacion_Aula aa
-        INNER JOIN Usuario u
-          ON u.IdUsuario = aa.IdUsuario
-         AND u.EstadoRegistro = 1
-        WHERE aa.EstadoRegistro = 1
-        GROUP BY aa.IdCiclo, aa.IdCurso
-      ) doc
-        ON doc.IdCiclo = h.IdCiclo
-       AND doc.IdCurso = h.IdCurso
-      WHERE h.IdCiclo = ?
-        AND h.EstadoRegistro = 1
-        AND cu.EstadoRegistro = 1
-      ORDER BY
-        h.DiaNumero ASC,
-        h.HoraInicio ASC,
-        h.Orden ASC,
-        cu.Nombre ASC
-    `, [idCiclo]);
+    const [horarios] = await consultar(pool, 'sp_ciclos_listar_horario', [idCiclo]);
 
     res.json({
       ciclo,
@@ -396,43 +263,7 @@ router.get('/:id/cursos', async (req, res) => {
   }
 
   try {
-    const [rows] = await pool.query(`
-      SELECT
-        cc.IdCiclo,
-        cc.IdCurso,
-        cc.Orden,
-        cu.Nombre,
-        cu.Codigo,
-        cu.Descripcion,
-        doc.Docentes
-      FROM Ciclo ci
-      INNER JOIN CicloCurso cc ON cc.IdCiclo = ci.IdCiclo
-      INNER JOIN Curso cu ON cu.IdCurso = cc.IdCurso
-      LEFT JOIN (
-        SELECT
-          aa.IdCiclo,
-          aa.IdCurso,
-          GROUP_CONCAT(
-            DISTINCT TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno))
-            ORDER BY TRIM(CONCAT_WS(' ', u.Nombres, u.ApellidoPaterno, u.ApellidoMaterno)) ASC
-            SEPARATOR ', '
-          ) AS Docentes
-        FROM Asignacion_Aula aa
-        INNER JOIN Usuario u
-          ON u.IdUsuario = aa.IdUsuario
-         AND u.EstadoRegistro = 1
-        WHERE aa.EstadoRegistro = 1
-        GROUP BY aa.IdCiclo, aa.IdCurso
-      ) doc
-        ON doc.IdCiclo = cc.IdCiclo
-       AND doc.IdCurso = cc.IdCurso
-      WHERE cc.IdCiclo = ?
-        AND ci.IdAcademia = ?
-        AND ci.EstadoRegistro = 1
-        AND cc.EstadoRegistro = 1
-        AND cu.EstadoRegistro = 1
-      ORDER BY cc.Orden ASC, cu.Nombre ASC
-    `, [idCiclo, idAcademia]);
+    const [rows] = await consultar(pool, 'sp_ciclos_obtener_publico', [idCiclo, idAcademia]);
 
     res.json(rows);
   } catch (error) {

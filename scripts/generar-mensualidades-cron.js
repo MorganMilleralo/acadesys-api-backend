@@ -1,4 +1,5 @@
 'use strict';
+const { consultar, ejecutar } = require('../config/procedimientos');
 
 const TIME_ZONE = 'America/Lima';
 
@@ -73,19 +74,7 @@ async function generarCuotasMensuales({
   const fechaInicioPeriodo = `${periodo}-01`;
   const fechaFinPeriodo = `${periodo}-${String(diasDelMes(periodo)).padStart(2, '0')}`;
 
-  const [ciclos] = await pool.query(
-    `SELECT IdCiclo, IdAcademia, Nombre, PrecioMensual,
-            DATE_FORMAT(FechaInicio, '%Y-%m-%d') AS FechaInicioISO,
-            DATE_FORMAT(FechaFin, '%Y-%m-%d') AS FechaFinISO
-     FROM Ciclo
-     WHERE EstadoRegistro = 1
-       AND FechaInicio IS NOT NULL
-       AND FechaFin IS NOT NULL
-       AND FechaInicio <= ?
-       AND FechaFin >= ?
-     ORDER BY IdCiclo ASC`,
-    [fechaFinPeriodo, fechaInicioPeriodo],
-  );
+  const [ciclos] = await consultar(pool, 'sp_cuotas_listar_ciclo', [fechaFinPeriodo, fechaInicioPeriodo]);
 
   const resumen = {
     dryRun: Boolean(dryRun),
@@ -118,15 +107,7 @@ async function generarCuotasMensuales({
       connection = await pool.getConnection();
       await connection.beginTransaction();
 
-      const [ciclosBloqueados] = await connection.query(
-        `SELECT IdCiclo, IdAcademia, PrecioMensual,
-                DATE_FORMAT(FechaInicio, '%Y-%m-%d') AS FechaInicioISO,
-                DATE_FORMAT(FechaFin, '%Y-%m-%d') AS FechaFinISO
-         FROM Ciclo
-         WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1
-         LIMIT 1 FOR UPDATE`,
-        [ciclo.IdCiclo, ciclo.IdAcademia],
-      );
+      const [ciclosBloqueados] = await consultar(connection, 'sp_cuotas_bloquear_ciclo', [ciclo.IdCiclo, ciclo.IdAcademia]);
 
       if (!ciclosBloqueados.length) {
         if (dryRun) await connection.rollback();
@@ -143,19 +124,7 @@ async function generarCuotasMensuales({
         continue;
       }
 
-      const [matriculas] = await connection.query(
-        `SELECT DISTINCT m.IdUsuario,
-                DATE_FORMAT(m.FechaCreacion, '%Y-%m-%d') AS FechaMatriculaISO
-         FROM Matricula m
-         INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-         WHERE m.IdCiclo = ?
-           AND m.EstadoRegistro = 1
-           AND u.IdAcademia = ?
-           AND u.EstadoRegistro = 1
-         ORDER BY m.IdUsuario ASC
-         FOR UPDATE`,
-        [ciclo.IdCiclo, ciclo.IdAcademia],
-      );
+      const [matriculas] = await consultar(connection, 'sp_cuotas_bloquear_matricula', [ciclo.IdCiclo, ciclo.IdAcademia]);
 
       resumen.alumnosRevisados += matriculas.length;
 
@@ -175,14 +144,7 @@ async function generarCuotasMensuales({
           : fechaVencimiento;
         const diferidaAlSiguienteMes = fechaVencimientoAlumno !== fechaVencimiento;
 
-        const [existentes] = await connection.query(
-          `SELECT IdPago
-           FROM PagosMensualidad
-           WHERE IdUsuario = ? AND IdCiclo = ? AND Mes = ? AND EstadoRegistro = 1
-           ORDER BY IdPago ASC
-           LIMIT 1 FOR UPDATE`,
-          [idUsuario, ciclo.IdCiclo, periodo],
-        );
+        const [existentes] = await consultar(connection, 'sp_cuotas_bloquear_cuota_por_id_usuario', [idUsuario, ciclo.IdCiclo, periodo]);
 
         if (existentes.length) {
           resumen.cuotasYaExistentes += 1;
@@ -195,27 +157,14 @@ async function generarCuotasMensuales({
           continue;
         }
 
-        const [insertado] = await connection.query(
-          `INSERT INTO PagosMensualidad
-            (IdUsuario, IdCiclo, Mes, Monto, Estado,
-             FechaPago, FechaVencimiento, EstadoRegistro)
-           VALUES (?, ?, ?, ?, 'Pendiente', NULL, ?, 1)`,
-          [idUsuario, ciclo.IdCiclo, periodo, montoActual, fechaVencimientoAlumno],
-        );
+        const [insertado] = await ejecutar(connection, 'sp_cuotas_registrar_cuota', [idUsuario, ciclo.IdCiclo, periodo, montoActual, fechaVencimientoAlumno]);
 
-        await connection.query(
-          `INSERT INTO PagoAuditoria
-            (IdPago, IdComprobante, IdUsuarioActor, IdAcademia, Evento,
-             EstadoAnterior, EstadoNuevo, MontoAnterior, MontoNuevo, Motivo, FechaCreacion)
-           VALUES (?, NULL, NULL, ?, 'CUOTA_MENSUAL_CREADA_CRON',
-                   NULL, 'Pendiente', NULL, ?, ?, NOW())`,
-          [
+        await ejecutar(connection, 'sp_cuotas_registrar_auditoria_generacion', [
             insertado.insertId,
             ciclo.IdAcademia,
             montoActual,
             `Generación automática de la mensualidad ${periodo} para el ciclo ${ciclo.IdCiclo}.`,
-          ],
-        );
+          ]);
         resumen.cuotasCreadas += 1;
       }
 
@@ -240,56 +189,20 @@ async function generarCuotasMensuales({
     connectionMorosidad = await pool.getConnection();
     await connectionMorosidad.beginTransaction();
 
-    const [vencidas] = await connectionMorosidad.query(
-      `SELECT p.IdPago, p.Monto, p.Estado, u.IdAcademia
-       FROM PagosMensualidad p
-       INNER JOIN Usuario u ON u.IdUsuario = p.IdUsuario
-       INNER JOIN Ciclo c ON c.IdCiclo = p.IdCiclo AND c.IdAcademia = u.IdAcademia
-       WHERE p.EstadoRegistro = 1
-         AND u.EstadoRegistro = 1
-         AND LOWER(TRIM(COALESCE(p.Estado, ''))) = 'pendiente'
-         AND p.FechaVencimiento IS NOT NULL
-         AND p.FechaVencimiento < ?
-         AND NOT EXISTS (
-           SELECT 1
-           FROM PagoComprobante pc
-           WHERE pc.IdPago = p.IdPago
-             AND pc.IdUsuario = p.IdUsuario
-             AND pc.IdAcademia = u.IdAcademia
-             AND pc.EstadoRegistro = 1
-             AND pc.EstadoRevision = 'EN_REVISION'
-         )
-       ORDER BY p.IdPago ASC
-       FOR UPDATE`,
-      [fechaLocalLima()],
-    );
+    const [vencidas] = await consultar(connectionMorosidad, 'sp_cuotas_bloquear_cuota_por_fecha_vencimiento', [fechaLocalLima()]);
 
     resumen.cuotasMorosas = vencidas.length;
     if (!dryRun) {
       for (const pago of vencidas) {
-        const [actualizada] = await connectionMorosidad.query(
-          `UPDATE PagosMensualidad
-           SET Estado = 'Moroso'
-           WHERE IdPago = ? AND EstadoRegistro = 1
-             AND LOWER(TRIM(COALESCE(Estado, ''))) = 'pendiente'`,
-          [pago.IdPago],
-        );
+        const [actualizada] = await ejecutar(connectionMorosidad, 'sp_cuotas_actualizar_estado_cuota', [pago.IdPago]);
         if (actualizada.affectedRows === 1) {
-          await connectionMorosidad.query(
-            `INSERT INTO PagoAuditoria
-              (IdPago, IdComprobante, IdUsuarioActor, IdAcademia, Evento,
-               EstadoAnterior, EstadoNuevo, MontoAnterior, MontoNuevo, Motivo, FechaCreacion)
-             VALUES (?, NULL, NULL, ?, 'CUOTA_MOROSA_AUTOMATICA',
-                     ?, 'Moroso', ?, ?, ?, NOW())`,
-            [
+          await ejecutar(connectionMorosidad, 'sp_cuotas_registrar_auditoria_vencimiento', [
               pago.IdPago,
               pago.IdAcademia,
               pago.Estado,
               Number(pago.Monto),
-              Number(pago.Monto),
               `Cuota marcada como morosa por vencimiento ${fechaLocalLima()}.`,
-            ],
-          );
+            ]);
         }
       }
     }

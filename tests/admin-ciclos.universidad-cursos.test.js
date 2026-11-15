@@ -71,7 +71,7 @@ async function consulta(sql, params = []) {
 
   // Existencia + universidad de los cursos seleccionados
   if (/SELECT IdCurso, UniversidadObjetivo FROM Curso/i.test(q)) {
-    const filas = params
+    const filas = JSON.parse(params[0])
       .map((id) => CATALOGO[Number(id)])
       .filter((c) => !!c)
       .map((c) => ({ IdCurso: c.IdCurso, UniversidadObjetivo: c.universidad }));

@@ -6,6 +6,7 @@
 // pasa al siguiente middleware: el estático de uploads/perfiles.
 const express = require("express");
 const pool = require("../config/db");
+const { consultar } = require('../config/procedimientos');
 
 const router = express.Router();
 const NOMBRE_FOTO = /^foto-perfil-(?:\d{1,10}|anon)-[a-z0-9]{1,16}-[a-z0-9]{1,32}\.(?:jpg|png|webp)$/;
@@ -15,10 +16,7 @@ router.get("/:nombre", async (req, res, next) => {
   const nombre = String(req.params.nombre || "");
   if (!NOMBRE_FOTO.test(nombre)) return next();
   try {
-    const [rows] = await pool.query(
-      "SELECT Contenido, TipoMime FROM FotoPerfil WHERE NombreArchivo = ? LIMIT 1",
-      [nombre],
-    );
+    const [rows] = await consultar(pool, 'sp_foto_perfil_obtener_foto', [nombre]);
     if (!rows.length) return next();
     const extension = nombre.split(".").pop();
     res.set("Content-Type", TIPOS[extension] || "application/octet-stream");

@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
 const { idPositivo, rollbackSeguro } = require('../utils/validaciones');
+const { consultar, ejecutar } = require('../config/procedimientos');
 
 const TIPOS_VALIDOS = new Map([
   ['practica', 'Practica'],
@@ -61,63 +62,29 @@ router.put('/actas/cierre', requiereRol('Administrador'), async (req, res) => {
 
     // Se serializa el cierre por ciclo para que el registro de notas, que también
     // bloquea esta fila, no inserte calificaciones durante el cierre.
-    const [ciclos] = await connection.query(
-      `SELECT IdCiclo FROM Ciclo
-       WHERE IdCiclo = ? AND IdAcademia = ? AND EstadoRegistro = 1
-       LIMIT 1 FOR UPDATE`,
-      [idCiclo, idAcademia],
-    );
+    const [ciclos] = await consultar(connection, 'sp_actas_bloquear_ciclo', [idCiclo, idAcademia]);
     if (!ciclos.length) {
       await connection.rollback();
       return res.status(404).json({ error: 'El ciclo no existe, está inactivo o no pertenece a tu academia.' });
     }
 
     if (idCurso !== null) {
-      const [cursos] = await connection.query(
-        `SELECT IdCurso FROM CicloCurso
-         WHERE IdCiclo = ? AND IdCurso = ? AND EstadoRegistro = 1
-         LIMIT 1`,
-        [idCiclo, idCurso],
-      );
+      const [cursos] = await consultar(connection, 'sp_actas_obtener_ciclo_curso', [idCiclo, idCurso]);
       if (!cursos.length) {
         await connection.rollback();
         return res.status(404).json({ error: 'El curso no está asociado al ciclo indicado.' });
       }
     }
 
-    const [cierresPrevios] = await connection.query(
-      `SELECT IdCierre FROM Auditoria_Cierres
-       WHERE IdCiclo = ? AND IdCurso <=> ? AND Periodo = ? AND TipoEvaluacion = ?
-       LIMIT 1 FOR UPDATE`,
-      [idCiclo, idCurso, periodo, tipoEvaluacion],
-    );
+    const [cierresPrevios] = await consultar(connection, 'sp_actas_bloquear_cierre', [idCiclo, idCurso, periodo, tipoEvaluacion]);
     if (cierresPrevios.length) {
       await connection.rollback();
       return res.status(409).json({ error: 'Este curso, ciclo, periodo y tipo de evaluación ya están cerrados.' });
     }
 
-    const [actualizacion] = await connection.query(
-      `UPDATE Evaluacion e
-       INNER JOIN Matricula m ON m.IdMatricula = e.IdMatricula
-       INNER JOIN Usuario u ON u.IdUsuario = m.IdUsuario
-       SET e.EstadoRegistro = 2,
-           e.UsuarioModificacion = ?,
-           e.FechaModificacion = NOW()
-       WHERE m.IdCiclo = ?
-         AND m.IdCurso <=> ?
-         AND e.Periodo = ?
-         AND e.TipoEvaluacion = ?
-         AND e.EstadoRegistro = 1
-         AND u.IdAcademia = ?`,
-      [idAdmin, idCiclo, idCurso, periodo, tipoEvaluacion, idAcademia],
-    );
+    const [actualizacion] = await ejecutar(connection, 'sp_actas_actualizar_evaluacion', [idAdmin, idCiclo, idCurso, periodo, tipoEvaluacion, idAcademia]);
 
-    await connection.query(
-      `INSERT INTO Auditoria_Cierres
-         (IdAdministrador, IdCiclo, IdCurso, Periodo, TipoEvaluacion, FechaCierre)
-       VALUES (?, ?, ?, ?, ?, NOW())`,
-      [idAdmin, idCiclo, idCurso, periodo, tipoEvaluacion],
-    );
+    await ejecutar(connection, 'sp_actas_registrar_cierre', [idAdmin, idCiclo, idCurso, periodo, tipoEvaluacion]);
 
     await connection.commit();
     return res.json({
