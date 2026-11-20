@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const express = require("express");
@@ -52,18 +53,10 @@ const { corsOptions } = require("./config/cors");
 app.use(cors(corsOptions));
 
 // ============================================================
-// 3. WEBHOOK CULQI
-// ============================================================
-
-// IMPORTANTE:
-// - Es público, no utiliza JWT de alumnos.
-// - Utiliza autenticación Basic configurada en CulqiPanel.
-// - Se monta antes del parser JSON general.
-// - Su ruta final será POST /api/webhooks/culqi.
-
-const culqiWebhook = require("./routes/culqi-webhook.routes");
-
-app.use("/api/webhooks", express.json({ limit: "32kb" }), culqiWebhook);
+// 3. WEBHOOK MERCADO PAGO
+// Público y montado antes del candado JWT. La firma HMAC autentica el evento.
+const mercadopagoWebhook = require("./routes/mercadopago-webhook.routes");
+app.use("/api/webhooks", express.json({ limit: "32kb" }), mercadopagoWebhook);
 
 // ============================================================
 // 4. PARSERS Y ARCHIVOS ESTÁTICOS
@@ -182,7 +175,7 @@ app.use("/api", require("./routes/ia.routes"));
 // Intranet del alumno
 app.use("/api/alumno", require("./routes/alumno.routes"));
 
-// Checkout de cuotas mediante Culqi.
+// Checkout de cuotas mediante Mercado Pago.
 // Se registra UNA SOLA VEZ y después del JWT.
 app.use("/api/alumno", require("./routes/alumno-checkout.routes"));
 
@@ -220,4 +213,3 @@ module.exports = {
   app,
   server,
 };
-

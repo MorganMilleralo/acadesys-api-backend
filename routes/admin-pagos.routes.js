@@ -1,20 +1,15 @@
 'use strict';
 
-// Panel administrativo de pagos online.
-// Montado en /api/admin/pagos después del candado JWT. Solo lectura, salvo la
-// conciliación, que aplica pagos con la misma verificación que el webhook.
-
 const express = require('express');
 const router = express.Router();
 const requiereRol = require('../middlewares/roles.middleware');
 const { idPositivo } = require('../utils/validaciones');
 const { ErrorPago } = require('../utils/pagos-proveedor');
-const culqi = require('../services/culqi.adapter');
+const mercadopago = require('../services/mercadopago.adapter');
 const transacciones = require('../services/transacciones-pago.service');
 const conciliacion = require('../services/conciliacion-pagos.service');
 
 const idAcademiaActor = (req) => idPositivo(req.usuario?.idAcademia);
-
 router.use(requiereRol('Administrador'));
 
 function responderError(res, error, contexto) {
@@ -23,11 +18,10 @@ function responderError(res, error, contexto) {
   if (status >= 500) console.error(`Error en ${contexto}:`, conocido ? error.code : (error?.name || 'Error'));
   return res.status(status).json({
     code: conocido ? error.code : 'PAGOS_ADMIN_NO_DISPONIBLE',
-    error: conocido && status < 500 ? error.message : 'No se pudo completar la consulta de pagos.',
+    error: conocido ? error.message : 'No se pudo completar la consulta de pagos.',
   });
 }
 
-// GET /api/admin/pagos/transacciones?idCiclo=&periodo=AAAA-MM|Inscripcion&estado=&limite=&desde=
 router.get('/transacciones', async (req, res) => {
   const idAcademia = idAcademiaActor(req);
   if (!idAcademia) return res.status(401).json({ error: 'La sesión administrativa no es válida.' });
@@ -40,7 +34,6 @@ router.get('/transacciones', async (req, res) => {
   }
 });
 
-// GET /api/admin/pagos/:idPago/auditoria — historial manual y automático de la cuota.
 router.get('/:idPago/auditoria', async (req, res) => {
   const idAcademia = idAcademiaActor(req);
   const idPago = idPositivo(req.params.idPago);
@@ -53,25 +46,23 @@ router.get('/:idPago/auditoria', async (req, res) => {
   }
 });
 
-// POST /api/admin/pagos/transacciones/:idTransaccion/conciliar
 router.post('/transacciones/:idTransaccion/conciliar', async (req, res) => {
   const idAcademia = idAcademiaActor(req);
   const idTransaccion = idPositivo(req.params.idTransaccion);
   if (!idAcademia) return res.status(401).json({ error: 'La sesión administrativa no es válida.' });
   if (!idTransaccion) return res.status(400).json({ error: 'El IdTransaccion no es válido.' });
   try {
-    culqi.verificarConfiguracion();
+    mercadopago.verificarConfiguracion();
     const referencia = await transacciones.obtenerReferenciaConciliable({ idTransaccion, idAcademia });
     if (!referencia) {
-      return res.status(404).json({ code: 'TRANSACCION_NO_CONCILIABLE', error: 'La transacción no existe en tu academia o no llegó a crear un checkout.' });
+      return res.status(404).json({ code: 'TRANSACCION_NO_CONCILIABLE', error: 'La transacción no existe en la academia o no tiene una orden de Mercado Pago.' });
     }
     if (!conciliacion.puedeConciliar(referencia.referenciaInterna)) {
       return res.status(429).json({ code: 'CONSULTA_RECIENTE', error: 'Esta transacción se consultó hace menos de 30 segundos.' });
     }
-    const resultado = await conciliacion.conciliarReferencia(referencia);
-    return res.json({ idTransaccion, ...resultado });
+    return res.json({ idTransaccion, ...(await conciliacion.conciliarReferencia(referencia)) });
   } catch (error) {
-    return responderError(res, error, 'POST /api/admin/pagos/transacciones/:id/conciliar');
+    return responderError(res, error, 'POST /api/admin/pagos/transacciones/:idTransaccion/conciliar');
   }
 });
 

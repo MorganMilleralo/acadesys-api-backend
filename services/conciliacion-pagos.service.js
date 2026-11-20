@@ -1,23 +1,16 @@
 'use strict';
 
 /**
- * Conciliación activa con Culqi.
- *
- * El webhook POST /api/webhooks/culqi es la vía principal de confirmación. Si
- * un aviso se pierde (por ejemplo, Render dormido), esta función consulta la
- * orden guardada en PagoTransaccion y la aplica con EXACTAMENTE la misma
- * verificación y transacción SQL que el webhook:
- * consultarOrdenVerificada + confirmarPagoProveedor / actualizarEstadoNoAprobado.
- * Nunca usa datos enviados por el navegador.
+ * Conciliación activa de Mercado Pago. La notificación es la señal; la fuente
+ * de verdad es siempre la consulta GET de la order al proveedor.
  */
 
-const culqi = require('./culqi.adapter');
+const mercadopago = require('./mercadopago.adapter');
 const transacciones = require('./transacciones-pago.service');
 const { ErrorPago } = require('../utils/pagos-proveedor');
+const { obtenerConfiguracionPagos } = require('../config/pagos');
 
-// Evita consultar al proveedor en cada clic. Memoria local: suficiente para
-// una sola instancia de Render; con varias instancias solo se pierde eficiencia.
-const ESPERA_ENTRE_CONCILIACIONES_MS = 30000;
+const ESPERA_ENTRE_CONCILIACIONES_MS = obtenerConfiguracionPagos().reconciliationIntervalMs;
 const ultimas = new Map();
 
 function puedeConciliar(referencia, ahora = Date.now()) {
@@ -29,28 +22,39 @@ function puedeConciliar(referencia, ahora = Date.now()) {
 }
 
 async function conciliarReferencia({ referenciaInterna, idOrdenProveedor } = {}) {
-  const pago = await culqi.consultarOrdenVerificada({ orderId: idOrdenProveedor });
+  const pago = await mercadopago.consultarOrdenVerificada({
+    orderId: idOrdenProveedor,
+    referenciaInterna,
+  });
   if (pago.referenciaInterna !== referenciaInterna) {
-    throw new ErrorPago(409, 'CULQI_ORDEN_NO_COINCIDE',
-      'La orden consultada no corresponde a esta transacción.', false);
+    throw new ErrorPago(409, 'MERCADOPAGO_ORDEN_NO_COINCIDE',
+      'La orden consultada no corresponde a la transacción reservada.', false);
   }
-  const resultados = [];
+
   try {
-    const resultado = pago.estadoProveedor === 'paid'
+    const resultado = pago.estado === 'APROBADA'
       ? await transacciones.confirmarPagoProveedor(pago)
       : await transacciones.actualizarEstadoNoAprobado(pago);
-    resultados.push({ idPagoProveedor: pago.idPagoProveedor, estado: pago.estado, ...resultado });
+    return {
+      pagosEncontrados: 1,
+      confirmada: resultado.confirmada === true,
+      requiereRevision: resultado.requiereRevision === true || resultado.pagoDuplicado === true,
+      resultados: [{ idPagoProveedor: pago.idPagoProveedor, estado: pago.estado, ...resultado }],
+    };
   } catch (error) {
-    // Un 409 (transición inválida, importe distinto) queda para revisión.
     if (!(error instanceof ErrorPago) || error.status !== 409) throw error;
-    resultados.push({ idPagoProveedor: pago.idPagoProveedor, estado: pago.estado, error: error.code });
+    return {
+      pagosEncontrados: 1,
+      confirmada: false,
+      requiereRevision: true,
+      resultados: [{ idPagoProveedor: pago.idPagoProveedor, estado: pago.estado, error: error.code }],
+    };
   }
-  return {
-    pagosEncontrados: 1,
-    confirmada: resultados.some((r) => r.confirmada === true),
-    requiereRevision: resultados.some((r) => r.error || r.pagoDuplicado || r.requiereRevision),
-    resultados,
-  };
 }
 
-module.exports = { ESPERA_ENTRE_CONCILIACIONES_MS, puedeConciliar, conciliarReferencia, _ultimas: ultimas };
+module.exports = {
+  ESPERA_ENTRE_CONCILIACIONES_MS,
+  puedeConciliar,
+  conciliarReferencia,
+  _ultimas: ultimas,
+};

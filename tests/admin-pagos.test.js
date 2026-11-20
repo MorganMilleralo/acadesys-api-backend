@@ -35,7 +35,7 @@ test('lista transacciones de la academia con filtros parametrizados y paginació
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.paginacion, { total: 1, limite: 20, desde: 40 });
   const [tx] = r.body.transacciones;
-  assert.equal(tx.metodo, 'Culqi'); assert.equal(tx.monto, 150); assert.equal(tx.periodo, '2026-11');
+  assert.equal(tx.metodo, 'CULQI (histórico)'); assert.equal(tx.monto, 150); assert.equal(tx.periodo, '2026-11');
   assert.equal(tx.requiereRevision, true); assert.match(tx.motivoRevision, /devolución/);
   fin();
 });

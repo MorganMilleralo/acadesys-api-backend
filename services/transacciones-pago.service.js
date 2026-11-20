@@ -1,23 +1,31 @@
 
+
 'use strict';
 
 const crypto = require('node:crypto');
 const pool = require('../config/db');
 const { rollbackSeguro } = require('../utils/validaciones');
-const { ErrorPago, aCentimos, idOrdenCulqi } = require('../utils/pagos-proveedor');
+const { ErrorPago, aCentimos, idOrdenMercadoPago, idempotencyKeyValida } = require('../utils/pagos-proveedor');
+const { obtenerConfiguracionPagos, validarUrlCheckout } = require('../config/pagos');
 const { consultar, ejecutar } = require('../config/procedimientos');
 
-const PROVEEDOR = 'CULQI';
-const MONEDA = 'PEN';
+const CONFIG_PAGOS = obtenerConfiguracionPagos();
+const PROVEEDOR = CONFIG_PAGOS.provider;
+const MONEDA = CONFIG_PAGOS.currency;
 
 // Una reserva en CREANDO sin orden guardada después de 2 minutos es huérfana:
 // la orden nunca llegó al alumno, así que nadie puede pagarla.
-const CREACION_HUERFANA_SEGUNDOS = 120;
+const CREACION_HUERFANA_SEGUNDOS = CONFIG_PAGOS.reservationTimeoutSeconds;
 const ESTADOS_TRANSACCION = new Set(['CREANDO', 'PENDIENTE', 'APROBADA', 'RECHAZADA', 'CANCELADA',
   'REEMBOLSADA', 'CONTRACARGO', 'PAGO_DUPLICADO', 'ERROR', 'EXPIRADA']);
 
 function errorPago(status, code, message) {
   return new ErrorPago(status, code, message);
+}
+
+function referenciaInternaValida(valor) {
+  const prefijo = CONFIG_PAGOS.referencePrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return typeof valor === 'string' && new RegExp(`^${prefijo}-[1-9]\\d{0,14}-[a-f0-9-]{36}$`, 'i').test(valor);
 }
 
 function idPositivo(valor) {
@@ -61,8 +69,8 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
   const usuarioId = idPositivo(idUsuario);
   const academiaId = idPositivo(idAcademia);
   const proveedorActual = String(proveedor || PROVEEDOR).trim().toUpperCase();
-  if (proveedorActual !== 'CULQI') {
-    throw errorPago(400, 'PROVEEDOR_INVALIDO', 'El proveedor de pago no está admitido.');
+  if (proveedorActual !== PROVEEDOR) {
+    throw errorPago(400, 'PROVEEDOR_INVALIDO', 'El proveedor de pago no coincide con la configuración activa.');
   }
   if (!pagoId || !usuarioId || !academiaId) {
     throw errorPago(400, 'DATOS_INVALIDOS', 'No se pudo identificar la cuota o la sesión del alumno.');
@@ -95,11 +103,6 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
     if (montoCentimos === null || montoCentimos <= 0) {
       await connection.rollback();
       throw errorPago(409, 'MONTO_NO_COBRABLE', 'La cuota no tiene un importe válido para pagar online.');
-    }
-    if (proveedorActual === 'CULQI' && (montoCentimos < 600 || montoCentimos > 50000)) {
-      await connection.rollback();
-      throw errorPago(422, 'MONTO_FUERA_DE_RANGO_BILLETERAS',
-        'El pago con billeteras móviles debe estar entre S/ 6.00 y S/ 500.00. Contacta con la academia para otra forma de pago.');
     }
 
     // El pago manual y el online no se superponen. Mientras administración
@@ -140,52 +143,71 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
       if (aCentimos(actual.Monto) !== montoCentimos || actual.Moneda !== MONEDA) {
         await connection.rollback();
         throw errorPago(409, 'CHECKOUT_IMPORTE_CAMBIADO',
-          'El importe de la cuota cambió desde tu último intento. Podrás pagar con el importe nuevo cuando venza el checkout anterior (máximo 65 minutos).');
+          'El importe de la cuota cambió desde el último intento. Actualiza la lista antes de volver a pagar.');
       }
 
-      if (proveedorActual === 'CULQI' && actual.Estado === 'PENDIENTE'
-          && idOrdenCulqi(actual.IdOrdenProveedor)) {
+      if (idOrdenMercadoPago(actual.IdOrdenProveedor)) {
         await connection.commit();
         return {
-          reutilizada: true, enPreparacion: false,
+          reutilizada: true,
+          enPreparacion: false,
           idPago: pagoId,
           idTransaccion: Number(actual.IdTransaccion),
           referenciaInterna: actual.ReferenciaInterna,
           idempotencyKey: actual.ClaveIdempotencia,
           idOrdenProveedor: actual.IdOrdenProveedor,
-          monto: Number(actual.Monto), moneda: actual.Moneda, estado: actual.Estado,
+          checkoutUrl: actual.UrlCheckout || null,
+          monto: Number(actual.Monto),
+          moneda: actual.Moneda,
+          estado: actual.Estado,
           proveedor: proveedorActual,
           ...datosAlumno,
         };
       }
 
-      if (proveedorActual === 'CULQI' && actual.Estado === 'CREANDO'
-          && idOrdenCulqi(actual.IdOrdenProveedor)) {
+      if (actual.Estado === 'CREANDO') {
+        const antiguedad = Number(actual.AntiguedadSegundos);
+        const puedeReintentar = Number.isSafeInteger(antiguedad)
+          && antiguedad >= CREACION_HUERFANA_SEGUNDOS
+          && idempotencyKeyValida(actual.ClaveIdempotencia);
         await connection.commit();
+        if (!puedeReintentar) {
+          return {
+            reutilizada: false,
+            enPreparacion: true,
+            idTransaccion: Number(actual.IdTransaccion),
+            estado: actual.Estado,
+          };
+        }
         return {
-          reutilizada: false, enPreparacion: false, requiereConfirmacion: true,
+          reutilizada: true,
+          requiereReintento: true,
+          enPreparacion: false,
           idPago: pagoId,
           idTransaccion: Number(actual.IdTransaccion),
           referenciaInterna: actual.ReferenciaInterna,
           idempotencyKey: actual.ClaveIdempotencia,
-          idOrdenProveedor: actual.IdOrdenProveedor,
-          monto: Number(actual.Monto), moneda: actual.Moneda, estado: actual.Estado,
+          idOrdenProveedor: null,
+          checkoutUrl: null,
+          monto: Number(actual.Monto),
+          moneda: actual.Moneda,
+          estado: actual.Estado,
           proveedor: proveedorActual,
           ...datosAlumno,
         };
+      } else {
+        await connection.commit();
+        return {
+          reutilizada: false,
+          enPreparacion: true,
+          idTransaccion: Number(actual.IdTransaccion),
+          estado: actual.Estado,
+        };
       }
-
-      await connection.commit();
-      return {
-        reutilizada: false,
-        enPreparacion: true,
-        idTransaccion: Number(actual.IdTransaccion),
-        estado: actual.Estado,
-      };
     }
 
-    const referenciaInterna = `ACS-${pagoId}-${crypto.randomUUID()}`;
-    const idempotencyKey = `ACS-${crypto.randomUUID()}`;
+    const referenciaInterna = `${CONFIG_PAGOS.referencePrefix}-${pagoId}-${crypto.randomUUID()}`;
+    const idempotencyKey = crypto.randomUUID();
     const [insertado] = await ejecutar(connection, 'sp_transacciones_registrar_transaccion', [
         pagoId,
         usuarioId,
@@ -223,31 +245,37 @@ async function reservarCheckoutAlumno({ idPago, idUsuario, idAcademia, proveedor
 async function guardarOrdenCreada({
   idTransaccion,
   idOrdenProveedor,
-  checkoutUrl = null,
-  estadoProveedor = 'pending',
+  checkoutUrl,
+  estadoProveedor = 'created',
   proveedor = PROVEEDOR,
 }) {
   const id = idPositivo(idTransaccion);
   const proveedorActual = String(proveedor || PROVEEDOR).trim().toUpperCase();
-  const orden = idOrdenCulqi(idOrdenProveedor);
-  if (!id || proveedorActual !== 'CULQI' || !orden || orden !== String(idOrdenProveedor).trim()
-      || (checkoutUrl !== null && checkoutUrl !== undefined && checkoutUrl !== '')) {
-    throw errorPago(400, 'ORDEN_CULQI_INVALIDA', 'Los datos de la orden Culqi no son válidos.');
+  const orden = idOrdenMercadoPago(idOrdenProveedor);
+  if (!id || proveedorActual !== PROVEEDOR || !orden || orden !== String(idOrdenProveedor).trim()) {
+    throw errorPago(400, 'ORDEN_MERCADOPAGO_INVALIDA', 'Los datos de la orden de Mercado Pago no son válidos.');
   }
 
+  const urlCheckout = validarUrlCheckout(checkoutUrl);
   const estadoProveedorActual = String(estadoProveedor || '').trim().toLowerCase();
-  if (!['created', 'pending'].includes(estadoProveedorActual)) {
-    throw errorPago(409, 'ESTADO_ORDEN_CULQI_INVALIDO', 'Culqi devolvió un estado de orden no esperado.');
+  if (estadoProveedorActual !== 'created') {
+    throw errorPago(409, 'ESTADO_ORDEN_MERCADOPAGO_INVALIDO', 'Mercado Pago devolvió un estado inicial inesperado.');
   }
 
-  await ejecutar(pool, 'sp_transacciones_guardar_orden_proveedor', [orden, estadoProveedorActual, id]);
-
+  await ejecutar(pool, 'sp_transacciones_guardar_orden_proveedor', [
+    orden,
+    urlCheckout,
+    estadoProveedorActual,
+    proveedorActual,
+    id,
+  ]);
+  // La lectura posterior verifica que la orden y su URL quedaron persistidas.
   const [rows] = await consultar(pool, 'sp_transacciones_obtener_transaccion_por_id_transaccion', [id]);
   if (!rows.length) {
     throw errorPago(404, 'TRANSACCION_NO_ENCONTRADA', 'No se encontró la transacción creada.');
   }
-  if (rows[0].IdOrdenProveedor !== orden || rows[0].Estado === 'ERROR') {
-    throw errorPago(409, 'ORDEN_NO_GUARDADA', 'La orden Culqi no coincide con la transacción reservada.');
+  if (rows[0].IdOrdenProveedor !== orden || rows[0].UrlCheckout !== urlCheckout || rows[0].Estado === 'ERROR') {
+    throw errorPago(409, 'ORDEN_NO_GUARDADA', 'La orden de Mercado Pago no coincide con la transacción reservada.');
   }
   return rows[0];
 }
@@ -255,8 +283,8 @@ async function guardarOrdenCreada({
 async function marcarErrorCreacion(idTransaccion, proveedor = PROVEEDOR) {
   const id = idPositivo(idTransaccion);
   const proveedorActual = String(proveedor || PROVEEDOR).trim().toUpperCase();
-  if (!id || proveedorActual !== 'CULQI') return;
-  await ejecutar(pool, 'sp_transacciones_marcar_error_creacion', [id]);
+  if (!id || proveedorActual !== PROVEEDOR) return;
+  await ejecutar(pool, 'sp_transacciones_marcar_error_creacion', [id, proveedorActual]);
 }
 
 async function obtenerEstadoPagoAlumno({ idPago, idUsuario, idAcademia }) {
@@ -274,7 +302,7 @@ async function obtenerEstadoPagoAlumno({ idPago, idUsuario, idAcademia }) {
     transaccion: row.IdTransaccion ? {
       idTransaccion: Number(row.IdTransaccion),
       proveedor: row.Proveedor,
-      orderId: row.Proveedor === 'CULQI' ? row.IdOrdenProveedor : null,
+      orderId: row.IdOrdenProveedor || null,
       estado: row.EstadoTransaccion,
       referenciaInterna: row.ReferenciaInterna,
       checkoutUrl: row.UrlCheckout,
@@ -290,158 +318,227 @@ async function obtenerEstadoPagoAlumno({ idPago, idUsuario, idAcademia }) {
  * Solo recibe datos normalizados tras validar el aviso y consultar al proveedor. La auditoría
  * existente guarda la versión de cada pago.
  */
+function estadoInternoMercadoPago(estadoProveedor) {
+  const valor = String(estadoProveedor || '').trim().toLowerCase();
+  if (valor === 'processed:accredited') return 'APROBADA';
+  if (valor === 'processed:partially_refunded' || valor === 'refunded:refunded') return 'REEMBOLSADA';
+  if (valor.startsWith('failed:')) return 'RECHAZADA';
+  if (valor === 'canceled:canceled') return 'CANCELADA';
+  if (valor === 'created:created' || valor.startsWith('processing:') || valor.startsWith('action_required:')) return 'PENDIENTE';
+  return null;
+}
+
 async function aplicarPagoProveedor(datos) {
   const proveedorActual = String(datos?.proveedor || PROVEEDOR).trim().toUpperCase();
-  const { referenciaInterna: referencia, idOrdenProveedor: orden, idPagoProveedor,
-    idTransaccion, idPago: idPagoMetadata, monto, moneda, estadoProveedor, fechaActualizacionProveedor } = datos;
-  if (proveedorActual !== 'CULQI') {
-    throw errorPago(409, 'PROVEEDOR_NO_ADMITIDO', 'La notificación pertenece a un proveedor no admitido.');
-  }
+  const {
+    referenciaInterna: referencia,
+    idOrdenProveedor: orden,
+    idPagoProveedor,
+    monto,
+    moneda,
+    estadoProveedor,
+    estado,
+    fechaActualizacionProveedor,
+  } = datos || {};
 
-  const esCulqi = proveedorActual === 'CULQI';
-  const estadoAprobado = esCulqi ? 'paid' : 'approved';
-  const estados = esCulqi
-    ? { created: 'PENDIENTE', pending: 'PENDIENTE', paid: 'APROBADA', expired: 'EXPIRADA', deleted: 'CANCELADA' }
-    : { approved: 'APROBADA', pending: 'PENDIENTE', in_process: 'PENDIENTE',
-      authorized: 'PENDIENTE', in_mediation: 'PENDIENTE', rejected: 'RECHAZADA',
-      cancelled: 'CANCELADA', refunded: 'REEMBOLSADA', charged_back: 'CONTRACARGO' };
+  const estadoDerivado = estadoInternoMercadoPago(estadoProveedor);
   const importe = aCentimos(monto);
-  const idOrdenValido = idOrdenCulqi(orden);
-  const idPagoProveedorValido = idOrdenCulqi(idPagoProveedor);
-  if (typeof referencia !== 'string' || !/^ACS-[1-9]\d*-[-a-f0-9]{36}$/.test(referencia)
-      || !idOrdenValido || !idPagoProveedorValido || !idPositivo(idTransaccion) || !importe
-      || moneda !== MONEDA || !Object.hasOwn(estados, estadoProveedor)
-      || datos.estado !== estados[estadoProveedor]
-      || !Number.isSafeInteger(fechaActualizacionProveedor) || fechaActualizacionProveedor <= 0) {
-    throw errorPago(409, 'EVENTO_PAGO_INVALIDO', 'La operación verificada no contiene los datos requeridos.');
-  }
-  if (esCulqi && (String(idPagoProveedor) !== String(orden)
-      || !idPositivo(idPagoMetadata)
-      || !referencia.startsWith(`ACS-${Number(idPagoMetadata)}-`))) {
-    throw errorPago(409, 'ORDEN_CULQI_NO_COINCIDE', 'La orden, cuota y referencia no coinciden con la notificación.');
+  const idOrdenValido = idOrdenMercadoPago(orden);
+  const idRecursoValido = idOrdenMercadoPago(idPagoProveedor);
+  if (proveedorActual !== PROVEEDOR
+      || typeof referencia !== 'string'
+      || !referenciaInternaValida(referencia)
+      || !idOrdenValido
+      || !idRecursoValido
+      || idRecursoValido !== idOrdenValido
+      || importe === null
+      || importe <= 0
+      || moneda !== MONEDA
+      || !estadoDerivado
+      || estado !== estadoDerivado
+      || !Number.isSafeInteger(fechaActualizacionProveedor)
+      || fechaActualizacionProveedor <= 0) {
+    throw errorPago(409, 'EVENTO_PAGO_INVALIDO', 'La orden verificada no contiene los datos requeridos para actualizar la cuota.');
   }
 
   let connection;
   try {
-    // Localizar sin lock, luego tomar cuota ANTES de transacción, como checkout.
     const [localizadas] = await consultar(pool, 'sp_transacciones_obtener_transaccion_por_proveedor', [proveedorActual, referencia]);
-    if (!localizadas.length) throw errorPago(404, 'TRANSACCION_NO_ENCONTRADA', 'No existe la transacción notificada.');
+    if (!localizadas.length) throw errorPago(404, 'TRANSACCION_NO_ENCONTRADA', 'No existe la transacción asociada a la orden notificada.');
+
     connection = await pool.getConnection();
     await connection.beginTransaction();
     const [cuotas] = await consultar(connection, 'sp_transacciones_bloquear_cuota', [localizadas[0].IdPago]);
-    if (!cuotas.length) throw errorPago(404, 'CUOTA_NO_ENCONTRADA', 'No existe la cuota relacionada.');
+    if (!cuotas.length) throw errorPago(404, 'CUOTA_NO_ENCONTRADA', 'No existe la cuota relacionada con la orden.');
     const cuota = cuotas[0];
     const [rows] = await consultar(connection, 'sp_transacciones_bloquear_transaccion_por_proveedor', [proveedorActual, referencia]);
     const tx = rows[0];
-    if (!tx || Number(tx.IdTransaccion) !== Number(idTransaccion) || tx.ReferenciaInterna !== referencia
-        || Number(tx.IdPago) !== Number(cuota.IdPago) || Number(tx.IdUsuario) !== Number(cuota.IdUsuario)
-        || Number(tx.IdAcademia) !== Number(cuota.IdAcademia) || tx.Proveedor !== proveedorActual
-        || (esCulqi && Number(tx.IdPago) !== Number(idPagoMetadata))) {
-      throw errorPago(409, 'TRANSACCION_NO_COINCIDE', 'El pago no corresponde a la transacción y cuota registradas.');
+
+    if (!tx
+        || tx.ReferenciaInterna !== referencia
+        || Number(tx.IdPago) !== Number(cuota.IdPago)
+        || Number(tx.IdUsuario) !== Number(cuota.IdUsuario)
+        || Number(tx.IdAcademia) !== Number(cuota.IdAcademia)
+        || tx.Proveedor !== proveedorActual) {
+      throw errorPago(409, 'TRANSACCION_NO_COINCIDE', 'La orden no corresponde a la transacción y cuota registradas.');
     }
     if ((tx.IdOrdenProveedor && tx.IdOrdenProveedor !== orden)
         || (!tx.IdOrdenProveedor && tx.Estado !== 'CREANDO')) {
-      throw errorPago(409, 'ORDEN_NO_COINCIDE', 'La orden no coincide con la transacción interna.');
+      throw errorPago(409, 'ORDEN_NO_COINCIDE', 'La orden recibida no coincide con la orden reservada en AcadeSys.');
     }
     if (aCentimos(tx.Monto) !== importe || aCentimos(cuota.Monto) !== importe || tx.Moneda !== MONEDA) {
-      throw errorPago(409, 'IMPORTE_NO_COINCIDE', 'El importe o moneda no coincide con la cuota registrada.');
+      throw errorPago(409, 'IMPORTE_NO_COINCIDE', 'El importe o la moneda de la orden no coincide con la cuota registrada.');
     }
 
     const eventoEstado = `${proveedorActual}_EVENTO`;
     const [auditorias] = await consultar(connection, 'sp_transacciones_bloquear_auditoria_pago', [tx.IdPago, tx.IdAcademia, eventoEstado]);
-    const recibos = auditorias.map(row => {
+    const estadoAuditable = (valor) => {
+      if (typeof valor !== 'string') return false;
+      const [status, detail] = valor.split(':', 2);
+      if (!status || !detail) return false;
+      if (status === 'failed') return true;
+      if (status === 'processing') return ['in_process', 'pending_review_manual'].includes(detail);
+      if (status === 'action_required') return ['waiting_payment', 'waiting_capture'].includes(detail);
+      return [
+        'created:created',
+        'processed:accredited',
+        'processed:partially_refunded',
+        'refunded:refunded',
+        'canceled:canceled',
+      ].includes(valor);
+    };
+
+    const recibos = auditorias.map((row) => {
       let recibo;
       try { recibo = JSON.parse(row.Motivo); } catch { /* falla cerrada */ }
-      const reciboPagoValido = idOrdenCulqi(recibo?.pago);
-      if (!recibo || recibo.v !== 1 || !reciboPagoValido
-          || !idPositivo(recibo.transaccion) || !Number.isSafeInteger(recibo.actualizado)
-          || !Object.hasOwn(estados, recibo.estado)) {
-        throw errorPago(409, 'AUDITORIA_PAGO_INVALIDA', 'La auditoría del proveedor requiere revisión.');
+      if (!recibo
+          || recibo.v !== 1
+          || !idOrdenMercadoPago(recibo.pago)
+          || !idPositivo(recibo.transaccion)
+          || !Number.isSafeInteger(recibo.actualizado)
+          || !estadoAuditable(recibo.estado)) {
+        throw errorPago(409, 'AUDITORIA_PAGO_INVALIDA', 'La auditoría de Mercado Pago requiere revisión.');
       }
       return recibo;
-    }).filter(r => Number(r.transaccion) === Number(tx.IdTransaccion));
-    const anterior = recibos.find(r => r.pago === String(idPagoProveedor));
+    }).filter((recibo) => Number(recibo.transaccion) === Number(tx.IdTransaccion));
+
+    const anterior = recibos.find((recibo) => recibo.pago === String(idRecursoValido));
     const resultado = { idPago: Number(tx.IdPago), idTransaccion: Number(tx.IdTransaccion) };
     if (anterior && fechaActualizacionProveedor <= anterior.actualizado) {
       if (fechaActualizacionProveedor === anterior.actualizado && anterior.estado !== estadoProveedor) {
-        throw errorPago(409, 'VERSION_PAGO_CONFLICTIVA', 'El proveedor devolvió estados distintos para la misma versión.');
+        throw errorPago(409, 'VERSION_PAGO_CONFLICTIVA', 'Mercado Pago devolvió estados distintos para la misma versión de la orden.');
       }
       await connection.commit();
       return { ...resultado, idempotente: true, atrasada: fechaActualizacionProveedor < anterior.actualizado };
     }
-    const estadosFinales = ['paid', 'expired', 'deleted'];
-    const estadosReversion = [];
-    if (anterior && estadosFinales.includes(anterior.estado)
-        && !estadosReversion.includes(estadoProveedor) && estadoProveedor !== anterior.estado) {
-      throw errorPago(409, 'TRANSICION_PROVEEDOR_INVALIDA', 'La transición del pago requiere conciliación.');
+
+    const estadosReversion = new Set(['REEMBOLSADA']);
+    const esReversion = estadosReversion.has(estadoDerivado);
+    const estadoAnteriorFinal = anterior && (
+      anterior.estado === 'processed:accredited'
+      || anterior.estado === 'processed:partially_refunded'
+      || anterior.estado === 'refunded:refunded'
+      || anterior.estado.startsWith('failed:')
+      || anterior.estado === 'canceled:canceled'
+    );
+    if (estadoAnteriorFinal
+        && anterior.estado !== estadoProveedor
+        && !esReversion) {
+      throw errorPago(409, 'TRANSICION_PROVEEDOR_INVALIDA', 'La transición de la orden requiere revisión administrativa.');
     }
 
     let estadoTx = tx.Estado;
-    let codigoProveedor = tx.CodigoEstadoProveedor;
+    let codigoProveedor = estadoProveedor;
     let pagoDuplicado = false;
     let confirmada = false;
-    const esReversion = estadosReversion.includes(estadoProveedor);
-    if (estadoProveedor === estadoAprobado) {
-      codigoProveedor = estadoProveedor;
-      const yaConfirmado = recibos.some(r => r.pago === String(idPagoProveedor) && r.estado === estadoAprobado);
-      if (String(cuota.Estado).toLowerCase() === 'pagado') {
+
+    if (estadoDerivado === 'APROBADA') {
+      const yaConfirmado = recibos.some((recibo) => recibo.pago === String(idRecursoValido)
+        && recibo.estado === 'processed:accredited');
+      if (String(cuota.Estado).trim().toLowerCase() === 'pagado') {
         if (yaConfirmado) {
           confirmada = tx.Estado === 'APROBADA';
         } else {
           pagoDuplicado = true;
           if (tx.Estado !== 'APROBADA') estadoTx = 'PAGO_DUPLICADO';
           await auditar(connection, {
-            idPago: tx.IdPago, idAcademia: tx.IdAcademia, evento: 'PAGO_DUPLICADO_PROVEEDOR',
-            estadoAnterior: cuota.Estado, estadoNuevo: cuota.Estado,
-            montoAnterior: Number(cuota.Monto), montoNuevo: importe / 100,
-            motivo: `Pago adicional ${idPagoProveedor}; transacción ${tx.IdTransaccion}. Requiere revisión administrativa.`,
+            idPago: tx.IdPago,
+            idAcademia: tx.IdAcademia,
+            evento: 'PAGO_DUPLICADO_PROVEEDOR',
+            estadoAnterior: cuota.Estado,
+            estadoNuevo: cuota.Estado,
+            montoAnterior: Number(cuota.Monto),
+            montoNuevo: importe / 100,
+            motivo: `Orden adicional ${idRecursoValido}; transacción ${tx.IdTransaccion}. Requiere revisión administrativa.`,
           });
         }
       } else {
         if (!['CREANDO', 'PENDIENTE', 'RECHAZADA', 'CANCELADA', 'EXPIRADA'].includes(tx.Estado)) {
-          throw errorPago(409, 'ESTADO_TRANSACCION_NO_CONFIRMABLE', 'La transacción requiere conciliación.');
+          throw errorPago(409, 'ESTADO_TRANSACCION_NO_CONFIRMABLE', 'La transacción requiere revisión antes de confirmar la cuota.');
         }
         const [cambio] = await ejecutar(connection, 'sp_transacciones_actualizar_estado_cuota', [tx.IdPago, tx.IdUsuario]);
         if (cambio.affectedRows !== 1) throw errorPago(409, 'CUOTA_NO_ACTUALIZADA', 'No se pudo confirmar la cuota.');
         estadoTx = 'APROBADA';
         confirmada = true;
         await auditar(connection, {
-          idPago: tx.IdPago, idAcademia: tx.IdAcademia,
+          idPago: tx.IdPago,
+          idAcademia: tx.IdAcademia,
           evento: `PAGO_${proveedorActual}_CONFIRMADO`,
-          estadoAnterior: cuota.Estado, estadoNuevo: 'Pagado',
-          montoAnterior: Number(cuota.Monto), montoNuevo: importe / 100,
-          motivo: `Pago ${idPagoProveedor}; orden ${orden}; transacción ${tx.IdTransaccion}. Verificado con API.`,
+          estadoAnterior: cuota.Estado,
+          estadoNuevo: 'Pagado',
+          montoAnterior: Number(cuota.Monto),
+          montoNuevo: importe / 100,
+          motivo: `Orden ${idRecursoValido}; transacción ${tx.IdTransaccion}. Verificado mediante Orders API.`,
         });
       }
-    } else if (!['APROBADA', 'PAGO_DUPLICADO', 'REEMBOLSADA', 'CONTRACARGO', 'EXPIRADA'].includes(tx.Estado)
-        && !recibos.some(r => r.actualizado >= fechaActualizacionProveedor)) {
-      estadoTx = estados[estadoProveedor];
-      codigoProveedor = estadoProveedor;
+    } else if (esReversion) {
+      estadoTx = 'REEMBOLSADA';
+    } else if (!['APROBADA', 'PAGO_DUPLICADO', 'REEMBOLSADA', 'CONTRACARGO'].includes(tx.Estado)) {
+      estadoTx = estadoDerivado;
     }
 
     const [cambioTx] = await ejecutar(connection, 'sp_transacciones_actualizar_estado_proveedor', [
-        estadoTx,
-        orden,
-        codigoProveedor || estadoProveedor,
-        tx.IdTransaccion,
-        proveedorActual,
-      ]);
-    if (cambioTx.affectedRows !== 1) throw errorPago(409, 'TRANSACCION_NO_ACTUALIZADA', 'No se pudo actualizar la transacción.');
+      estadoTx,
+      orden,
+      estadoProveedor,
+      tx.IdTransaccion,
+      proveedorActual,
+    ]);
+    if (cambioTx.affectedRows !== 1) {
+      throw errorPago(409, 'TRANSACCION_NO_ACTUALIZADA', 'No se pudo actualizar la transacción del proveedor.');
+    }
+
     await auditar(connection, {
-      idPago: tx.IdPago, idAcademia: tx.IdAcademia, evento: eventoEstado,
-      estadoAnterior: tx.Estado, estadoNuevo: estadoTx,
-      montoAnterior: Number(tx.Monto), montoNuevo: importe / 100,
-      motivo: JSON.stringify({ v: 1, transaccion: Number(tx.IdTransaccion), pago: String(idPagoProveedor),
-        preferencia: orden, actualizado: fechaActualizacionProveedor, estado: estadoProveedor }),
+      idPago: tx.IdPago,
+      idAcademia: tx.IdAcademia,
+      evento: eventoEstado,
+      estadoAnterior: tx.Estado,
+      estadoNuevo: estadoTx,
+      montoAnterior: Number(tx.Monto),
+      montoNuevo: importe / 100,
+      motivo: JSON.stringify({
+        v: 1,
+        transaccion: Number(tx.IdTransaccion),
+        pago: String(idRecursoValido),
+        orden: orden,
+        actualizado: fechaActualizacionProveedor,
+        estado: estadoProveedor,
+      }),
     });
+
     if (esReversion) {
       await auditar(connection, {
-        idPago: tx.IdPago, idAcademia: tx.IdAcademia, evento: `${proveedorActual}_REQUIERE_REVISION`,
-        estadoAnterior: cuota.Estado, estadoNuevo: cuota.Estado,
-        montoAnterior: Number(cuota.Monto), montoNuevo: Number(cuota.Monto),
-        motivo: `Pago ${idPagoProveedor}: ${estadoProveedor}. Conciliar manualmente; no se revierte la cuota automáticamente.`,
+        idPago: tx.IdPago,
+        idAcademia: tx.IdAcademia,
+        evento: `${proveedorActual}_REQUIERE_REVISION`,
+        estadoAnterior: cuota.Estado,
+        estadoNuevo: cuota.Estado,
+        montoAnterior: Number(cuota.Monto),
+        montoNuevo: Number(cuota.Monto),
+        motivo: `Mercado Pago reportó ${estadoProveedor} para la orden ${orden}. La mensualidad no se revierte automáticamente; requiere revisión.`,
       });
     }
+
     await connection.commit();
     return { ...resultado, confirmada, pagoDuplicado, requiereRevision: esReversion, idempotente: false };
   } catch (error) {
@@ -454,17 +551,19 @@ async function aplicarPagoProveedor(datos) {
 
 async function confirmarPagoProveedor(datos) {
   const proveedor = String(datos?.proveedor || PROVEEDOR).trim().toUpperCase();
-  if (proveedor !== 'CULQI') throw errorPago(409, 'PROVEEDOR_NO_ADMITIDO', 'Solo se admite Culqi.');
-  const estadoEsperado = 'paid';
-  if (datos?.estadoProveedor !== estadoEsperado) throw errorPago(409, 'PAGO_NO_APROBADO', 'La operación no está aprobada.');
+  if (proveedor !== PROVEEDOR) throw errorPago(409, 'PROVEEDOR_NO_ADMITIDO', 'La orden no pertenece al proveedor configurado.');
+  if (datos?.estado !== 'APROBADA' || datos?.estadoProveedor !== 'processed:accredited') {
+    throw errorPago(409, 'PAGO_NO_APROBADO', 'La orden no figura como acreditada en Mercado Pago.');
+  }
   return aplicarPagoProveedor(datos);
 }
 
 async function actualizarEstadoNoAprobado(datos) {
   const proveedor = String(datos?.proveedor || PROVEEDOR).trim().toUpperCase();
-  if (proveedor !== 'CULQI') throw errorPago(409, 'PROVEEDOR_NO_ADMITIDO', 'Solo se admite Culqi.');
-  const estadoAprobado = 'paid';
-  if (datos?.estadoProveedor === estadoAprobado) throw errorPago(409, 'ESTADO_PROVEEDOR_INVALIDO', 'Usa la confirmación transaccional.');
+  if (proveedor !== PROVEEDOR) throw errorPago(409, 'PROVEEDOR_NO_ADMITIDO', 'La orden no pertenece al proveedor configurado.');
+  if (datos?.estado === 'APROBADA' || datos?.estadoProveedor === 'processed:accredited') {
+    throw errorPago(409, 'ESTADO_PROVEEDOR_INVALIDO', 'Una orden acreditada debe pasar por la confirmación transaccional.');
+  }
   return aplicarPagoProveedor(datos);
 }
 
@@ -506,10 +605,10 @@ function normalizarFiltrosTransacciones(query = {}) {
 
 function motivoRevision(row) {
   if (row.Estado === 'PAGO_DUPLICADO') return 'Pago adicional aprobado sobre una cuota ya pagada: evaluar devolución.';
-  if (row.Estado === 'REEMBOLSADA') return 'Culqi informó un reembolso: la cuota no se revirtió automáticamente.';
-  if (row.Estado === 'CONTRACARGO') return 'Culqi informó un contracargo: la cuota no se revirtió automáticamente.';
+  if (row.Estado === 'REEMBOLSADA') return 'Mercado Pago informó un reembolso: la cuota requiere revisión administrativa.';
+  if (row.Estado === 'CONTRACARGO') return 'El proveedor informó un contracargo: la cuota requiere revisión administrativa.';
   if (row.Estado === 'CREANDO' && Number(row.AntiguedadSegundos) >= CREACION_HUERFANA_SEGUNDOS) {
-    return 'Checkout sin confirmar del proveedor; se descartará en el próximo intento del alumno.';
+    return 'Checkout pendiente de recuperación idempotente; no se abrirá una segunda orden.';
   }
   return null;
 }
@@ -543,7 +642,7 @@ async function listarTransaccionesAdmin({ idAcademia, filtros }) {
         idCiclo: Number(row.IdCiclo),
         ciclo: row.Ciclo || null,
         periodo: row.Periodo || null,
-        metodo: row.Proveedor === PROVEEDOR ? 'Culqi' : row.Proveedor,
+        metodo: row.Proveedor === PROVEEDOR ? 'Mercado Pago' : `${row.Proveedor} (histórico)`,
         monto: Number(row.Monto),
         moneda: row.Moneda,
         estado: row.Estado,

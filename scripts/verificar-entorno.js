@@ -1,3 +1,4 @@
+
 'use strict';
 
 // Revisión local del entorno. No imprime valores secretos ni se conecta a MySQL.
@@ -44,6 +45,28 @@ add('API_PUBLIC_URL', publicApiOk,
 const academyId = Number(process.env.PUBLIC_REGISTRATION_ACADEMY_ID);
 add('PUBLIC_REGISTRATION_ACADEMY_ID', Number.isSafeInteger(academyId) && academyId > 0,
   Number.isSafeInteger(academyId) && academyId > 0 ? 'entero positivo' : 'FALTA o no es un entero positivo');
+
+
+const paymentProvider = text(process.env.PAYMENT_PROVIDER).toUpperCase();
+add('PAYMENT_PROVIDER', paymentProvider === 'MERCADOPAGO',
+  paymentProvider === 'MERCADOPAGO' ? 'MERCADOPAGO' : 'Debe ser MERCADOPAGO');
+
+const paymentEnvironment = text(process.env.PAYMENT_ENVIRONMENT).toUpperCase();
+add('PAYMENT_ENVIRONMENT', paymentEnvironment === 'TEST',
+  paymentEnvironment === 'TEST' ? 'entorno de pruebas' : 'La migración entregada solo admite TEST');
+
+const accessToken = text(process.env.MERCADOPAGO_ACCESS_TOKEN);
+add('MERCADOPAGO_ACCESS_TOKEN', /^APP_USR-[A-Za-z0-9_-]{16,}$/.test(accessToken),
+  /^APP_USR-[A-Za-z0-9_-]{16,}$/.test(accessToken) ? 'token de prueba configurado (valor oculto)' : 'Falta un Access Token de prueba APP_USR válido');
+
+const webhookSecret = text(process.env.MERCADOPAGO_WEBHOOK_SECRET);
+add('MERCADOPAGO_WEBHOOK_SECRET', webhookSecret.length >= 16,
+  webhookSecret.length >= 16 ? 'firma secreta configurada (valor oculto)' : 'Pendiente: se completa al guardar Webhooks en Mercado Pago');
+
+const mpApi = text(process.env.MERCADOPAGO_API_BASE_URL);
+let mpApiOk = false;
+try { const u = new URL(mpApi); mpApiOk = u.protocol === 'https:' && u.hostname === 'api.mercadopago.com'; } catch { mpApiOk = false; }
+add('MERCADOPAGO_API_BASE_URL', mpApiOk, mpApiOk ? 'API oficial HTTPS' : 'Debe apuntar a https://api.mercadopago.com');
 
 console.log('\nAcadeSys - comprobación del entorno');
 console.log('No se muestran contraseñas, tokens ni URLs secretas.');
