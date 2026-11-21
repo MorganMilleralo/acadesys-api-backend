@@ -259,7 +259,8 @@ async function guardarOrdenCreada({
 
   const urlCheckout = validarUrlCheckout(checkoutUrl);
   const estadoProveedorActual = String(estadoProveedor || '').trim().toLowerCase();
-  if (estadoProveedorActual !== 'created') {
+  // Estados iniciales de Checkout Pro: created o action_required (esperando el pago).
+  if (!/^(created|action_required)(:[a-z_]+)?$/.test(estadoProveedorActual)) {
     throw errorPago(409, 'ESTADO_ORDEN_MERCADOPAGO_INVALIDO', 'Mercado Pago devolvió un estado inicial inesperado.');
   }
 

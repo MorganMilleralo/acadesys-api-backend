@@ -152,14 +152,18 @@ async function crearOrdenPago(reserva) {
     idempotencyKey,
   });
   validarOrdenBasica(order, { referenciaInterna: externalReference, monto: amount, moneda: config.currency }, config);
-  if (order.status !== 'created' || order.status_detail !== 'created') {
-    throw new ErrorPago(502, 'MERCADOPAGO_ORDEN_INICIAL_INVALIDA', 'Mercado Pago no devolvió una orden en estado inicial.', false);
+  // Checkout Pro puede devolver la orden recién creada como created:created o
+  // ya esperando el pago (action_required:waiting_payment). Ambos son iniciales.
+  const estadoInicial = validarEstadoOrden(order);
+  const estadoRecibido = `${order.status || 'sin_estado'}:${order.status_detail || 'sin_detalle'}`.slice(0, 80);
+  if (estadoInicial?.estado !== 'PENDIENTE' && String(order.status || '').toLowerCase() !== 'created') {
+    throw new ErrorPago(502, 'MERCADOPAGO_ORDEN_INICIAL_INVALIDA', `Mercado Pago no devolvió una orden en estado inicial (${estadoRecibido}).`, false);
   }
 
   return {
     idOrdenProveedor: order.id,
     checkoutUrl: validarUrlCheckout(order.checkout_url),
-    estadoProveedor: order.status,
+    estadoProveedor: estadoRecibido,
     monto: Number(order.total_amount),
     moneda: order.currency,
   };

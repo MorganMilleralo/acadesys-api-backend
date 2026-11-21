@@ -156,3 +156,15 @@ test('rechaza un token que no corresponde a credenciales de prueba Checkout Pro 
     process.env.MERCADOPAGO_ACCESS_TOKEN = previous;
   }
 });
+
+test('acepta una orden nueva que Mercado Pago devuelve esperando el pago', async (t) => {
+  t.mock.method(global, 'fetch', async () => jsonResponse({ ...ORDER, status: 'action_required', status_detail: 'waiting_payment' }, 201));
+  const result = await adapter.crearOrdenPago(reservation());
+  assert.equal(result.idOrdenProveedor, ORDER_ID);
+  assert.equal(result.estadoProveedor, 'action_required:waiting_payment');
+});
+
+test('rechaza una orden nueva que ya llega procesada y muestra el estado recibido', async (t) => {
+  t.mock.method(global, 'fetch', async () => jsonResponse({ ...ORDER, status: 'processed', status_detail: 'accredited' }, 201));
+  await assert.rejects(adapter.crearOrdenPago(reservation()), /estado inicial \(processed:accredited\)/);
+});
