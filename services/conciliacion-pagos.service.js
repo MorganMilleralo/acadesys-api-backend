@@ -47,6 +47,7 @@ async function conciliarReferencia({ referenciaInterna, idOrdenProveedor } = {})
       pagosEncontrados: 1,
       confirmada: false,
       requiereRevision: true,
+      motivo: error.code,
       resultados: [{ idPagoProveedor: pago.idPagoProveedor, estado: pago.estado, error: error.code }],
     };
   }

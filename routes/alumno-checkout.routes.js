@@ -199,6 +199,7 @@ router.post('/pagos/:idPago/conciliar', async (req, res) => {
           pagosEncontrados: resultado.pagosEncontrados,
           confirmada: resultado.confirmada,
           requiereRevision: resultado.requiereRevision,
+          ...(resultado.motivo ? { motivo: resultado.motivo } : {}),
         };
       } else {
         resumen = { consultado: false, motivo: 'CONSULTA_RECIENTE' };

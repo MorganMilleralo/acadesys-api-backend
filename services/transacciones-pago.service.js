@@ -394,21 +394,11 @@ async function aplicarPagoProveedor(datos) {
 
     const eventoEstado = `${proveedorActual}_EVENTO`;
     const [auditorias] = await consultar(connection, 'sp_transacciones_bloquear_auditoria_pago', [tx.IdPago, tx.IdAcademia, eventoEstado]);
-    const estadoAuditable = (valor) => {
-      if (typeof valor !== 'string') return false;
-      const [status, detail] = valor.split(':', 2);
-      if (!status || !detail) return false;
-      if (status === 'failed') return true;
-      if (status === 'processing') return ['in_process', 'pending_review_manual'].includes(detail);
-      if (status === 'action_required') return ['waiting_payment', 'waiting_capture'].includes(detail);
-      return [
-        'created:created',
-        'processed:accredited',
-        'processed:partially_refunded',
-        'refunded:refunded',
-        'canceled:canceled',
-      ].includes(valor);
-    };
+    // Un estado auditable es cualquiera que el sistema sabe interpretar; debe
+    // coincidir con estadoInternoMercadoPago para no bloquear pagos posteriores.
+    const estadoAuditable = (valor) => typeof valor === 'string'
+      && /^[a-z_]+:[a-z_]+$/.test(valor)
+      && estadoInternoMercadoPago(valor) !== null;
 
     const recibos = auditorias.map((row) => {
       let recibo;
