@@ -8,6 +8,7 @@ const { rollbackSeguro } = require('../utils/validaciones');
 const { ErrorPago, aCentimos, idOrdenMercadoPago, idempotencyKeyValida } = require('../utils/pagos-proveedor');
 const { obtenerConfiguracionPagos, validarUrlCheckout } = require('../config/pagos');
 const { consultar, ejecutar } = require('../config/procedimientos');
+const boletas = require('./boletas.service');
 
 const CONFIG_PAGOS = obtenerConfiguracionPagos();
 const PROVEEDOR = CONFIG_PAGOS.provider;
@@ -555,7 +556,10 @@ async function confirmarPagoProveedor(datos) {
   if (datos?.estado !== 'APROBADA' || datos?.estadoProveedor !== 'processed:accredited') {
     throw errorPago(409, 'PAGO_NO_APROBADO', 'La orden no figura como acreditada en Mercado Pago.');
   }
-  return aplicarPagoProveedor(datos);
+  const resultado = await aplicarPagoProveedor(datos);
+  // La boleta electrónica se emite después del commit y no afecta la confirmación.
+  if (resultado?.confirmada && resultado.idPago) boletas.programarEmision(resultado.idPago);
+  return resultado;
 }
 
 async function actualizarEstadoNoAprobado(datos) {

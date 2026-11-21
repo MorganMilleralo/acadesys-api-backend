@@ -6,6 +6,9 @@ const pool = require('../config/db');
 const requiereRol = require('../middlewares/roles.middleware');
 const { idPositivo, rollbackSeguro } = require('../utils/validaciones');
 const { consultar, ejecutar } = require('../config/procedimientos');
+const boletas = require('../services/boletas.service');
+const { facturacionActiva } = require('../config/facturacion');
+const { enviarArchivoBoleta, formatoSolicitado, boletaPublica } = require('../utils/boleta-archivo');
 const {
   normalizarPeriodoMensualidad,
   fechaISOValida,
@@ -206,6 +209,7 @@ router.put('/pagos/comprobantes/:idComprobante/estado', requiereRol('Administrad
     });
 
     await connection.commit();
+    if (estado === 'APROBADO') boletas.programarEmision(comprobante.IdPago);
     res.json({
       exito: true,
       idComprobante,
@@ -221,6 +225,52 @@ router.put('/pagos/comprobantes/:idComprobante/estado', requiereRol('Administrad
     res.status(500).json({ error: 'No se pudo actualizar el comprobante.' });
   } finally {
     if (connection) connection.release();
+  }
+});
+
+// Boleta electrónica SUNAT de una cuota (administración de la misma academia).
+router.get('/pagos/:id/boleta', requiereRol('Administrador'), async (req, res) => {
+  const idPago = idPositivo(req.params.id);
+  const idAcademia = idAcademiaActor(req);
+  if (!idPago) return res.status(400).json({ error: 'El IdPago no es válido.' });
+  if (!idAcademia) return res.status(401).json({ error: 'La sesión administrativa no es válida.' });
+  try {
+    if (req.query?.formato) {
+      const [archivos] = await consultar(pool, 'sp_boletas_obtener_archivo_admin', [idPago, idAcademia]);
+      return enviarArchivoBoleta(res, archivos[0], formatoSolicitado(req));
+    }
+    const [rows] = await consultar(pool, 'sp_boletas_obtener_estado_admin', [idPago, idAcademia]);
+    if (!rows.length) return res.json({ boleta: null });
+    const fila = rows[0];
+    res.json({ boleta: { ...boletaPublica(fila), intentos: Number(fila.Intentos), error: fila.MensajeError || null } });
+  } catch (error) {
+    console.error('Error en GET /api/pagos/:id/boleta:', error?.code || error?.name || 'Error');
+    res.status(500).json({ error: 'No se pudo consultar la boleta.' });
+  }
+});
+
+// Solicita o reintenta la emisión de la boleta de una cuota ya pagada.
+router.post('/pagos/:id/boleta', requiereRol('Administrador'), async (req, res) => {
+  const idPago = idPositivo(req.params.id);
+  const idAcademia = idAcademiaActor(req);
+  if (!idPago) return res.status(400).json({ error: 'El IdPago no es válido.' });
+  if (!idAcademia) return res.status(401).json({ error: 'La sesión administrativa no es válida.' });
+  if (!facturacionActiva()) {
+    return res.status(503).json({ code: 'FACTURACION_NO_DISPONIBLE', error: 'El servicio de boletas electrónicas no está configurado.' });
+  }
+  try {
+    const [rows] = await consultar(pool, 'sp_boletas_solicitar_admin', [idPago, idAcademia]);
+    if (!rows.length) return res.status(409).json({ error: 'Solo se emite boleta para cuotas pagadas de tu academia.' });
+    if (rows[0].Estado === 'EMITIDA') return res.json({ exito: true, estado: 'EMITIDA', mensaje: 'La boleta ya estaba emitida.' });
+    const resultado = await boletas.emitirBoleta(idPago);
+    if (resultado.emitida) return res.json({ exito: true, estado: 'EMITIDA', numero: resultado.numeroCompleto || null });
+    if (resultado.motivo === 'EN_CURSO' || resultado.motivo === 'SIN_RESERVA') {
+      return res.status(202).json({ exito: false, estado: 'EMITIENDO', mensaje: 'La boleta se está emitiendo; consulta en unos segundos.' });
+    }
+    return res.status(502).json({ exito: false, estado: 'ERROR', error: resultado.error || 'No se pudo emitir la boleta.' });
+  } catch (error) {
+    console.error('Error en POST /api/pagos/:id/boleta:', error?.code || error?.name || 'Error');
+    res.status(500).json({ error: 'No se pudo solicitar la boleta.' });
   }
 });
 

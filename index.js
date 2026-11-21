@@ -55,7 +55,23 @@ app.use(cors(corsOptions));
 // ============================================================
 // 3. WEBHOOK MERCADO PAGO
 // Público y montado antes del candado JWT. La firma HMAC autentica el evento.
-const mercadopagoWebhook = require("./routes/mercadopago-webhook.routes");
+// Si la configuración de pagos es inválida, solo las rutas de pago responden 503;
+// el resto de la plataforma sigue funcionando.
+function rutasDePago(ruta) {
+  try {
+    return require(ruta);
+  } catch (error) {
+    if (!error?.code || !/^(CONFIG_|PROVEEDOR_|ENTORNO_|MONEDA_|REFERENCIA_|TITULO_|MERCADOPAGO_)/.test(error.code)) throw error;
+    console.error(`Pagos online desactivados (${error.code}): ${error.message}`);
+    const codigo = error.code;
+    return (req, res) => res.status(503).json({
+      code: "PASARELA_NO_CONFIGURADA",
+      detalle: codigo,
+      error: "El pago online no está configurado en el servidor.",
+    });
+  }
+}
+const mercadopagoWebhook = rutasDePago("./routes/mercadopago-webhook.routes");
 app.use("/api/webhooks", express.json({ limit: "32kb" }), mercadopagoWebhook);
 
 // ============================================================
@@ -135,7 +151,7 @@ app.use("/api", verificarToken);
 // Gestión de ciclos
 app.use("/api/admin/ciclos", require("./routes/admin-ciclos.routes"));
 // Panel de transacciones online, auditoría y conciliación (antes del router general /api/admin).
-app.use("/api/admin/pagos", require("./routes/admin-pagos.routes"));
+app.use("/api/admin/pagos", rutasDePago("./routes/admin-pagos.routes"));
 
 // Dashboard administrativo
 app.use("/api/admin", require("./routes/dashboard.routes"));
@@ -177,7 +193,7 @@ app.use("/api/alumno", require("./routes/alumno.routes"));
 
 // Checkout de cuotas mediante Mercado Pago.
 // Se registra UNA SOLA VEZ y después del JWT.
-app.use("/api/alumno", require("./routes/alumno-checkout.routes"));
+app.use("/api/alumno", rutasDePago("./routes/alumno-checkout.routes"));
 
 // Materiales académicos
 app.use("/api/materiales", require("./routes/materiales.routes"));
@@ -208,6 +224,9 @@ app.use(require("./middlewares/error.middleware"));
 const server = app.listen(port, () => {
   console.log(`AcadeSys API escuchando en el puerto ${server.address().port}`);
 });
+
+// Reintenta en segundo plano las boletas electrónicas que quedaron con error.
+require("./services/boletas.service").iniciarReintentos();
 
 module.exports = {
   app,

@@ -19,6 +19,7 @@ router.use(requiereRol('Alumno', 'Estudiante'));
 
 const { idPositivo, rollbackSeguro } = require('../utils/validaciones');
 const { consultar, ejecutar } = require('../config/procedimientos');
+const { enviarArchivoBoleta, formatoSolicitado, boletaPublica } = require('../utils/boleta-archivo');
 const {
   normalizarReferenciaPago,
   normalizarUrlComprobante,
@@ -228,6 +229,37 @@ router.post('/pagos/:idPago/comprobante', async (req, res) => {
     return res.status(500).json({ error: 'No se pudo registrar el comprobante.' });
   } finally {
     if (connection) connection.release();
+  }
+});
+
+// GET /api/alumno/boletas — boletas electrónicas de las cuotas del alumno.
+router.get('/boletas', async (req, res) => {
+  const idUsuario = idUsuarioSesion(req);
+  const idAcademia = idAcademiaSesion(req);
+  if (!idUsuario || !idAcademia) return res.status(401).json({ error: 'La sesión del alumno no es válida.' });
+  try {
+    const [rows] = await consultar(pool, 'sp_boletas_listar_alumno', [idUsuario, idAcademia]);
+    res.json({ boletas: rows.map(boletaPublica) });
+  } catch (error) {
+    if (error?.code === 'ER_NO_SUCH_TABLE' || error?.code === 'ER_SP_DOES_NOT_EXIST') return res.json({ boletas: [] });
+    console.error('Error en GET /api/alumno/boletas:', error?.code || error?.name || 'Error');
+    res.status(500).json({ error: 'No se pudieron cargar las boletas.' });
+  }
+});
+
+// GET /api/alumno/pagos/:idPago/boleta?formato=pdf|xml — descarga la boleta propia.
+router.get('/pagos/:idPago/boleta', async (req, res) => {
+  const idPago = idPositivo(req.params.idPago);
+  const idUsuario = idUsuarioSesion(req);
+  const idAcademia = idAcademiaSesion(req);
+  if (!idPago) return res.status(400).json({ error: 'El IdPago no es válido.' });
+  if (!idUsuario || !idAcademia) return res.status(401).json({ error: 'La sesión del alumno no es válida.' });
+  try {
+    const [rows] = await consultar(pool, 'sp_boletas_obtener_archivo_alumno', [idPago, idUsuario, idAcademia]);
+    return enviarArchivoBoleta(res, rows[0], formatoSolicitado(req));
+  } catch (error) {
+    console.error('Error en GET /api/alumno/pagos/:idPago/boleta:', error?.code || error?.name || 'Error');
+    res.status(500).json({ error: 'No se pudo descargar la boleta.' });
   }
 });
 

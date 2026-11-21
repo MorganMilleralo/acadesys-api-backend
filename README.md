@@ -1,6 +1,6 @@
 # AcadeSys API
 
-API REST de **AcadeSys**, plataforma de gestión para academias preuniversitarias: catálogo de ciclos, matrícula en línea, intranet del alumno, gestión académica (notas, asistencia, materiales), pagos con Culqi y Tutor IA.
+API REST de **AcadeSys**, plataforma de gestión para academias preuniversitarias: catálogo de ciclos, matrícula en línea, intranet del alumno, gestión académica (notas, asistencia, materiales), pagos con Mercado Pago, boleta electrónica SUNAT y Tutor IA.
 
 - **Stack:** Node.js 18+, Express 5, MySQL 8 (`mysql2`), JWT, bcrypt.
 - **Despliegue:** Render (despliegue automático desde `main`) con base de datos MySQL en Aiven.
@@ -33,7 +33,7 @@ Para una base de datos nueva, ejecutar `database/esquema_inicial.sql`, después 
 config/        Conexión MySQL, llamada a procedimientos, CORS y carpetas de archivos
 middlewares/   Autenticación JWT, roles, cierre de actas y manejo de errores
 routes/        Endpoints agrupados por módulo
-services/      Integración con Culqi y lógica de transacciones de pago
+services/      Integración con Mercado Pago, boletas electrónicas (fact_api) y transacciones de pago
 utils/         Reglas de negocio reutilizables (precios, capacidad, escalas, validaciones)
 database/      Esquema inicial, migraciones y procedimientos almacenados
 scripts/       Pruebas, verificaciones y tareas programadas
@@ -52,7 +52,8 @@ La API no contiene consultas SQL. Toda la lectura y escritura en MySQL (CRUD, re
 | `alumno.sql` | Intranet del alumno |
 | `auth.sql`, `recuperacion.sql` | Inicio de sesión, registro y recuperación de contraseña |
 | `comunicados.sql`, `menu.sql`, `perfil.sql`, `usuario.sql` | Comunicados, menús, perfiles y usuarios |
-| `matriculas.sql`, `pagos.sql`, `cuotas.sql`, `transacciones.sql` | Matrícula, pagos manuales, cuotas mensuales y pagos con Culqi |
+| `matriculas.sql`, `pagos.sql`, `cuotas.sql`, `transacciones.sql` | Matrícula, pagos manuales, cuotas mensuales y pagos con Mercado Pago |
+| `boletas.sql` | Boleta electrónica SUNAT de cada cuota pagada |
 | `materiales.sql`, `notas.sql`, `actas.sql`, `dashboard.sql`, `tutor_ia.sql` | Materiales, notas, cierre de actas, dashboard y Tutor IA |
 
 - Los nombres siguen el formato `sp_<modulo>_<accion>_<entidad>`, por ejemplo `sp_academico_registrar_curso`.
@@ -67,8 +68,8 @@ La API no contiene consultas SQL. Toda la lectura y escritura en MySQL (CRUD, re
 | Autenticación y recuperación de contraseña | `/api/login`, `/api/auth/recuperar-password` | Público |
 | Catálogo y matrícula | `/api/ciclos`, `/api/matriculas` | Público |
 | Intranet del alumno | `/api/alumno` | Alumno |
-| Pagos del alumno (Culqi) | `/api/alumno/pagos` | Alumno |
-| Webhook de Culqi | `/api/webhooks/culqi` | Culqi (Basic Auth) |
+| Pagos del alumno (Mercado Pago) y boletas | `/api/alumno/pagos`, `/api/alumno/boletas` | Alumno |
+| Webhook de Mercado Pago | `/api/webhooks/mercadopago` | Mercado Pago (firma HMAC) |
 | Administración de ciclos, pagos y dashboard | `/api/admin/...` | Administrador |
 | Aulas, cursos, horarios, asignaciones y asistencia | `/api/aulas`, `/api/cursos`, `/api/horarios`, `/api/asignaciones`, `/api/asistencias` | Personal académico |
 | Notas y cierre de actas | `/api/notas`, `/api/actas` | Personal académico |
@@ -95,3 +96,8 @@ npm test
 ```
 
 Las pruebas sustituyen MySQL y los servicios externos por dobles locales, por lo que pueden ejecutarse en cualquier equipo sin credenciales.
+
+## Boleta electrónica SUNAT
+
+Cuando una cuota queda pagada (Mercado Pago confirmado o comprobante aprobado), la API emite una boleta (tipo 03) en el servicio [fact_api](https://github.com/angelitosystems/fact_api) y guarda el PDF y el XML en `BoletaElectronica`. La emisión ocurre después de confirmar el pago y nunca lo bloquea: si el servicio falla, la boleta queda en `ERROR` y se reintenta cada 10 minutos (máximo 5 intentos). El alumno la descarga desde `GET /api/alumno/pagos/:idPago/boleta`; la administración la consulta, descarga o reintenta en `GET|POST /api/pagos/:id/boleta`. La configuración y el despliegue están en `docs/FACTURACION_SUNAT.md`.
+

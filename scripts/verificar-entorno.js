@@ -68,6 +68,19 @@ let mpApiOk = false;
 try { const u = new URL(mpApi); mpApiOk = u.protocol === 'https:' && u.hostname === 'api.mercadopago.com'; } catch { mpApiOk = false; }
 add('MERCADOPAGO_API_BASE_URL', mpApiOk, mpApiOk ? 'API oficial HTTPS' : 'Debe apuntar a https://api.mercadopago.com');
 
+// Boleta electrónica: opcional. Solo se revisa si FACT_API_URL está definido.
+if (text(process.env.FACT_API_URL)) {
+  try {
+    const { obtenerConfiguracionFacturacion } = require('../config/facturacion');
+    obtenerConfiguracionFacturacion();
+    add('FACT_API', true, 'configurado (valores ocultos)');
+  } catch (error) {
+    add('FACT_API', false, error.message);
+  }
+} else {
+  add('FACT_API', true, 'desactivado: no se emitirán boletas electrónicas');
+}
+
 console.log('\nAcadeSys - comprobación del entorno');
 console.log('No se muestran contraseñas, tokens ni URLs secretas.');
 for (const c of checks) console.log(`${c.ok ? 'OK ' : 'REV'} ${c.name}: ${c.detail}`);

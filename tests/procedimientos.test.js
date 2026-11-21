@@ -68,3 +68,59 @@ test('cada procedimiento que usa la API existe en database/procedimientos', () =
     }
   }
 });
+
+// Cuenta los elementos de primer nivel del arreglo literal que recibe cada
+// llamada, para detectar procedimientos cuya firma cambió y el código no.
+function contarArgumentos(fuente, inicio) {
+  let profundidad = 0;
+  let elementos = 0;
+  let hayContenido = false;
+  let comilla = null;
+  for (let i = inicio; i < fuente.length; i += 1) {
+    const c = fuente[i];
+    if (comilla) {
+      if (c === '\\') { i += 1; continue; }
+      if (c === comilla) comilla = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') { comilla = c; hayContenido = true; continue; }
+    if (c === '/' && fuente[i + 1] === '/') { i = fuente.indexOf('\n', i); continue; }
+    if ('([{'.includes(c)) {
+      profundidad += 1;
+      if (profundidad > 1) hayContenido = true;
+      continue;
+    }
+    if (')]}'.includes(c)) {
+      profundidad -= 1;
+      if (profundidad === 0) return elementos + (hayContenido ? 1 : 0);
+      continue;
+    }
+    if (profundidad === 1 && c === ',') {
+      if (hayContenido) elementos += 1;
+      hayContenido = false;
+      continue;
+    }
+    if (profundidad >= 1 && !/\s/.test(c)) hayContenido = true;
+  }
+  return null;
+}
+
+test('cada llamada envía tantos parámetros como declara su procedimiento', () => {
+  const { catalogo } = require('./procedimientos-prueba');
+  const raiz = path.join(__dirname, '..');
+  const llamada = /\b(?:consultar|consultarVarios|ejecutar)\(\s*[\w.]+\s*,\s*['"](sp_[a-z0-9_]+)['"]\s*,\s*\[/g;
+  let revisadas = 0;
+  for (const carpeta of ['routes', 'services', 'utils', 'middlewares', 'scripts']) {
+    for (const archivo of fs.readdirSync(path.join(raiz, carpeta)).filter((f) => f.endsWith('.js'))) {
+      const fuente = fs.readFileSync(path.join(raiz, carpeta, archivo), 'utf8');
+      for (const m of fuente.matchAll(llamada)) {
+        const recibidos = contarArgumentos(fuente, m.index + m[0].length - 1);
+        if (recibidos === null || /\.\.\./.test(fuente.slice(m.index, m.index + 400).split(']')[0])) continue;
+        const esperados = catalogo.get(m[1])?.parametros.length;
+        assert.equal(recibidos, esperados, `${carpeta}/${archivo}: ${m[1]} recibe ${recibidos} parámetros y el procedimiento declara ${esperados}`);
+        revisadas += 1;
+      }
+    }
+  }
+  assert.ok(revisadas > 100, `solo se revisaron ${revisadas} llamadas`);
+});
