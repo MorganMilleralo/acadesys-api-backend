@@ -381,7 +381,8 @@ async function aplicarPagoProveedor(datos) {
         || Number(tx.IdPago) !== Number(cuota.IdPago)
         || Number(tx.IdUsuario) !== Number(cuota.IdUsuario)
         || Number(tx.IdAcademia) !== Number(cuota.IdAcademia)
-        || tx.Proveedor !== proveedorActual) {
+        // El procedimiento ya filtra por proveedor; la columna se compara si viene.
+        || (tx.Proveedor !== undefined && tx.Proveedor !== proveedorActual)) {
       throw errorPago(409, 'TRANSACCION_NO_COINCIDE', 'La orden no corresponde a la transacción y cuota registradas.');
     }
     if ((tx.IdOrdenProveedor && tx.IdOrdenProveedor !== orden)

@@ -202,7 +202,7 @@ CREATE PROCEDURE sp_transacciones_bloquear_transaccion_por_proveedor(
   IN p_referencia_interna VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
 )
 BEGIN
-  SELECT IdTransaccion, IdPago, IdUsuario, IdAcademia, ReferenciaInterna,
+  SELECT IdTransaccion, IdPago, IdUsuario, IdAcademia, ReferenciaInterna, Proveedor,
                 IdOrdenProveedor, Monto, Moneda, Estado, CodigoEstadoProveedor
          FROM PagoTransaccion
          WHERE Proveedor = p_proveedor AND ReferenciaInterna = p_referencia_interna AND EstadoRegistro = 1
