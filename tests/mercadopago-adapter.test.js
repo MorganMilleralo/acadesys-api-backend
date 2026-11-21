@@ -168,3 +168,12 @@ test('rechaza una orden nueva que ya llega procesada y muestra el estado recibid
   t.mock.method(global, 'fetch', async () => jsonResponse({ ...ORDER, status: 'processed', status_detail: 'accredited' }, 201));
   await assert.rejects(adapter.crearOrdenPago(reservation()), /estado inicial \(processed:accredited\)/);
 });
+
+test('una orden creada que aún no se paga se concilia como pendiente', async (t) => {
+  for (const [status, status_detail] of [['created', 'waiting_payment'], ['action_required', 'waiting_transfer'], ['created', undefined]]) {
+    t.mock.method(global, 'fetch', async () => jsonResponse({ ...ORDER, status, status_detail }));
+    const r = await adapter.consultarOrdenVerificada({ orderId: ORDER_ID, referenciaInterna: REFERENCE, monto: 150 });
+    assert.equal(r.estado, 'PENDIENTE', `${status}:${status_detail}`);
+    t.mock.restoreAll();
+  }
+});

@@ -94,17 +94,16 @@ function validarOrdenBasica(order, { orderId, referenciaInterna, monto, moneda }
 function validarEstadoOrden(order) {
   const status = String(order?.status || '').trim().toLowerCase();
   const detail = String(order?.status_detail || '').trim().toLowerCase();
-  if (!status || !detail) return null;
-  const valor = `${status}:${detail}`;
+  if (!status) return null;
+  const valor = `${status}:${detail || 'sin_detalle'}`;
   if (status === 'processed' && detail === 'accredited') return { estadoProveedor: valor, estado: 'APROBADA' };
   if ((status === 'processed' && detail === 'partially_refunded') || (status === 'refunded' && detail === 'refunded')) {
     return { estadoProveedor: valor, estado: 'REEMBOLSADA' };
   }
   if (status === 'failed') return { estadoProveedor: valor, estado: 'RECHAZADA' };
   if (status === 'canceled' && detail === 'canceled') return { estadoProveedor: valor, estado: 'CANCELADA' };
-  if (status === 'created' && detail === 'created') return { estadoProveedor: valor, estado: 'PENDIENTE' };
-  if (status === 'processing' && ['in_process', 'pending_review_manual'].includes(detail)) return { estadoProveedor: valor, estado: 'PENDIENTE' };
-  if (status === 'action_required' && ['waiting_payment', 'waiting_capture'].includes(detail)) return { estadoProveedor: valor, estado: 'PENDIENTE' };
+  // Estados no finales: la orden sigue esperando el pago o procesándolo.
+  if (['created', 'processing', 'action_required'].includes(status)) return { estadoProveedor: valor, estado: 'PENDIENTE' };
   return null;
 }
 
@@ -183,7 +182,8 @@ async function consultarOrdenVerificada({ orderId, referenciaInterna, monto } = 
   const order = await obtenerOrden(orderId, { referenciaInterna, monto });
   const normalizado = validarEstadoOrden(order);
   if (!normalizado) {
-    throw new ErrorPago(409, 'MERCADOPAGO_ESTADO_NO_ADMITIDO', 'La orden tiene un estado que requiere revisión administrativa.', false);
+    const recibido = `${order?.status || 'sin_estado'}:${order?.status_detail || 'sin_detalle'}`.slice(0, 80);
+    throw new ErrorPago(409, 'MERCADOPAGO_ESTADO_NO_ADMITIDO', `La orden tiene un estado que requiere revisión administrativa (${recibido}).`, false);
   }
   const totalCents = aCentimos(order.total_amount);
   const paidCents = aCentimos(order.total_paid_amount);

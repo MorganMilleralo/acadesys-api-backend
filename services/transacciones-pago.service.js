@@ -326,7 +326,7 @@ function estadoInternoMercadoPago(estadoProveedor) {
   if (valor === 'processed:partially_refunded' || valor === 'refunded:refunded') return 'REEMBOLSADA';
   if (valor.startsWith('failed:')) return 'RECHAZADA';
   if (valor === 'canceled:canceled') return 'CANCELADA';
-  if (valor === 'created:created' || valor.startsWith('processing:') || valor.startsWith('action_required:')) return 'PENDIENTE';
+  if (valor.startsWith('created:') || valor.startsWith('processing:') || valor.startsWith('action_required:')) return 'PENDIENTE';
   return null;
 }
 
