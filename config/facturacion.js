@@ -58,7 +58,7 @@ function obtenerConfiguracionFacturacion() {
     branchId: entero('FACT_API_BRANCH_ID', 1, 1, 1000000),
     serie,
     afectacion,
-    timeoutMs: entero('FACT_API_TIMEOUT_MS', 20000, 2000, 60000),
+    timeoutMs: entero('FACT_API_TIMEOUT_MS', 60000, 2000, 90000),
     maxIntentos: entero('FACT_API_MAX_INTENTOS', 5, 1, 20),
     minutosBloqueo: entero('FACT_API_MINUTOS_BLOQUEO', 5, 1, 60),
   });
