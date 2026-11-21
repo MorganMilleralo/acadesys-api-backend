@@ -1,0 +1,179 @@
+openapi: 3.0.3
+info:
+  title: AcadeSys - API de integración de clientes
+  version: "1.0.0"
+  description: >
+    Lectura de los clientes (alumnos) de AcadeSys para aplicativos externos, con
+    confirmaciones de entrega que evitan duplicados en sincronizaciones repetidas.
+    Guía completa en docs/API_INTEGRACION_CLIENTES.md.
+servers:
+  - url: https://acadesys-api.onrender.com/api/integracion/v1
+security:
+  - ClaveApi: []
+paths:
+  /estado:
+    get:
+      summary: Salud del servicio
+      security: []
+      responses:
+        "200":
+          description: Servicio en línea
+  /clientes:
+    get:
+      summary: Lista todos los clientes de la academia
+      parameters:
+        - $ref: "#/components/parameters/Limite"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200": { $ref: "#/components/responses/Lista" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /clientes/pendientes:
+    get:
+      summary: Clientes no confirmados por este aplicativo o modificados desde su confirmación
+      parameters:
+        - $ref: "#/components/parameters/Limite"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200": { $ref: "#/components/responses/Lista" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /clientes/{idCliente}:
+    get:
+      summary: Un cliente
+      parameters:
+        - name: idCliente
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,49}$" }
+      responses:
+        "200":
+          description: Cliente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  datos: { $ref: "#/components/schemas/Cliente" }
+                  meta: { $ref: "#/components/schemas/Meta" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /clientes/confirmaciones:
+    post:
+      summary: Confirma las versiones guardadas (idempotente)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [clientes]
+              properties:
+                clientes:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [idCliente, version]
+                    properties:
+                      idCliente: { type: string }
+                      version: { type: string, pattern: "^[a-f0-9]{64}$" }
+      responses:
+        "200":
+          description: Resultado por cliente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resultados:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        idCliente: { type: string }
+                        resultado: { type: string, enum: [NUEVO, YA_CONFIRMADO, VERSION_DESACTUALIZADA, NO_ENCONTRADO] }
+                        versionVigente: { type: string }
+                  resumen: { type: object, additionalProperties: { type: integer } }
+                  meta: { $ref: "#/components/schemas/Meta" }
+        "400": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    ClaveApi:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  parameters:
+    Limite:
+      name: limite
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Valor de paginacion.siguienteCursor de la respuesta anterior.
+      schema: { type: string, pattern: "^[0-9]{1,10}$" }
+  responses:
+    Lista:
+      description: Página de clientes
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              datos:
+                type: array
+                items: { $ref: "#/components/schemas/Cliente" }
+              paginacion:
+                type: object
+                properties:
+                  limite: { type: integer }
+                  cantidad: { type: integer }
+                  hayMas: { type: boolean }
+                  siguienteCursor: { type: string, nullable: true }
+              meta: { $ref: "#/components/schemas/Meta" }
+    Error:
+      description: Error con código estable
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  codigo: { type: string }
+                  mensaje: { type: string }
+                  detalles: { type: array, items: { type: object } }
+              meta: { $ref: "#/components/schemas/Meta" }
+  schemas:
+    Meta:
+      type: object
+      properties:
+        idSolicitud: { type: string, format: uuid }
+        generadoEn: { type: string, format: date-time }
+        consumidor: { type: string }
+    Cliente:
+      type: object
+      properties:
+        idCliente: { type: string, description: Identificador único y estable }
+        tipoDocumento: { type: string, enum: [DNI], nullable: true }
+        numeroDocumento: { type: string, nullable: true }
+        nombres: { type: string }
+        apellidoPaterno: { type: string, nullable: true }
+        apellidoMaterno: { type: string, nullable: true }
+        nombreCompleto: { type: string }
+        correo: { type: string, nullable: true }
+        celular: { type: string, nullable: true }
+        ciclos: { type: array, items: { type: string } }
+        fechaRegistro: { type: string, format: date-time, nullable: true }
+        version: { type: string, description: SHA-256 de los datos exportados }
+        confirmadoEn: { type: string, format: date-time, nullable: true }

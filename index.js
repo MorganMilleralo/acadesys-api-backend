@@ -74,6 +74,11 @@ function rutasDePago(ruta) {
 const mercadopagoWebhook = rutasDePago("./routes/mercadopago-webhook.routes");
 app.use("/api/webhooks", express.json({ limit: "32kb" }), mercadopagoWebhook);
 
+// API de integración de clientes para aplicativos externos.
+// Montada antes del parser general y del candado JWT: se autentica con clave
+// de API propia, tiene límite de solicitudes y su propio límite de cuerpo.
+app.use("/api/integracion/v1", require("./routes/integracion.routes"));
+
 // ============================================================
 // 4. PARSERS Y ARCHIVOS ESTÁTICOS
 // ============================================================
@@ -150,6 +155,8 @@ app.use("/api", verificarToken);
 
 // Gestión de ciclos
 app.use("/api/admin/ciclos", require("./routes/admin-ciclos.routes"));
+// Claves de la API de integración de clientes.
+app.use("/api/admin/integraciones", require("./routes/admin-integraciones.routes"));
 // Panel de transacciones online, auditoría y conciliación (antes del router general /api/admin).
 app.use("/api/admin/pagos", rutasDePago("./routes/admin-pagos.routes"));
 

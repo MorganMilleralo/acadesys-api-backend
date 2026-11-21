@@ -54,6 +54,7 @@ La API no contiene consultas SQL. Toda la lectura y escritura en MySQL (CRUD, re
 | `comunicados.sql`, `menu.sql`, `perfil.sql`, `usuario.sql` | Comunicados, menús, perfiles y usuarios |
 | `matriculas.sql`, `pagos.sql`, `cuotas.sql`, `transacciones.sql` | Matrícula, pagos manuales, cuotas mensuales y pagos con Mercado Pago |
 | `boletas.sql` | Boleta electrónica SUNAT de cada cuota pagada |
+| `integracion.sql` | API de integración de clientes para aplicativos externos |
 | `materiales.sql`, `notas.sql`, `actas.sql`, `dashboard.sql`, `tutor_ia.sql` | Materiales, notas, cierre de actas, dashboard y Tutor IA |
 
 - Los nombres siguen el formato `sp_<modulo>_<accion>_<entidad>`, por ejemplo `sp_academico_registrar_curso`.
@@ -100,4 +101,11 @@ Las pruebas sustituyen MySQL y los servicios externos por dobles locales, por lo
 ## Boleta electrónica SUNAT
 
 Cuando una cuota queda pagada (Mercado Pago confirmado o comprobante aprobado), la API emite una boleta (tipo 03) en el servicio [fact_api](https://github.com/angelitosystems/fact_api) y guarda el PDF y el XML en `BoletaElectronica`. La emisión ocurre después de confirmar el pago y nunca lo bloquea: si el servicio falla, la boleta queda en `ERROR` y se reintenta cada 10 minutos (máximo 5 intentos). El alumno la descarga desde `GET /api/alumno/pagos/:idPago/boleta`; la administración la consulta, descarga o reintenta en `GET|POST /api/pagos/:id/boleta`. La configuración y el despliegue están en `docs/FACTURACION_SUNAT.md`.
+
+## API de integración de clientes
+
+Otros aplicativos pueden leer los clientes (alumnos) de AcadeSys en `/api/integracion/v1` con una clave de API,
+y confirmar cuáles guardaron para no recibir duplicados en sincronizaciones repetidas. Guía para el equipo
+consumidor: `docs/API_INTEGRACION_CLIENTES.md`; especificación: `docs/api-integracion-clientes.openapi.yaml`.
+Las claves las crea un administrador en `POST /api/admin/integraciones`.
 
